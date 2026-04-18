@@ -1,60 +1,29 @@
+# https://github.com/liej6799/rk3588/blob/main/rknn-ctypes/add.py
+
 import ctypes
 import os 
 import rockchip as rk
 import mmap
 import fcntl
-_libc = ctypes.CDLL("libc.so.6")
-_libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
-_libc.mmap.restype = ctypes.c_void_p
-_libc.munmap.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-_libc.munmap.restype = ctypes.c_int
 
 class FileIOInterface:
     def __init__(self, path: str = "", flags: int = os.O_RDONLY, fd: int | None = None):
         self.path: str = path
         self.fd: int = fd or os.open(path, flags)
     
-    def __del__(self):
-        if hasattr(self, 'fd'):
-            os.close(self.fd)
-    
     def ioctl(self, request, arg):
         return fcntl.ioctl(self.fd, request, arg)
-    
-    def mmap(self, start, sz, prot, flags, offset):
-        return FileIOInterface._mmap(start, sz, prot, flags, self.fd, offset)
-    
-    def read(self, size=None, binary=False, offset=None):
-        if offset is not None:
-            self.seek(offset)
-        with open(self.fd, "rb" if binary else "r", closefd=False) as file:
-            return file.read(size)
-    
-    def write(self, content, binary=False, offset=None):
-        if offset is not None:
-            self.seek(offset)
-        with open(self.fd, "wb" if binary else "w", closefd=False) as file:
-            file.write(content)
-    
-    def seek(self, offset):
-        os.lseek(self.fd, offset, os.SEEK_SET)
-    
-    @staticmethod
-    def _mmap(start, sz, prot, flags, fd, offset):
-        x = _libc.mmap(start, sz, prot, flags, fd, offset)
-        if x == 0xffffffffffffffff:
-            raise OSError(f"Failed to mmap {sz} bytes: {os.strerror(ctypes.get_errno())}")
-        return x
 
-    @staticmethod
-    def munmap(buf, sz):
-        return _libc.munmap(buf, sz)
-
+# Step 1: Initialize DRM interface to NPU device
 fd_ctl = FileIOInterface(f"/dev/dri/card1", os.O_RDWR)
+
+# Step 2: Allocate memory buffers (regcmd, input, weights, output) using RKNPU memory management
 
 # Allocate regcmd, input, weights, output buffers and print their dma addresses
 
 # npu_regs from addreg.cpp, as Python list of uint64_t
+# Step 3: Configure NPU registers with physical memory addresses
+
 npu_regs = [
   0x10010000000e4004, # 0
   0x20010000000e5004, # 1
@@ -173,11 +142,15 @@ npu_regs[5] = npu_regs[5] | ((output_dma & 0xFFFFFFFF) << 16)
 for i in range(len(npu_regs)):
     regcmd[i] = npu_regs[i]
 
+# Step 4: Fill input and weights buffers with test data
+
 for i in range(50):
     inputs[i] = 1
     weights[i] = 5
 
 
+
+# Step 5: Set up RKNPU task structure with operation configuration
 
 tasks[0].flags  = 0;
 tasks[0].op_idx = 4;
@@ -202,6 +175,8 @@ print("  regcfg_offset:", tasks[0].regcfg_offset)
 print("  regcmd_addr:", hex(tasks[0].regcmd_addr) if hasattr(tasks[0], "regcmd_addr") else tasks[0].regcmd_addr)
 
 
+# Step 6: Submit the task to NPU for execution
+
 submit_res = rk.struct_rknpu_submit(
         flags=rk.RKNPU_JOB_PC | rk.RKNPU_JOB_BLOCK | rk.RKNPU_JOB_PINGPONG,
         timeout=6000,
@@ -209,7 +184,7 @@ submit_res = rk.struct_rknpu_submit(
         task_number=1,
         task_counter=0,
         priority=0,
-        task_obj_addr=tasks_mem_create.obj_addr,  # Placeholder, would be actual address in real code
+        task_obj_addr=tasks_mem_create.obj_addr,  
         regcfg_obj_addr=0,
         task_base_addr=0,
         user_data=0,
@@ -225,6 +200,8 @@ submit_res = rk.struct_rknpu_submit(
 res = rk.DRM_IOCTL_RKNPU_SUBMIT(fd_ctl,   
         __payload=submit_res
 )
+
+# Step 7: Read and verify output results
 
 for i in range(50):
     print(outputs[i])

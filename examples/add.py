@@ -54,21 +54,6 @@ class FileIOInterface:
     def mmap(self, start, sz, prot, flags, offset):
         return FileIOInterface._mmap(start, sz, prot, flags, self.fd, offset)
     
-    def read(self, size=None, binary=False, offset=None):
-        if offset is not None:
-            self.seek(offset)
-        with open(self.fd, "rb" if binary else "r", closefd=False) as file:
-            return file.read(size)
-    
-    def write(self, content, binary=False, offset=None):
-        if offset is not None:
-            self.seek(offset)
-        with open(self.fd, "wb" if binary else "w", closefd=False) as file:
-            file.write(content)
-    
-    def seek(self, offset):
-        os.lseek(self.fd, offset, os.SEEK_SET)
-    
     @staticmethod
     def _mmap(start, sz, prot, flags, fd, offset):
         x = _libc.mmap(start, sz, prot, flags, fd, offset)
