@@ -1,6 +1,5 @@
 from fcntl import ioctl
-import os, mmap
-import ctypes
+import ctypes, os, mmap, struct
 RKNPU_MEM_KERNEL_MAPPING = 8
 RKNPU_MEM_NON_CACHEABLE = 0
 
@@ -163,7 +162,7 @@ npu_regs = [
     (0x1001 << 48) | (0x48000002 << 16) | 0x4010,  # REG_DPU_DATA_FORMAT: precision=float16
     (0x1001 << 48) | (0x00070007 << 16) | 0x403c,  # REG_DPU_DATA_CUBE_CHANNEL: channel=7
     (0x1001 << 48) | (0x00000000 << 16) | 0x4030,  # REG_DPU_DATA_CUBE_WIDTH: width=0
-    (0x1001 << 48) | (0x108202c0 << 16) | 0x4070,  # REG_DPU_EW_CFG: ew_cvt_type, ew_data_mode, ew_alu_algo
+    (0x1001 << 48) | (0x108003c4 << 16) | 0x4070,  # REG_DPU_EW_CFG: ew_op_type=1 (MUL), is_cvt_bypass=1
     
     # RDMA configuration registers
     (0x2001 << 48) | (0x00000000 << 16) | 0x500c,  # REG_DPU_RDMA_RDMA_DATA_CUBE_WIDTH: width=0
@@ -184,8 +183,8 @@ npu_regs = [
 for i in range(len(npu_regs)):
     regcmd[i] = npu_regs[i]
 for i in range(8):
-    inputs[i] = 3 
-    weights[i] = 5
+    inputs[i] = struct.unpack('<H', struct.pack('<e', 3.0))[0]
+    weights[i] = struct.unpack('<H', struct.pack('<e', 5.0))[0]
 
 tasks[0].flags  = 0;
 tasks[0].op_idx = 4;
@@ -201,4 +200,6 @@ ret = submit(tasks_mem_create.obj_addr)
 print(f"SUBMIT ret={ret}")
 
 for i in range(8):
-    print(outputs[i])
+    val = outputs[i]
+    f = struct.unpack('<e', struct.pack('<H', val))[0]
+    print(f"output[{i}]={hex(val)} = {f}")

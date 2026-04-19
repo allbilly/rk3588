@@ -263,6 +263,7 @@ class RockchipProgram:
         
         for i in range(len(self.q)):
             regcmd[i] = self.q[i]
+            print(hex(regcmd[i]))
         
         tasks[0].flags = 0
         tasks[0].op_idx = 4
@@ -333,11 +334,6 @@ class RockchipProgram:
                 self.reg(self.output_buf.meta.dma_addr,
                         rk.DPU_DST_BASE_ADDR_DST_BASE_ADDR__SHIFT,
                         rk.DPU_DST_BASE_ADDR_DST_BASE_ADDR__MASK))
-            val = 0x1001fffe10004020 | ((self.output_buf.meta.dma_addr & 0xFFFFFFFF) << 16)
-            val = 0x1001000000004020 | ((self.output_buf.meta.dma_addr & 0xFFFFFFFF) << 16)
-            print(hex(self.q[-1]))
-            print(hex(val))
-            assert self.q[-1] == val
 
             self.emit_raw(rk.DPU_RDMA, rk.REG_DPU_RDMA_RDMA_SRC_BASE_ADDR,
                 self.reg(self.input_buf.meta.dma_addr,

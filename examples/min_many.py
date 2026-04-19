@@ -1,6 +1,5 @@
 from fcntl import ioctl
-import os, mmap
-import ctypes
+import ctypes, os, mmap, struct
 RKNPU_MEM_KERNEL_MAPPING = 8
 RKNPU_MEM_NON_CACHEABLE = 0
 
@@ -105,6 +104,42 @@ class rknpu_submit(ctypes.Structure):
         ("subcore_task", rknpu_subcore_task * 5),
     ]
 
+RKNPU_ACT_RESET = 1
+
+class rknpu_action(ctypes.Structure):
+    _fields_ = [
+        ("flags", ctypes.c_uint32),
+        ("value", ctypes.c_uint32),
+    ]
+
+DRM_IOCTL_RKNPU_ACTION = _IOWR('d', 0x40, ctypes.sizeof(rknpu_action))
+
+RKNPU_MEM_SYNC_TO_DEVICE = 1
+RKNPU_MEM_SYNC_FROM_DEVICE = 2
+
+class rknpu_mem_sync(ctypes.Structure):
+    _fields_ = [
+        ("flags", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
+        ("obj_addr", ctypes.c_uint64),
+        ("offset", ctypes.c_uint64),
+        ("size", ctypes.c_uint64),
+    ]
+
+DRM_IOCTL_RKNPU_MEM_SYNC = _IOWR('d', 0x46, ctypes.sizeof(rknpu_mem_sync))
+
+def mem_sync(fd, obj_addr, size, flags):
+    sync = rknpu_mem_sync(flags=flags, reserved=0, obj_addr=obj_addr, offset=0, size=size)
+    ret = ioctl(fd, DRM_IOCTL_RKNPU_MEM_SYNC, sync)
+    print(f"mem_sync ret={ret}, flags={flags}")
+    return ret
+
+def reset_npu(fd):
+    action = rknpu_action(flags=RKNPU_ACT_RESET, value=0)
+    ret = ioctl(fd, DRM_IOCTL_RKNPU_ACTION, action)
+    print(f"reset_npu ret={ret}")
+    return ret
+
 
 def mem_allocate(fd, size, flags=0):
     mem_create = rknpu_mem_create(
@@ -113,7 +148,6 @@ def mem_allocate(fd, size, flags=0):
     )
     ret = ioctl(fd, DRM_IOCTL_RKNPU_MEM_CREATE, mem_create)
     print(f"ret={ret}, handle={mem_create.handle}, obj_addr={mem_create.obj_addr:#x}, dma_addr={mem_create.dma_addr:#x}")
-    
     # Map memory to access from userspace
     mem_map = rknpu_mem_map(handle=mem_create.handle)
     ioctl(fd, DRM_IOCTL_RKNPU_MEM_MAP, mem_map)
@@ -163,19 +197,19 @@ npu_regs = [
     (0x1001 << 48) | (0x48000002 << 16) | 0x4010,  # REG_DPU_DATA_FORMAT: precision=float16
     (0x1001 << 48) | (0x00070007 << 16) | 0x403c,  # REG_DPU_DATA_CUBE_CHANNEL: channel=7
     (0x1001 << 48) | (0x00000000 << 16) | 0x4030,  # REG_DPU_DATA_CUBE_WIDTH: width=0
-    (0x1001 << 48) | (0x108202c0 << 16) | 0x4070,  # REG_DPU_EW_CFG: ew_cvt_type, ew_data_mode, ew_alu_algo
-    
+    (0x1001 << 48) | (0x108003c4 << 16) | 0x4070,  # REG_DPU_EW_CFG: ew_op_type=1 (MUL), is_cvt_bypass=1
+
     # RDMA configuration registers
     (0x2001 << 48) | (0x00000000 << 16) | 0x500c,  # REG_DPU_RDMA_RDMA_DATA_CUBE_WIDTH: width=0
     (0x2001 << 48) | (0x00000000 << 16) | 0x5010,  # REG_DPU_RDMA_RDMA_DATA_CUBE_HEIGHT: height=0
     (0x2001 << 48) | (0x00000007 << 16) | 0x5014,  # REG_DPU_RDMA_RDMA_DATA_CUBE_CHANNEL: channel=7
     (0x2001 << 48) | (0x40000008 << 16) | 0x5034,  # REG_DPU_RDMA_RDMA_ERDMA_CFG: erdma_data_mode=1, erdma_data_size=2
-    
+
     # DMA address registers (dynamic)
     (0x1001 << 48) | ((output_mem_create.dma_addr & 0xFFFFFFFF) << 16) | 0x4020,  # REG_DPU_DST_BASE_ADDR
     (0x2001 << 48) | ((input_mem_create.dma_addr & 0xFFFFFFFF) << 16)  | 0x5018,  # REG_DPU_RDMA_RDMA_SRC_BASE_ADDR
     (0x2001 << 48) | ((weight_mem_create.dma_addr & 0xFFFFFFFF) << 16) | 0x5038,  # REG_DPU_RDMA_RDMA_EW_BASE_ADDR
-    
+
     # Task completion and padding
     (0x2001 << 48) | (0x00017849 << 16) | 0x5044,  # REG_DPU_RDMA_RDMA_FEATURE_MODE_CFG
     (0x0081 << 48) | (0x00000018 << 16) | 0x0008,  # REG_PC_OPERATION_ENABLE
@@ -184,8 +218,8 @@ npu_regs = [
 for i in range(len(npu_regs)):
     regcmd[i] = npu_regs[i]
 for i in range(8):
-    inputs[i] = 3 
-    weights[i] = 5
+    inputs[i] = struct.unpack('<H', struct.pack('<e', 3.0))[0]
+    weights[i] = struct.unpack('<H', struct.pack('<e', 5.0))[0]
 
 tasks[0].flags  = 0;
 tasks[0].op_idx = 4;
@@ -197,8 +231,11 @@ tasks[0].regcfg_amount = len(npu_regs)
 tasks[0].regcfg_offset = 0;
 tasks[0].regcmd_addr = regcmd_mem_create.dma_addr
 
+reset_npu(fd)
 ret = submit(tasks_mem_create.obj_addr)
 print(f"SUBMIT ret={ret}")
 
 for i in range(8):
-    print(outputs[i])
+    val = outputs[i]
+    f = struct.unpack('<e', struct.pack('<H', val))[0]
+    print(f"output[{i}]={hex(val)} = {f}")
