@@ -413,7 +413,23 @@ if __name__ == "__main__":
         else:
             print("MUL TEST FAILED")
             print(f"  Difference: {np.abs(result_mul_arr - expected_mul)}")
-        
+
+        print("\n" + "=" * 60)
+        print("Testing SUB operation...")
+        print("=" * 60)
+        result_sub = prog.run(Ops.SUB, None, [a, b])
+        result_sub_arr = np.array(result_sub, dtype=np.float16)
+        expected_sub = a - b
+
+        print(f"  NPU Output: {result_sub_arr}")
+
+        match_sub = np.allclose(result_sub_arr, expected_sub, atol=0.01)
+        if match_sub:
+            print("SUB TEST PASSED")
+        else:
+            print("SUB TEST FAILED")
+            print(f"  Difference: {np.abs(result_sub_arr - expected_sub)}")
+
     except Exception as e:
         print(f"\n{'=' * 60}")
         print(f"ERROR: {e}")
