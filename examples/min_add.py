@@ -167,9 +167,9 @@ npu_regs = [
     0x2001000000005010,
     0x2001000000075014,
     0x2001400000085034,
-    0x1001000000004020 | ((output_mem_create.dma_addr  & 0xFFFFFFFF) << 16), # val = (0x1001 << 48) | 0x4020 | ((self.output_buf.meta.dma_addr & 0xFFFFFFFF) << 16)
-    0x2001000000005018 | ((input_mem_create.dma_addr& 0xFFFFFFFF) << 16),
-    0x2001000000005038 | ((weight_mem_create.dma_addr & 0xFFFFFFFF) << 16),
+    (0x1001 << 48) | ((output_mem_create.dma_addr & 0xFFFFFFFF) << 16) | 0x4020,
+    (0x2001 << 48) | ((input_mem_create.dma_addr & 0xFFFFFFFF) << 16)  | 0x5018,
+    (0x2001 << 48) | ((weight_mem_create.dma_addr & 0xFFFFFFFF) << 16) | 0x5038,
     0x2001000178495044, 
     0x0081000000180008
 ]
