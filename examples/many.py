@@ -260,6 +260,7 @@ class RockchipProgram:
         
         regcmd = ctypes.cast(self.cmd_buf.va_addr,
                             ctypes.POINTER(ctypes.c_uint64 * self.cmd_buf_size)).contents
+        
         for i in range(len(self.q)):
             regcmd[i] = self.q[i]
         
@@ -332,6 +333,12 @@ class RockchipProgram:
                 self.reg(self.output_buf.meta.dma_addr,
                         rk.DPU_DST_BASE_ADDR_DST_BASE_ADDR__SHIFT,
                         rk.DPU_DST_BASE_ADDR_DST_BASE_ADDR__MASK))
+            val = 0x1001fffe10004020 | ((self.output_buf.meta.dma_addr & 0xFFFFFFFF) << 16)
+            val = 0x1001000000004020 | ((self.output_buf.meta.dma_addr & 0xFFFFFFFF) << 16)
+            print(hex(self.q[-1]))
+            print(hex(val))
+            assert self.q[-1] == val
+
             self.emit_raw(rk.DPU_RDMA, rk.REG_DPU_RDMA_RDMA_SRC_BASE_ADDR,
                 self.reg(self.input_buf.meta.dma_addr,
                         rk.DPU_RDMA_RDMA_SRC_BASE_ADDR_SRC_BASE_ADDR__SHIFT,
