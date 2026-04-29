@@ -1,5 +1,12 @@
 # rk3588 Documentation
 
+## TODO
+
+- test openrockchip kernel driver merged in kernel 6.18
+- merge my rk3588 npu knowledge to mesa
+
+## What is rk3588
+
 rk3588 is a NVDLA like NPU designed for convulution.
 
 To submit a compute job to the NPU using ioctl
