@@ -1,6 +1,7 @@
 from fcntl import ioctl
-import os, mmap
+import os, mmap, sys
 import ctypes, struct
+import numpy as np
 RKNPU_MEM_KERNEL_MAPPING = 8
 RKNPU_MEM_NON_CACHEABLE = 0
 RKNPU_ACT_RESET = 1
@@ -73,47 +74,6 @@ class struct_rknpu_task(ctypes.Structure):
         ("regcmd_addr", ctypes.c_uint64),
     ]
 
-class rknpu_mem_create(ctypes.Structure):
-    _fields_ = [
-        ("handle", ctypes.c_uint32),
-        ("flags", ctypes.c_uint32),
-        ("size", ctypes.c_uint64),
-        ("obj_addr", ctypes.c_uint64),
-        ("dma_addr", ctypes.c_uint64),
-        ("sram_size", ctypes.c_uint64),
-    ]
-
-class rknpu_mem_map(ctypes.Structure):
-    _fields_ = [
-        ("handle", ctypes.c_uint32),
-        ("reserved", ctypes.c_uint32),
-        ("offset", ctypes.c_uint64),
-    ]
-
-class rknpu_subcore_task(ctypes.Structure):
-    _fields_ = [
-        ("task_start", ctypes.c_uint32),
-        ("task_number", ctypes.c_uint32),
-    ]
-
-class rknpu_submit(ctypes.Structure):
-    _fields_ = [
-        ("flags", ctypes.c_uint32),
-        ("timeout", ctypes.c_uint32),
-        ("task_start", ctypes.c_uint32),
-        ("task_number", ctypes.c_uint32),
-        ("task_counter", ctypes.c_uint32),
-        ("priority", ctypes.c_int32),
-        ("task_obj_addr", ctypes.c_uint64),
-        ("regcfg_obj_addr", ctypes.c_uint64),
-        ("task_base_addr", ctypes.c_uint64),
-        ("user_data", ctypes.c_uint64),
-        ("core_mask", ctypes.c_uint32),
-        ("fence_fd", ctypes.c_int32),
-        ("subcore_task", rknpu_subcore_task * 5),
-    ]
-
-
 def mem_allocate(fd, size, flags=0):
     mem_create = rknpu_mem_create(
         flags=flags, #0x10 | 0x2,  # KERNEL_MAPPING | NON_CACHEABLE
@@ -176,9 +136,6 @@ output_map, output_mem_create = mem_allocate(fd, size=4194304, flags=RKNPU_MEM_N
 
 tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
 regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
-inputs = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(input_map)), ctypes.POINTER(ctypes.c_uint16))
-weights = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(weight_map)), ctypes.POINTER(ctypes.c_uint16))
-outputs = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), ctypes.POINTER(ctypes.c_uint16))
 
 
 def run_op(ew_cfg_val, a_vals, b_vals, neg_op=False, fdiv_op=False):
@@ -209,10 +166,15 @@ def run_op(ew_cfg_val, a_vals, b_vals, neg_op=False, fdiv_op=False):
         regcmd[i] = 0
     for i in range(len(npu_regs)):
         regcmd[i] = npu_regs[i]
-    for i in range(n):
-        inputs[i] = struct.unpack('<H', struct.pack('<e', float(a_vals[i])))[0]
-        w = -1.0 if neg_op else float(b_vals[i])
-        weights[i] = struct.unpack('<H', struct.pack('<e', w))[0]
+
+    a_packed = np.array(a_vals, dtype=np.float16).view(np.uint16)
+    ct_inputs = (ctypes.c_uint16 * n).from_buffer(input_map)
+    ct_inputs[:] = a_packed.tolist()
+
+    w_vals = np.full(n, -1.0, dtype=np.float16) if neg_op else np.array(b_vals, dtype=np.float16)
+    w_packed = w_vals.view(np.uint16)
+    ct_weights = (ctypes.c_uint16 * n).from_buffer(weight_map)
+    ct_weights[:] = w_packed.tolist()
 
     tasks[0].flags  = 0;
     tasks[0].op_idx = 4;
@@ -228,30 +190,40 @@ def run_op(ew_cfg_val, a_vals, b_vals, neg_op=False, fdiv_op=False):
     ret = submit(tasks_mem_create.obj_addr)
     print(f"SUBMIT ret={ret}")
 
-    result = []
-    for i in range(n):
-        val = outputs[i]
-        f = struct.unpack('<e', struct.pack('<H', val))[0]
-        result.append(f)
-    return result
+    return np.frombuffer(output_map, dtype=np.float16, count=n).copy().tolist()
 
+
+OPS = {
+    "ADD":  (EW_CFG_ADD, lambda a, b: a + b,       {}),
+    "MUL":  (EW_CFG_MUL, lambda a, b: a * b,       {}),
+    "SUB":  (EW_CFG_SUB, lambda a, b: a - b,       {}),
+    "MAX":  (EW_CFG_MAX, lambda a, b: np.maximum(a, b), {}),
+    "NEG":  (EW_CFG_NEG, lambda a, _: -a,          {"neg_op": True}),
+    "FDIV": (_EW_BASE | (3 << 16) | (1 << 8), lambda a, b: a / b, {"fdiv_op": True}),
+}
 
 if __name__ == "__main__":
-    import numpy as np
     a = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], dtype=np.float16)
     b = np.array([8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0], dtype=np.float16)
     c = np.array([2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0], dtype=np.float16)
 
-    for op_name, ew_cfg_val, b_vals, expected_fn, kw in [
-        ("ADD", EW_CFG_ADD, b, lambda: a + b, {}),
-        ("MUL", EW_CFG_MUL, b, lambda: a * b, {}),
-        ("SUB", EW_CFG_SUB, b, lambda: a - b, {}),
-        ("MAX", EW_CFG_MAX, c, lambda: np.maximum(a, c), {}),
-        ("NEG", EW_CFG_NEG, b, lambda: -a, {"neg_op": True}),
-        ("FDIV", _EW_BASE | (3 << 16) | (1 << 8), c, lambda: a / c, {"fdiv_op": True}),
-    ]:
-        r = run_op(ew_cfg_val=ew_cfg_val, a_vals=a, b_vals=b_vals, **kw)
+    b_vals_map = {"ADD": b, "MUL": b, "SUB": b, "MAX": c, "NEG": b, "FDIV": c}
+
+    mode = sys.argv[1].upper() if len(sys.argv) > 1 else "ALL"
+
+    if mode == "ALL":
+        run_list = list(OPS.items())
+    elif mode in OPS:
+        run_list = [(mode, OPS[mode])]
+    else:
+        print(f"Unknown mode '{mode}'. Options: ALL, {', '.join(OPS.keys())}")
+        sys.exit(1)
+
+    for op_name, (ew_cfg_val, expected_fn, kw) in run_list:
+        r = run_op(ew_cfg_val=ew_cfg_val, a_vals=a, b_vals=b_vals_map[op_name], **kw)
         r_arr = np.array(r, dtype=np.float16)
-        expected = expected_fn()
+        expected = expected_fn(a, b_vals_map[op_name])
         match = np.allclose(r_arr, expected, atol=0.1)
         print(f"{op_name:4s} NPU={r_arr} expected={expected} {'PASS' if match else 'FAIL'}")
+
+    os.close(fd)
