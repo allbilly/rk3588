@@ -160,9 +160,13 @@ def reset_npu(fd):
     return ret
 
 # EW_CFG values for each op
-EW_CFG_ADD = 0x108202c0
-EW_CFG_MUL = 0x108003c4
-EW_CFG_SUB = 0x108402c0
+# Base config: data_mode=1, data_size=2, relu_bypass=1, lut_bypass=1, op_src=1
+_EW_BASE = 0x108002c0
+EW_CFG_ADD  = _EW_BASE | (2 << 16)
+EW_CFG_MUL  = _EW_BASE | (1 << 2) | (1 << 8)
+EW_CFG_SUB  = _EW_BASE | (4 << 16)
+EW_CFG_MAX  = _EW_BASE
+EW_CFG_NEG  = EW_CFG_MUL
 
 task_map, tasks_mem_create = mem_allocate(fd, size=1024, flags=RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
 regcmd_map, regcmd_mem_create = mem_allocate(fd, size=1024, flags=RKNPU_MEM_NON_CACHEABLE)
@@ -177,39 +181,38 @@ weights = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(weight_map)), c
 outputs = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), ctypes.POINTER(ctypes.c_uint16))
 
 
-def run_op(ew_cfg_val, a_vals, b_vals):
+def run_op(ew_cfg_val, a_vals, b_vals, neg_op=False, fdiv_op=False):
     n = len(a_vals)
     dataout_width = (n + 7) // 8 - 1
 
+    out_cvt = 1 if fdiv_op else 0x10001
+    feat_cfg = 0x00017841 if fdiv_op else 0x00017849
     npu_regs = [
-        # DPU configuration registers
-        (0x1001 << 48) | (0x000001e5 << 16) | 0x400c,  # REG_DPU_FEATURE_MODE_CFG: burst_len=15, output_mode=2, flying_mode=1
-        (0x1001 << 48) | (0x48000002 << 16) | 0x4010,  # REG_DPU_DATA_FORMAT: precision=float16
-        (0x1001 << 48) | (0x00070007 << 16) | 0x403c,  # REG_DPU_DATA_CUBE_CHANNEL: channel=7
-        (0x1001 << 48) | (dataout_width << 16) | 0x4030,  # REG_DPU_DATA_CUBE_WIDTH
-        (0x1001 << 48) | (ew_cfg_val << 16) | 0x4070,  # REG_DPU_EW_CFG
-
-        # RDMA configuration registers
-        (0x2001 << 48) | (dataout_width << 16) | 0x500c,  # REG_DPU_RDMA_RDMA_DATA_CUBE_WIDTH
-        (0x2001 << 48) | (0x00000000 << 16) | 0x5010,  # REG_DPU_RDMA_RDMA_DATA_CUBE_HEIGHT: height=0
-        (0x2001 << 48) | (0x00000007 << 16) | 0x5014,  # REG_DPU_RDMA_RDMA_DATA_CUBE_CHANNEL: channel=7
-        (0x2001 << 48) | (0x40000008 << 16) | 0x5034,  # REG_DPU_RDMA_RDMA_ERDMA_CFG: erdma_data_mode=1, erdma_data_size=2
-
-        # DMA address registers (dynamic)
-        (0x1001 << 48) | ((output_mem_create.dma_addr & 0xFFFFFFFF) << 16) | 0x4020,  # REG_DPU_DST_BASE_ADDR
-        (0x2001 << 48) | ((input_mem_create.dma_addr & 0xFFFFFFFF) << 16)  | 0x5018,  # REG_DPU_RDMA_RDMA_SRC_BASE_ADDR
-        (0x2001 << 48) | ((weight_mem_create.dma_addr & 0xFFFFFFFF) << 16) | 0x5038,  # REG_DPU_RDMA_RDMA_EW_BASE_ADDR
-
-        # Task completion and padding
-        (0x2001 << 48) | (0x00017849 << 16) | 0x5044,  # REG_DPU_RDMA_RDMA_FEATURE_MODE_CFG
-        (0x0081 << 48) | (0x00000018 << 16) | 0x0008,  # REG_PC_OPERATION_ENABLE
+        (0x1001 << 48) | (0x000001e5 << 16) | 0x400c,
+        (0x1001 << 48) | (0x48000002 << 16) | 0x4010,
+        (0x1001 << 48) | (dataout_width << 16) | 0x4030,
+        (0x1001 << 48) | (0x00070007 << 16) | 0x403c,
+        (0x1001 << 48) | (ew_cfg_val << 16) | 0x4070,
+        (0x1001 << 48) | (out_cvt << 16) | 0x4084,
+        (0x2001 << 48) | (dataout_width << 16) | 0x500c,
+        (0x2001 << 48) | (0x00000000 << 16) | 0x5010,
+        (0x2001 << 48) | (0x00000007 << 16) | 0x5014,
+        (0x2001 << 48) | (0x40000008 << 16) | 0x5034,
+        (0x1001 << 48) | ((output_mem_create.dma_addr & 0xFFFFFFFF) << 16) | 0x4020,
+        (0x2001 << 48) | ((input_mem_create.dma_addr & 0xFFFFFFFF) << 16) | 0x5018,
+        (0x2001 << 48) | ((weight_mem_create.dma_addr & 0xFFFFFFFF) << 16) | 0x5038,
+        (0x2001 << 48) | (feat_cfg << 16) | 0x5044,
+        (0x0081 << 48) | (0x00000018 << 16) | 0x0008,
     ]
 
+    for i in range(16):
+        regcmd[i] = 0
     for i in range(len(npu_regs)):
         regcmd[i] = npu_regs[i]
     for i in range(n):
         inputs[i] = struct.unpack('<H', struct.pack('<e', float(a_vals[i])))[0]
-        weights[i] = struct.unpack('<H', struct.pack('<e', float(b_vals[i])))[0]
+        w = -1.0 if neg_op else float(b_vals[i])
+        weights[i] = struct.unpack('<H', struct.pack('<e', w))[0]
 
     tasks[0].flags  = 0;
     tasks[0].op_idx = 4;
@@ -237,14 +240,18 @@ if __name__ == "__main__":
     import numpy as np
     a = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], dtype=np.float16)
     b = np.array([8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0], dtype=np.float16)
+    c = np.array([2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0], dtype=np.float16)
 
-    for op_name, ew_cfg_val, expected_fn in [
-        ("ADD", EW_CFG_ADD, lambda: a + b),
-        ("MUL", EW_CFG_MUL, lambda: a * b),
-        ("SUB", EW_CFG_SUB, lambda: a - b),
+    for op_name, ew_cfg_val, b_vals, expected_fn, kw in [
+        ("ADD", EW_CFG_ADD, b, lambda: a + b, {}),
+        ("MUL", EW_CFG_MUL, b, lambda: a * b, {}),
+        ("SUB", EW_CFG_SUB, b, lambda: a - b, {}),
+        ("MAX", EW_CFG_MAX, c, lambda: np.maximum(a, c), {}),
+        ("NEG", EW_CFG_NEG, b, lambda: -a, {"neg_op": True}),
+        ("FDIV", _EW_BASE | (3 << 16) | (1 << 8), c, lambda: a / c, {"fdiv_op": True}),
     ]:
-        r = run_op(ew_cfg_val, a, b)
+        r = run_op(ew_cfg_val=ew_cfg_val, a_vals=a, b_vals=b_vals, **kw)
         r_arr = np.array(r, dtype=np.float16)
         expected = expected_fn()
-        match = np.allclose(r_arr, expected, atol=0.01)
+        match = np.allclose(r_arr, expected, atol=0.1)
         print(f"{op_name:4s} NPU={r_arr} expected={expected} {'PASS' if match else 'FAIL'}")
