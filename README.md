@@ -1,6 +1,8 @@
 # rk3588 Documentation
 
-⚠️ Documentations still WIP. For now u can read the code at examples/elementwise.py or [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/allbilly/rk3588) (it has up to 1 week delay)
+⚠️ Documentations still WIP. 
+- For now u can read the code at examples/elementwise.py or [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/allbilly/rk3588) (it has up to 1 week delay)
+- Aim to write details document as my [ane](https://github.com/allbilly/ane) repo
 
 ## TODO
 
