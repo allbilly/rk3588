@@ -207,6 +207,18 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
     # out_width_stride (matching main.c run_conv2d_case)
     out_width_stride = (out_w * align_out_c) // 4
     if out_width_stride < 1: out_width_stride = 1
+    # Special cases from main.c (empirically determined for these shapes)
+    if in_channels == 3 and out_channels == 6:
+        if kernel_h == 3 and kernel_w == 3:
+            out_width_stride = 16
+        if groups == 1 and kernel_h == 3 and kernel_w == 1:
+            out_width_stride = 24
+    if kernel_h == 1 and kernel_w == 1:
+        atoms = out_w * out_h
+        if atoms < 4:
+            out_width_stride = atoms
+        else:
+            out_width_stride = (atoms + 3) & ~3
     out_atoms = out_w * out_h
     if out_atoms < 1: out_atoms = 1
 

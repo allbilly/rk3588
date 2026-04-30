@@ -390,19 +390,20 @@ if __name__ == "__main__":
     else:
         print("=== RUNNING ON NPU ===")
 
-        print("\n64x64x64:")
-        np.random.seed(42)
-        a = np.random.randn(64, 64).astype(np.float16)
-        b = np.random.randn(64, 64).astype(np.float16)
-        r = run_gemm(64, 64, 64, a, b)
-        expected = a @ b
-        print(f"  PASS: {np.allclose(r, expected, atol=0.1)}" if r is not None else "  SKIP")
-
-        print("\n2x2x1:")
-        a2 = np.array([[1, 2], [3, 4]], dtype=np.float16)
-        b2 = np.array([[5, 6], [7, 8]], dtype=np.float16)
-        r = run_gemm(2, 2, 1, a2, b2)
-        expected = a2 @ b2
-        print(f"  PASS: {np.allclose(r, expected, atol=0.1)}" if r is not None else "  SKIP")
+        for m, n, k in [(2, 2, 1), (8, 8, 8), (9, 9, 9), (64, 64, 64)]:
+            if m == 2 and n == 2 and k == 1:
+                a = np.array([[1, 2], [3, 4]], dtype=np.float16)
+                b = np.array([[5, 6], [7, 8]], dtype=np.float16)
+            else:
+                np.random.seed(42)
+                a = np.random.randn(m, k).astype(np.float16)
+                b = np.random.randn(k, n).astype(np.float16)
+            print(f"\n{m}x{n}x{k}:")
+            r = run_gemm(m, n, k, a, b)
+            expected = a @ b
+            if r is not None:
+                ok = np.allclose(r, expected, atol=0.1)
+                md = np.max(np.abs(r - expected))
+                print(f"  {'PASS' if ok else 'FAIL'} (max_diff={md:.4f})")
 
     os.close(fd)
