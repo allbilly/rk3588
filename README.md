@@ -1,9 +1,11 @@
 # rk3588 Documentation
 
+⚠️ Documentations still WIP. For now u can read the code at examples/elementwise.py or [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/allbilly/rk3588) (it has up to 1 week delay)
+
 ## TODO
 
-- test openrockchip kernel driver merged in kernel 6.18
-- merge my rk3588 npu knowledge to mesa
+- test openrockchip kernel driver merged in kernel 6.18 thanks to [Tomeu Vizoso](https://blog.tomeuvizoso.net/2025/07/rockchip-npu-update-6-we-are-in-mainline.html)
+- PR my rk3588 npu knowledge to [mesa](https://gitlab.freedesktop.org/mesa/mesa)
 
 ## What is rk3588
 
