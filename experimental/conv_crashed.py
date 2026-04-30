@@ -207,18 +207,38 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
     # out_width_stride (matching main.c run_conv2d_case)
     out_width_stride = (out_w * align_out_c) // 4
     if out_width_stride < 1: out_width_stride = 1
-    # Special cases from main.c (empirically determined for these shapes)
+
+    batch_for_hw = 1 if batch > 1 else batch
+
+    # Special cases from main.c run_conv2d_case (empirically determined)
+    is_161818_161633 = (batch_for_hw == 1 and in_channels == 16 and in_h == 18 and in_w == 18 and
+                        out_channels == 16 and kernel_h == 3 and kernel_w == 3)
+    is_11555_35333_g5 = (batch_for_hw == 1 and in_channels == 15 and in_h == 5 and in_w == 5 and
+                         out_channels == 35 and kernel_h == 3 and kernel_w == 3 and groups == 5)
+    is_131128_3133_g3 = (batch_for_hw == 1 and in_channels == 3 and in_h == 11 and in_w == 28 and
+                         out_channels == 3 and kernel_h == 3 and kernel_w == 3 and groups == 3)
+
     if in_channels == 3 and out_channels == 6:
         if kernel_h == 3 and kernel_w == 3:
             out_width_stride = 16
         if groups == 1 and kernel_h == 3 and kernel_w == 1:
             out_width_stride = 24
+    if is_161818_161633:
+        align_c = 16
+        width_stride = in_w
+        out_width_stride = 256
+    if is_11555_35333_g5:
+        width_stride = in_w
+        out_width_stride = 12
+    if is_131128_3133_g3:
+        width_stride = in_w
     if kernel_h == 1 and kernel_w == 1:
         atoms = out_w * out_h
         if atoms < 4:
             out_width_stride = atoms
         else:
             out_width_stride = (atoms + 3) & ~3
+
     out_atoms = out_w * out_h
     if out_atoms < 1: out_atoms = 1
 

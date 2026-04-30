@@ -150,6 +150,13 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     align_out = max(32, ((n + 31) // 32) * 32)
 
     is_kn_64 = k == 64 and n == 64
+    is_kn_256 = k == 256 and n == 256
+    is_kn_512 = k == 512 and n == 512
+    is_kn_lg_512 = k > 512 and n > 512
+    is_matmul_768 = m == 1 and k == 768 and n == 768
+    is_matmul_768_2048 = m == 1 and k == 768 and n == 2048
+    is_matmul_2048 = m == 1 and k == 2048 and n == 2048
+    no_group_line_off = is_kn_64 or is_kn_256 or is_kn_512 or is_kn_lg_512 or is_matmul_768 or is_matmul_768_2048 or is_matmul_2048
     data_in_height = m
 
     surf_groups = m // 4
@@ -167,14 +174,21 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     is_matmul_256 = (m == 256 and k == 256 and n == 256)
     dst_surf_stride = 64 if is_matmul_64 else (256 if is_matmul_256 else 1)
     feature_grains = data_in_height + 1
+    if k > 7872:
+        feature_grains = 2
+    elif 128 < k <= 192:
+        feature_grains = data_in_height
+    elif k > 192 and k != 256:
+        denom = align_in * 2
+        grains = (2 * 32768 + denom - 1) // denom
+        grains = (grains + 1) & ~1
+        if grains < 80:
+            grains = 80
+        feature_grains = grains
 
     notch_blocks = min(13, align_out // 32)
     notch_val = 8 * notch_blocks - 1
-    is_kn_64 = (k == 64 and n == 64)
-    is_kn_256 = (k == 256 and n == 256)
-    is_kn_512 = (k == 512 and n == 512)
-    is_kn_lg_512 = (k > 512 and n > 512)
-    if is_kn_64 or is_kn_256 or is_kn_512 or is_kn_lg_512 or k > 7872:
+    if is_kn_64 or is_kn_256 or is_kn_512 or k > 7872:
         notch_val = 0
 
     weight_bytes_per_kernel = align_in * 2
@@ -188,7 +202,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
         t(reg.TARGET_DPU, reg.S_POINTER, (1 << 3) | (1 << 2) | (1 << 1)),
 
         # CNA_CONV_CON1: proc_precision(bits7-9)=2, in_precision(bits4-6)=2
-        t(reg.TARGET_CNA, reg.CNA_CONV_CON1, (2 << 7) | (2 << 4) | ((1 << 29) if not is_kn_64 else 0)),
+        t(reg.TARGET_CNA, reg.CNA_CONV_CON1, (2 << 7) | (2 << 4) | (0 if no_group_line_off else (1 << 29))),
         # CNA_CONV_CON2: feature_grains(bits4-13)
         t(reg.TARGET_CNA, reg.CNA_CONV_CON2, feature_grains << 4),
         # CNA_CONV_CON3: conv_y_stride(bits3-5)=1, conv_x_stride(bits0-2)=1
