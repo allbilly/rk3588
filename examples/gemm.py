@@ -154,13 +154,28 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
 
     surf_groups = m // 4
     line_stride = 4
+    if 32 < k < 512 and k not in (64, 256):
+        line_stride = min(13, (k + 31) // 32) * 4
     surf_stride = (line_stride * (surf_groups - 1) + int(surf_groups == 0)) * int(align_in >= 64)
+    if (32 < k < 64) or (64 < k <= 128) or (128 < k < 256) or (256 < k < 512):
+        surf_stride = 0
 
     fd_bytes = 1 * data_in_height * align_in * 2
-    data_bank = max(1, min(11, (fd_bytes + 32767) // 32768))
+    data_bank = max(1, min(11, (fd_bytes + 32768 - 1) // 32768))
     data_entries = (1 * align_in + 31) // 32
-    dst_surf_stride = 64 if (m == 64 and k == 64 and n == 64) else 1
-    feature_grains = data_in_height
+    is_matmul_64 = (m == 64 and k == 64 and n == 64)
+    is_matmul_256 = (m == 256 and k == 256 and n == 256)
+    dst_surf_stride = 64 if is_matmul_64 else (256 if is_matmul_256 else 1)
+    feature_grains = data_in_height + 1
+
+    notch_blocks = min(13, align_out // 32)
+    notch_val = 8 * notch_blocks - 1
+    is_kn_64 = (k == 64 and n == 64)
+    is_kn_256 = (k == 256 and n == 256)
+    is_kn_512 = (k == 512 and n == 512)
+    is_kn_lg_512 = (k > 512 and n > 512)
+    if is_kn_64 or is_kn_256 or is_kn_512 or is_kn_lg_512 or k > 7872:
+        notch_val = 0
 
     weight_bytes_per_kernel = align_in * 2
     weight_bytes = weight_bytes_per_kernel * align_out
@@ -224,6 +239,8 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
         t(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_0, ((m - 1) << 16) | 0),
         # CORE_DATAOUT_SIZE_1: channel(bits0-15)=align_out-1
         t(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_1, align_out - 1),
+        # CORE reserved register at 0x3030 (must be zeroed)
+        t(reg.TARGET_CORE, 0x3030, 0),
 
         # DPU_WMMA: FEATURE_MODE_CFG: burst_len(bits5-9)=15, output_mode(bits1-2)=2
         t(reg.TARGET_DPU, reg.FEATURE_MODE_CFG, (15 << 5) | (2 << 1)),
@@ -236,8 +253,8 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
         t(reg.TARGET_DPU, reg.DATA_CUBE_WIDTH, 0),
         # DATA_CUBE_HEIGHT(bits0-12)=m-1
         t(reg.TARGET_DPU, reg.DATA_CUBE_HEIGHT, m - 1),
-        # DATA_CUBE_NOTCH(bits16-28/0-12)
-        t(reg.TARGET_DPU, reg.DATA_CUBE_NOTCH, 0),
+        # DATA_CUBE_NOTCH: notch1(bits16-28), notch0(bits0-12)
+        t(reg.TARGET_DPU, reg.DATA_CUBE_NOTCH, (notch_val << 16) | notch_val),
         # DATA_CUBE_CHANNEL: orig(bits16-28)=ao-1, channel(bits0-12)=ao-1
         t(reg.TARGET_DPU, reg.DATA_CUBE_CHANNEL, ((align_out - 1) << 16) | (align_out - 1)),
         # BS_CFG: all bypassed = 0x53
@@ -338,7 +355,7 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
     raw = np.frombuffer(output_map, dtype=np.float32, count=raw_floats).copy()
 
     out = np.empty((m, n), dtype=np.float32)
-    if (m, n, k) == (64, 64, 64):
+    if (m, n, k) in {(64, 64, 64), (256, 256, 256)}:
         c2 = 4
         for col in range(n):
             plane, offset = col // c2, col % c2
