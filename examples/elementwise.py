@@ -1,7 +1,35 @@
 from fcntl import ioctl
 import os, mmap, sys
-import ctypes, struct
+import ctypes
 import numpy as np
+
+class reg:
+    # --- Stream/Target IDs (shifted into bits 48-63) ---
+    TARGET_DPU   = 0x1001   # DPU (Elementwise/DPU unit)
+    TARGET_RDMA  = 0x2001   # RDMA (Read DMA for inputs/weights)
+    TARGET_PC    = 0x0081   # PC (Program Control / operation enable)
+
+    # --- PC (0x0000) ---
+    OPERATION_ENABLE = 0x0008
+
+    # --- DPU (0x4000) ---
+    FEATURE_MODE_CFG = 0x400c   # DPU feature mode config
+    DATA_FORMAT      = 0x4010   # DPU data format config
+    DATA_CUBE_WIDTH = 0x4030   # DPU data cube width
+    DATA_CUBE_CHANNEL= 0x403c   # DPU data cube channel
+    EW_CFG           = 0x4070   # Elementwise config
+    OUT_CVT_SCALE    = 0x4084   # Output conversion scale
+    DST_BASE_ADDR    = 0x4020   # DPU destination base address
+
+    # --- DPU RDMA (0x5000) ---
+    RDMA_DATA_CUBE_WIDTH  = 0x500c   # RDMA data cube width
+    RDMA_DATA_CUBE_HEIGHT = 0x5010   # RDMA data cube height
+    RDMA_DATA_CUBE_CHANNEL= 0x5014   # RDMA data cube channel
+    RDMA_ERDMA_CFG        = 0x5034   # RDMA ERDMA config
+    RDMA_SRC_BASE_ADDR    = 0x5018   # RDMA source base address (input)
+    RDMA_EW_BASE_ADDR    = 0x5038   # RDMA EW base address (weight)
+    RDMA_FEATURE_MODE_CFG = 0x5044   # RDMA feature mode config
+
 RKNPU_MEM_KERNEL_MAPPING = 8
 RKNPU_MEM_NON_CACHEABLE = 0
 RKNPU_ACT_RESET = 1
@@ -145,21 +173,21 @@ def run_op(ew_cfg_val, a_vals, b_vals, neg_op=False, fdiv_op=False):
     out_cvt = 1 if fdiv_op else 0x10001
     feat_cfg = 0x00017841 if fdiv_op else 0x00017849
     npu_regs = [
-        (0x1001 << 48) | (0x000001e5 << 16) | 0x400c,
-        (0x1001 << 48) | (0x48000002 << 16) | 0x4010,
-        (0x1001 << 48) | (dataout_width << 16) | 0x4030,
-        (0x1001 << 48) | (0x00070007 << 16) | 0x403c,
-        (0x1001 << 48) | (ew_cfg_val << 16) | 0x4070,
-        (0x1001 << 48) | (out_cvt << 16) | 0x4084,
-        (0x2001 << 48) | (dataout_width << 16) | 0x500c,
-        (0x2001 << 48) | (0x00000000 << 16) | 0x5010,
-        (0x2001 << 48) | (0x00000007 << 16) | 0x5014,
-        (0x2001 << 48) | (0x40000008 << 16) | 0x5034,
-        (0x1001 << 48) | ((output_mem_create.dma_addr & 0xFFFFFFFF) << 16) | 0x4020,
-        (0x2001 << 48) | ((input_mem_create.dma_addr & 0xFFFFFFFF) << 16) | 0x5018,
-        (0x2001 << 48) | ((weight_mem_create.dma_addr & 0xFFFFFFFF) << 16) | 0x5038,
-        (0x2001 << 48) | (feat_cfg << 16) | 0x5044,
-        (0x0081 << 48) | (0x00000018 << 16) | 0x0008,
+        (reg.TARGET_DPU  << 48) | (0x000001e5 << 16) | reg.FEATURE_MODE_CFG,
+        (reg.TARGET_DPU  << 48) | (0x48000002 << 16) | reg.DATA_FORMAT,
+        (reg.TARGET_DPU  << 48) | (dataout_width << 16) | reg.DATA_CUBE_WIDTH,
+        (reg.TARGET_DPU  << 48) | (0x00070007 << 16) | reg.DATA_CUBE_CHANNEL,
+        (reg.TARGET_DPU  << 48) | (ew_cfg_val << 16) | reg.EW_CFG,
+        (reg.TARGET_DPU  << 48) | (out_cvt << 16) | reg.OUT_CVT_SCALE,
+        (reg.TARGET_RDMA << 48) | (dataout_width << 16) | reg.RDMA_DATA_CUBE_WIDTH,
+        (reg.TARGET_RDMA << 48) | (0x00000000 << 16) | reg.RDMA_DATA_CUBE_HEIGHT,
+        (reg.TARGET_RDMA << 48) | (0x00000007 << 16) | reg.RDMA_DATA_CUBE_CHANNEL,
+        (reg.TARGET_RDMA << 48) | (0x40000008 << 16) | reg.RDMA_ERDMA_CFG,
+        (reg.TARGET_DPU  << 48) | ((output_mem_create.dma_addr & 0xFFFFFFFF) << 16) | reg.DST_BASE_ADDR,
+        (reg.TARGET_RDMA << 48) | ((input_mem_create.dma_addr & 0xFFFFFFFF) << 16) | reg.RDMA_SRC_BASE_ADDR,
+        (reg.TARGET_RDMA << 48) | ((weight_mem_create.dma_addr & 0xFFFFFFFF) << 16) | reg.RDMA_EW_BASE_ADDR,
+        (reg.TARGET_RDMA << 48) | (feat_cfg << 16) | reg.RDMA_FEATURE_MODE_CFG,
+        (reg.TARGET_PC   << 48) | (0x00000018 << 16) | reg.OPERATION_ENABLE,
     ]
 
     for i in range(16):
