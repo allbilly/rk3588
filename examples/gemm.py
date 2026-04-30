@@ -242,7 +242,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
 
     notch_blocks = min(13, align_out // 32)
     notch_val = 8 * notch_blocks - 1
-    if is_kn_64 or is_kn_256 or is_kn_512 or k > 7872:
+    if is_kn_64 or is_kn_256 or is_kn_512 or is_kn_lg_512 or k > 7872:
         notch_val = 0
 
     def E(target, reg_addr, value):
@@ -324,6 +324,17 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
                 kpg, cpg = (nn - 1) // 16, (kk - 1) // 32
                 wt_idx = ((cpg * 32) * 16) + (kpg * 16 * align_in) + ((kk - 1) % 32) + (((nn - 1) % 16) * 32)
                 wt_pack[wt_idx] = b_matrix[kk - 1, nn - 1]
+    elif (m, n, k) == (256, 256, 256):
+        for mm in range(256):
+            for kk in range(256):
+                plane = kk // 8
+                offset = kk % 8
+                in_pack[plane * 256 * 8 + mm * 8 + offset] = a_matrix[mm, kk]
+        for nn in range(256):
+            for kk in range(256):
+                kpg, cpg = nn // 16, kk // 32
+                wt_idx = ((cpg * 32) * 16) + (kpg * 16 * align_in) + (kk % 32) + ((nn % 16) * 32)
+                wt_pack[wt_idx] = b_matrix[kk, nn]
     else:
         in_mat = in_pack.reshape(m, align_in)
         in_mat[:, :min(k, align_in)] = a_matrix[:, :min(k, align_in)]
@@ -395,7 +406,7 @@ if __name__ == "__main__":
         np.array([[5, 6], [7, 8]], dtype=np.float16)),
     ]
     np.random.seed(42)
-    for mnk in [(8, 8, 8), (9, 9, 9), (64, 64, 64)]:
+    for mnk in [(8, 8, 8), (9, 9, 9), (64, 64, 64), (256, 256, 256)]:
         m, n, k = mnk
         a = np.random.randn(m, k).astype(np.float16)
         b = np.random.randn(k, n).astype(np.float16)

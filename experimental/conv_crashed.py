@@ -69,7 +69,7 @@ def mem_sync(fd, obj_addr, offset, size, flags):
     class rknpu_mem_sync(ctypes.Structure):
         _fields_ = [("flags", ctypes.c_uint32), ("obj_addr", ctypes.c_uint64),
                     ("offset", ctypes.c_uint64), ("size", ctypes.c_uint64)]
-    DRM_IOCTL_RKNPU_MEM_SYNC = _IOWR('d', 0x44, ctypes.sizeof(rknpu_mem_sync))
+    DRM_IOCTL_RKNPU_MEM_SYNC = _IOWR('d', 0x45, ctypes.sizeof(rknpu_mem_sync))
     sync = rknpu_mem_sync(flags=flags, obj_addr=obj_addr, offset=offset, size=size)
     ioctl(fd, DRM_IOCTL_RKNPU_MEM_SYNC, sync)
 
@@ -588,8 +588,18 @@ def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1
     out_mv = memoryview(bytearray(packed_output_size))
     ctypes.memmove(mv_address(out_mv), ctypes.addressof(ctypes.c_char.from_buffer(out_map)), packed_output_size)
     out_packed = np.frombuffer(out_mv.tobytes(), dtype=np.float16).copy()
-    result = unpack_nc1hwc2_fp16(out_packed, p['batch'], p['out_channels'], p['out_h'], p['out_w'], p['align_out_c'], p['out_width_stride'])
-    return result.reshape(p['batch'], p['out_channels'], p['out_h'], p['out_w']), \
+
+    # NPU output is NC1HWC2 with c2=8, 1x1 kernels flatten H*W into W.
+    unpack_c2 = 8 if p['align_out_c'] >= 8 else p['align_out_c']
+    is_1x1 = (p['kernel_h'] == 1 and p['kernel_w'] == 1)
+    if is_1x1:
+        flat_width = p['out_h'] * p['out_w']
+        flat = unpack_nc1hwc2_fp16(out_packed, p['batch'], p['out_channels'], 1, flat_width, unpack_c2, p['out_width_stride'])
+        result = flat.reshape(p['batch'], p['out_channels'], p['out_h'], p['out_w'])
+    else:
+        result = unpack_nc1hwc2_fp16(out_packed, p['batch'], p['out_channels'], p['out_h'], p['out_w'], unpack_c2, p['out_width_stride'])
+        result = result.reshape(p['batch'], p['out_channels'], p['out_h'], p['out_w'])
+    return result, \
            input_nchw.reshape(p['batch'], p['in_channels'], p['in_h'], p['in_w']), \
            weight_ochw.reshape(p['out_channels'], p['weight_in_channels'], p['kernel_h'], p['kernel_w'])
 
