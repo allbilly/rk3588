@@ -7,6 +7,10 @@ import rockchip as rk
 
 RKNPU_MEM_KERNEL_MAPPING = 8
 RKNPU_MEM_NON_CACHEABLE = 0
+RKNPU_MEM_CACHEABLE = 2
+RKNPU_MEM_IOMMU = 0x10
+RKNPU_MEM_NON_CONTIGUOUS = 1
+RKNPU_MEM_IOMMU_LIMIT_IOVA_ALIGNMENT = 0x400
 RKNPU_ACT_RESET = 1
 REGCMD_RESERVED = 16384
 NPU_CBUF_BANK_SIZE = 32768
@@ -61,8 +65,19 @@ def mem_allocate(fd, size, flags=0):
     buf = mmap.mmap(fd, mc.size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=mm.offset)
     return buf, mc
 
+def mem_sync(fd, obj_addr, offset, size, flags):
+    class rknpu_mem_sync(ctypes.Structure):
+        _fields_ = [("flags", ctypes.c_uint32), ("obj_addr", ctypes.c_uint64),
+                    ("offset", ctypes.c_uint64), ("size", ctypes.c_uint64)]
+    DRM_IOCTL_RKNPU_MEM_SYNC = _IOWR('d', 0x44, ctypes.sizeof(rknpu_mem_sync))
+    sync = rknpu_mem_sync(flags=flags, obj_addr=obj_addr, offset=offset, size=size)
+    ioctl(fd, DRM_IOCTL_RKNPU_MEM_SYNC, sync)
+
+RKNPU_MEM_SYNC_TO_DEVICE = 1
+RKNPU_MEM_SYNC_FROM_DEVICE = 2
+
 def submit(task_obj_addr):
-    s = rknpu_submit(flags=0x1|0x2, timeout=6000, task_start=0, task_number=1,
+    s = rknpu_submit(flags=0x1, timeout=10000, task_start=0, task_number=1,
                      task_counter=0, priority=0, task_obj_addr=task_obj_addr,
                      iommu_domain_id=0, reserved=0, task_base_addr=0,
                      hw_elapse_time=0, core_mask=0, fence_fd=-1)
@@ -130,17 +145,55 @@ def pack_nc1hwc2_fp16(src, batch, channels, height, width, c2, width_stride):
                     dst[dst_idx] = src[src_idx]
     return dst
 
-def pack_conv_weights_fp16(src, out_c, in_c, kh, kw, c2_out):
+def pack_conv_weights_fp16(src, out_c, in_c, kh, kw, c2_out, groups=1):
+    is_depthwise = (groups == in_c and out_c == in_c)
+    use_depthwise_spatial = is_depthwise and (out_c <= c2_out) and (kh == 3) and (kw == 3)
+    use_kh_major = (
+        (out_c == 6 and in_c == 3 and ((kh == 2 and kw == 1) or (kh == 2 and kw == 3 and groups == 1) or
+                                        (kh == 2 and kw == 5 and groups == 1) or
+                                        (kh == 3 and kw in (1, 3, 5)))) or
+        (out_c == 16 and in_c == 16 and kh == 3 and kw == 3 and groups == 1) or
+        (out_c == 4 and in_c == 4 and kh == 3 and kw == 3 and groups == 1) or
+        (out_c == 6 and in_c == 1 and kh == 3 and kw == 3 and groups == 1))
     spatial_stride = c2_out * ((in_c + c2_out - 1) // c2_out)
-    total = out_c * kh * kw * spatial_stride
+
+    if use_depthwise_spatial:
+        spatial_stride = c2_out
+        dst = np.zeros(out_c * kh * kw * spatial_stride, dtype=np.float16)
+        for kh_idx in range(kh):
+            for kw_idx in range(kw):
+                dst_base = (kh_idx * kw + kw_idx) * spatial_stride
+                for oc in range(out_c):
+                    src_idx = (((oc * in_c + oc) * kh) + kh_idx) * kw + kw_idx
+                    dst[dst_base + oc] = src[src_idx]
+        return dst
+
+    if use_kh_major:
+        out_c_stride = spatial_stride
+        spatial_stride = out_c * out_c_stride
+        dst = np.zeros(kh * kw * spatial_stride, dtype=np.float16)
+        for kh_idx in range(kh):
+            for kw_idx in range(kw):
+                dst_khkw_base = (kh_idx * kw + kw_idx) * spatial_stride
+                for oc in range(out_c):
+                    dst_spatial_base = dst_khkw_base + oc * out_c_stride
+                    for ic in range(in_c):
+                        dst_idx = dst_spatial_base + (ic // c2_out) * c2_out + (ic % c2_out)
+                        src_idx = (((oc * in_c + ic) * kh) + kh_idx) * kw + kw_idx
+                        dst[dst_idx] = src[src_idx]
+        return dst
+
+    kernel_stride = kh * kw * spatial_stride
+    total = out_c * kernel_stride
     dst = np.zeros((total,), dtype=np.float16)
-    for kh_idx in range(kh):
-        for kw_idx in range(kw):
-            base = (kh_idx * kw + kw_idx) * out_c * spatial_stride
-            for oc in range(out_c):
+    for oc in range(out_c):
+        dst_kernel_base = oc * kernel_stride
+        for kh_idx in range(kh):
+            for kw_idx in range(kw):
+                dst_spatial_base = dst_kernel_base + (kh_idx * kw + kw_idx) * spatial_stride
                 for ic in range(in_c):
+                    dst_idx = dst_spatial_base + (ic // c2_out) * c2_out + (ic % c2_out)
                     src_idx = (((oc * in_c + ic) * kh) + kh_idx) * kw + kw_idx
-                    dst_idx = base + oc * spatial_stride + (ic // c2_out) * c2_out + (ic % c2_out)
                     dst[dst_idx] = src[src_idx]
     return dst
 
@@ -486,17 +539,19 @@ def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1
 
     reset_npu(fd)
     task_map, task_mc = mem_allocate(fd, 1024, RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
-    cmd_map, cmd_mc = mem_allocate(fd, 16384, RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
-    in_map, in_mc = mem_allocate(fd, 4194304, RKNPU_MEM_NON_CACHEABLE)
-    wt_map, wt_mc = mem_allocate(fd, 4194304, RKNPU_MEM_NON_CACHEABLE)
-    out_map, out_mc = mem_allocate(fd, 4194304, RKNPU_MEM_NON_CACHEABLE)
+    cmd_map, cmd_mc = mem_allocate(fd, 16384, RKNPU_MEM_NON_CACHEABLE)
+    data_flags = RKNPU_MEM_CACHEABLE | RKNPU_MEM_IOMMU
+    in_map, in_mc = mem_allocate(fd, 4194304, data_flags)
+    wt_alloc = 4194304
+    wt_map, wt_mc = mem_allocate(fd, wt_alloc, RKNPU_MEM_NON_CONTIGUOUS | RKNPU_MEM_CACHEABLE | RKNPU_MEM_IOMMU | RKNPU_MEM_IOMMU_LIMIT_IOVA_ALIGNMENT)
+    out_map, out_mc = mem_allocate(fd, 4194304, data_flags)
 
     np.random.seed(42)
     input_nchw = np.random.randn(p['batch'] * p['in_channels'] * p['in_h'] * p['in_w']).astype(np.float16)
     weight_ochw = np.random.randn(p['out_channels'] * p['weight_in_channels'] * p['kernel_h'] * p['kernel_w']).astype(np.float16)
 
     input_packed = pack_nc1hwc2_fp16(input_nchw, p['batch'], p['in_channels'], p['in_h'], p['in_w'], p['align_c'], p['width_stride'])
-    weight_packed = pack_conv_weights_fp16(weight_ochw, p['out_channels'], p['weight_in_channels'], p['kernel_h'], p['kernel_w'], p['align_c'])
+    weight_packed = pack_conv_weights_fp16(weight_ochw, p['out_channels'], p['weight_in_channels'], p['kernel_h'], p['kernel_w'], p['align_c'], groups)
 
     in_view = memoryview(bytearray(input_packed.tobytes()))
     wt_view = memoryview(bytearray(weight_packed.tobytes()))
@@ -518,6 +573,10 @@ def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1
     tasks[0].regcfg_amount = len(regs_list)
     tasks[0].regcfg_offset = 0
     tasks[0].regcmd_addr = cmd_mc.dma_addr
+
+    mem_sync(fd, wt_mc.obj_addr, 0, wt_alloc, RKNPU_MEM_SYNC_TO_DEVICE)
+    mem_sync(fd, in_mc.obj_addr, 0, packed_input_size, RKNPU_MEM_SYNC_TO_DEVICE)
+    mem_sync(fd, out_mc.obj_addr, 0, packed_output_size, RKNPU_MEM_SYNC_TO_DEVICE)
 
     ret = submit(task_mc.obj_addr)
     print(f"SUBMIT ret={ret}")

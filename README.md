@@ -1,13 +1,43 @@
-# rk3588 Documentation
-
 ⚠️ Documentations still WIP. 
 - For now u can read the code at examples/elementwise.py or [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/allbilly/rk3588) (it has up to 1 week delay)
-- Aim to write details document as my [ane](https://github.com/allbilly/ane) repo
 
-## TODO
+✅ Tested on Official Ubuntu image Orange Pi 1.2.2 Jammy with Linux 6.1.99-rockchip-rk3588 OrangePi 5
+http://www.orangepi.org/html/hardWare/computerAndMicrocontrollers/service-and-support/Orange-pi-5.html
 
+# RK3588 
+
+This repo run ops on RK3588 NPU with pure python and NPU register programming. No RKNN, no ONNX, no compiler, nothing.
+
+# Driver Comparison: rknpu (0.9.8) vs rocket (Linux 6.18)
+
+| Feature | rknpu 0.9.8 (stock OrangePi 6.1.99) | rocket (upstream Linux 6.18) |
+|---|---|---|
+| Kernel location | `drivers/rknpu/` (vendored) | `drivers/accel/rocket/` (upstream) |
+| Build mode | **Builtin** (compiled into kernel) | **Module** (modprobe/rmmod) |
+| Timeout mechanism | Userspace `wait_event_timeout()` with 3-retry loop (best-effort) | DRM scheduler hard timeout, **500ms**, always fires |
+| NPU reset on hang | `rknpu_soft_reset()` — assert/deassert reset lines + IOMMU re-sync | `rocket_core_reset()` — assert/deassert 2 reset lines via reset controller framework |
+| Scheduler recovery | None — soft reset inline in abort path | `drm_sched_stop()` → reset → `drm_sched_start()` |
+| IOMMU cleanup | Manually detach/reattach in soft reset path | Detaches IOMMU group, full cleanup before reset |
+| Module unload on hang | **Impossible** (builtin) | **Possible** (`rmmod rocket`) |
+| Recovery on full hang | **Reboot required** — NPU bus hang + no escape | Likely recoverable via reset + scheduler restart; module reload as last resort |
+| Source | [allbilly/rknpu_driver](https://github.com/allbilly/rknpu_driver) | [torvalds/linux: drivers/accel/rocket/](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/drivers/accel/rocket) |
+
+**Key takeaway:** rknpu 0.9.8 is builtin with no escape hatch — when the NPU hangs hard enough to survive soft reset, reboot is the only option. The rocket driver uses the DRM scheduler's proper timeout framework (kernel-enforced, not userspace), has a cleaner reset path with scheduler restart, and supports module unload as a last resort.
+
+TODO
 - test openrockchip kernel driver merged in kernel 6.18 thanks to [Tomeu Vizoso](https://blog.tomeuvizoso.net/2025/07/rockchip-npu-update-6-we-are-in-mainline.html)
 - PR my rk3588 npu knowledge to [mesa](https://gitlab.freedesktop.org/mesa/mesa)
+- Aim to write details documentation as my [ane](https://github.com/allbilly/ane) repo
+
+# For Normal user
+
+```bash
+python examples/elementwise.py
+python examples/gemm.py
+```
+
+
+# For Reverse Engineer
 
 ## What is rk3588
 

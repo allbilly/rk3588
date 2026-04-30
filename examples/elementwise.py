@@ -5,21 +5,33 @@ import numpy as np
 
 class reg:
     # --- Stream/Target IDs (shifted into bits 48-63) ---
-    TARGET_DPU   = 0x1001   # DPU (Elementwise/DPU unit)
-    TARGET_RDMA  = 0x2001   # RDMA (Read DMA for inputs/weights)
-    TARGET_PC    = 0x0081   # PC (Program Control / operation enable)
+    TARGET_CNA  = 0x0201   # CNA (Convolution/Matrix unit)
+    TARGET_CORE = 0x0801   # CORE (Matrix compute engine)
+    TARGET_DPU  = 0x1001   # DPU (Elementwise/DPU unit)
+    TARGET_RDMA = 0x2001   # RDMA (Read DMA for inputs/weights)
+    TARGET_PC   = 0x0081   # PC (Program Control / operation enable)
 
     # --- PC (0x0000) ---
-    OPERATION_ENABLE = 0x0008
+    OPERATION_ENABLE    = 0x0008   # PC operation enable
 
     # --- DPU (0x4000) ---
-    FEATURE_MODE_CFG = 0x400c   # DPU feature mode config
-    DATA_FORMAT      = 0x4010   # DPU data format config
-    DATA_CUBE_WIDTH = 0x4030   # DPU data cube width
-    DATA_CUBE_CHANNEL= 0x403c   # DPU data cube channel
-    EW_CFG           = 0x4070   # Elementwise config
-    OUT_CVT_SCALE    = 0x4084   # Output conversion scale
-    DST_BASE_ADDR    = 0x4020   # DPU destination base address
+    S_POINTER           = 0x4004   # DPU S pointer config (pp/exec)
+    FEATURE_MODE_CFG    = 0x400c   # DPU feature mode config
+    DATA_FORMAT         = 0x4010   # DPU data format config
+    DST_BASE_ADDR       = 0x4020   # DPU destination base address
+    DST_SURF_STRIDE     = 0x4024   # DPU destination surface stride
+    DATA_CUBE_WIDTH     = 0x4030   # DPU data cube width
+    DATA_CUBE_HEIGHT    = 0x4034   # DPU data cube height
+    DATA_CUBE_NOTCH     = 0x4038   # DPU data cube notch
+    DATA_CUBE_CHANNEL   = 0x403c   # DPU data cube channel
+    BS_CFG              = 0x4040   # DPU batch/norm/scale config
+    BS_OW_CFG           = 0x4050   # DPU batch OW config
+    WDMA_SIZE_0         = 0x4058   # DPU write DMA size 0
+    WDMA_SIZE_1         = 0x405c   # DPU write DMA size 1
+    BN_CFG              = 0x4060   # DPU batch norm config
+    EW_CFG              = 0x4070   # DPU elementwise config
+    OUT_CVT_SCALE       = 0x4084   # DPU output conversion scale
+    SURFACE_ADD         = 0x40c0   # DPU surface add
 
     # --- DPU RDMA (0x5000) ---
     RDMA_DATA_CUBE_WIDTH  = 0x500c   # RDMA data cube width
@@ -29,6 +41,38 @@ class reg:
     RDMA_SRC_BASE_ADDR    = 0x5018   # RDMA source base address (input)
     RDMA_EW_BASE_ADDR    = 0x5038   # RDMA EW base address (weight)
     RDMA_FEATURE_MODE_CFG = 0x5044   # RDMA feature mode config
+
+    # --- CNA (0x1000) ---
+    CNA_CONV_CON1          = 0x100c   # CNA convolution control 1
+    CNA_CONV_CON2          = 0x1010   # CNA convolution control 2 (grains)
+    CNA_CONV_CON3          = 0x1014   # CNA convolution control 3 (stride)
+    CNA_DATA_SIZE0         = 0x1020   # CNA input data size 0
+    CNA_DATA_SIZE1         = 0x1024   # CNA input data size 1 (channel)
+    CNA_DATA_SIZE2         = 0x1028   # CNA output data size 2
+    CNA_DATA_SIZE3         = 0x102c   # CNA output data size 3 (atomics)
+    CNA_WEIGHT_SIZE0       = 0x1030   # CNA weight total size
+    CNA_WEIGHT_SIZE1       = 0x1034   # CNA weight per-kernel size
+    CNA_WEIGHT_SIZE2       = 0x1038   # CNA weight dims (width/height/kernels)
+    CNA_CBUF_CON0          = 0x1040   # CNA CBUF config 0 (banks)
+    CNA_CBUF_CON1          = 0x1044   # CNA CBUF config 1 (entries)
+    CNA_CVT_CON0           = 0x104c   # CNA convert config 0
+    CNA_CVT_CON1           = 0x1050   # CNA convert config 1 (scale)
+    CNA_CVT_CON2           = 0x1054   # CNA convert config 2 (scale)
+    CNA_CVT_CON3           = 0x1058   # CNA convert config 3 (scale)
+    CNA_CVT_CON4           = 0x105c   # CNA convert config 4 (scale)
+    CNA_FEATURE_DATA_ADDR  = 0x1070   # CNA feature data base address
+    CNA_DMA_CON0           = 0x1078   # CNA DMA control 0 (burst)
+    CNA_DMA_CON1           = 0x107c   # CNA DMA control 1 (line stride)
+    CNA_DMA_CON2           = 0x1080   # CNA DMA control 2 (surface stride)
+    CNA_FC_DATA_SIZE0      = 0x1084   # CNA FC data size 0
+    CNA_FC_DATA_SIZE1      = 0x1088   # CNA FC data size 1 (channel)
+    CNA_DCOMP_ADDR0        = 0x1110   # CNA weight decompress address 0
+
+    # --- CORE (0x3000) ---
+    CORE_MISC_CFG          = 0x3010   # CORE misc config
+    CORE_DATAOUT_SIZE_0    = 0x3014   # CORE dataout size 0 (height/width)
+    CORE_DATAOUT_SIZE_1    = 0x3018   # CORE dataout size 1 (channel)
+    CORE_RESERVED_3030     = 0x3030   # CORE reserved (must be zeroed)
 
 RKNPU_MEM_KERNEL_MAPPING = 8
 RKNPU_MEM_NON_CACHEABLE = 0
