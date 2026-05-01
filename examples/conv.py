@@ -494,20 +494,18 @@ def _npu_submit(params, input_nchw, weight_ochw, is_1x1):
             packed_weight_size = params['out_channels'] * params['kernel_h'] * params['kernel_w'] * ((params['weight_in_channels'] + params['align_c'] - 1) // params['align_c']) * params['align_c'] * 2
             weight_packed = pack_conv_weights_fp16(wt_full, params['out_channels'], in_c, kh, kw, params['align_c'], groups=1)
         else:
-            # Depthwise: squash groups like non-dw grouped convs.
-            # Expand weights from (out_c, 1, kh, kw) to (out_c, in_c, kh, kw)
-            # with diagonal sparsity: weight[oc] at (row=oc, col=oc) so only inp[oc]→out[oc].
-            wt_elems = params['out_channels'] * in_c * kh * kw
-            wt_full = np.zeros(wt_elems, dtype=np.float16)
+            # Depthwise: HW reads 1 kernel (weight_bytes_per_kernel bytes) with
+            # data_in_channel_aligned slots. Each slot has kh*kw weights.
+            # Layout: [oc0_khkw, oc1_khkw, ..., ocN_khkw, 0...pad to packed_weight_size]
+            slot_sz = kh * kw
+            n_slots = params['align_c']
+            wt_capacity = packed_weight_size // 2
+            wt_full = np.zeros(wt_capacity, dtype=np.float16)
             for oc in range(params['out_channels']):
-                src_start = oc * ic_per_group * kh * kw
-                dst_start = oc * in_c * kh * kw + oc * kh * kw  # diagonal: row=oc, col=oc
-                wt_full[dst_start:dst_start + kh * kw] = weight_ochw[src_start:src_start + kh * kw]
-            params = dict(params)
-            params['groups'] = 1
-            params['weight_in_channels'] = in_c
-            packed_weight_size = params['out_channels'] * params['kernel_h'] * params['kernel_w'] * ((params['weight_in_channels'] + params['align_c'] - 1) // params['align_c']) * params['align_c'] * 2
-            weight_packed = pack_conv_weights_fp16(wt_full, params['out_channels'], in_c, kh, kw, params['align_c'], groups=1)
+                src_start = oc * ic_per_group * slot_sz
+                dst_start = oc * slot_sz
+                wt_full[dst_start:dst_start + slot_sz] = weight_ochw[src_start:src_start + slot_sz]
+            weight_packed = wt_full
     else:
         weight_packed = pack_conv_weights_fp16(weight_ochw, params['out_channels'], params['in_channels'], params['kernel_h'], params['kernel_w'], params['align_c'], groups=params['groups'])
 
@@ -549,11 +547,11 @@ def _npu_submit(params, input_nchw, weight_ochw, is_1x1):
     out_packed = np.frombuffer(out_map, dtype=np.float16, count=packed_output_size // 2).copy()
 
     unpack_c2 = 8 if params['align_out_c'] >= 8 else params['align_out_c']
-    if is_1x1 and not params.get('is_depthwise', False):
+    if is_1x1:
         flat = unpack_nc1hwc2_fp16(out_packed, params['batch'], params['out_channels'], 1, params['out_h'] * params['out_w'], unpack_c2, params['out_width_stride'])
         result = flat.reshape(params['batch'], params['out_channels'], params['out_h'], params['out_w'])
     else:
-        result = unpack_nc1hwc2_fp16(out_packed, params['batch'], params['out_channels'], params['out_h'], params['out_w'], unpack_c2, params['out_width_stride'])
+        result = unpack_nc1hwc2_fp16(out_packed, params['batch'], params['out_channels'], params['out_h'], params['out_w'], unpack_c2, params['out_w'])
         result = result.reshape(params['batch'], params['out_channels'], params['out_h'], params['out_w'])
     return result
 

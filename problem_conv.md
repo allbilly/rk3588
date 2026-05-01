@@ -12,18 +12,15 @@
 
 ## Active Phases
 
-### Phase 3: Depthwise 1x1 — Under investigation
+### Phase 3: Depthwise (all) — Under investigation
 
-**Shape:** `(32,32,1,1,32,32,32)` — md=10.05
+**Shapes:** dw 3x3 11x28 (previously WARN→PASS), dw 1x1 32ch (md=10)
 
-**Root cause identified:** The `is_1x1 and in_channels >= 5` gate at line 574 incorrectly routes depthwise 1x1 (groups=32) through `_run_conv2d_channel_sliced` which creates a full `(32,32)` weight matrix instead of depthwise. **Fix applied** (add `groups == 1` check). Now flows to normal depthwise path.
+**Root cause (register mismatch):** `weight_bytes_per_kernel = kh*kw*data_in_channel_aligned*2`. For depthwise, `kernel_channel` should be `weight_in_channels = 1`, but `data_in_channel_aligned = align_c = 32` (for 32ch) or 8 (for 3ch). The HW reads 32/8 channels per kernel, but only 1 has real data.
 
-**Remaining issue:** Weight packing produces md=10 even with correct _pack_default layout. Multiple approaches tested:
-1. `_pack_default` with `in_c=1` (original depthwise path) → FAIL
-2. Diagonal expansion + groups=1 (group squash approach) → FAIL  
-3. Different output unpack methods → FAIL
+**Fix approach:** Expand depthwise weights to fill `data_in_channel_aligned` channels, with diagonal sparsity (weight[oc] at column oc). Correct packing layout verified: `wt_full[oc * slot_sz] = weight_ochw[oc]` padded to `align_c * kh * kw` elements.
 
-Likely root cause: CBUF/depthwise register configuration may need additional tuning for 1x1 depthwise. The depthwise 3x3 (kh=3, kw=3) PASSES, but all 1x1 depthwise tests fail regardless of channel count. Suggests depthwise 1x1 has a specific hardware configuration issue (maybe FC_DATA_SIZE or CBUF entries for depthwise 1x1).
+**Blocking issue:** NPU enters bad state after broken submissions. Even simple 1x1 convs return all zeros after a depthwise failure. Requires kernel module reload (`sudo modprobe -r rockchip && sudo modprobe rockchip`) to recover. See Problem 7.
 
 ### Phase 4: ARGB_IN + non-square kernel partial output
 
@@ -34,4 +31,4 @@ Likely root cause: CBUF/depthwise register configuration may need additional tun
 ## Known Limitations (No Fix Planned)
 
 - **Non-1x1 kernels produce partial/numerical output** — Expected HW limitation. Tracked as WARN, not FAIL.
-- **Cross-process isolation** — Run conv/gemm as separate processes.
+- **Cross-process isolation (P7)** — One bad NPU submission corrupts state for ALL subsequent processes, even after `reset_npu()`. Requires kernel module reload to recover.
