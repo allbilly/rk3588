@@ -571,7 +571,7 @@ def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1
     pad_to_c = 3 if (is_1x1 and in_channels < 3) else None
     if pad_to_c: in_channels = pad_to_c
 
-    if is_1x1 and in_channels >= 5 and not pad_to_c:
+    if is_1x1 and in_channels >= 5 and not pad_to_c and groups == 1:
         return _run_conv2d_channel_sliced(out_channels, kernel_h, kernel_w, input_hw, original_in_c, is_1x1)
 
     p = compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups)

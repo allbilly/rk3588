@@ -4,69 +4,76 @@ import ctypes
 import numpy as np
 
 class reg:
-    TARGET_CNA  = 0x0201
-    TARGET_CORE = 0x0801
-    TARGET_DPU  = 0x1001
-    TARGET_RDMA = 0x2001
-    TARGET_PC   = 0x0081
+    # --- Stream/Target IDs (shifted into bits 48-63) ---
+    TARGET_CNA  = 0x0201   # CNA (Convolution/Matrix unit)
+    TARGET_CORE = 0x0801   # CORE (Matrix compute engine)
+    TARGET_DPU  = 0x1001   # DPU (Data Processing Unit)
+    TARGET_RDMA = 0x2001   # RDMA (Read DMA for inputs/weights)
+    TARGET_PC   = 0x0081   # PC (Program Control / operation enable)
 
-    OPERATION_ENABLE    = 0x0008
-    S_POINTER           = 0x4004
-    FEATURE_MODE_CFG    = 0x400c
-    DATA_FORMAT         = 0x4010
-    DST_BASE_ADDR       = 0x4020
-    DST_SURF_STRIDE     = 0x4024
-    DATA_CUBE_WIDTH     = 0x4030
-    DATA_CUBE_HEIGHT    = 0x4034
-    DATA_CUBE_NOTCH     = 0x4038
-    DATA_CUBE_CHANNEL   = 0x403c
-    BS_CFG              = 0x4040
-    BS_OW_CFG           = 0x4050
-    WDMA_SIZE_0         = 0x4058
-    WDMA_SIZE_1         = 0x405c
-    BN_CFG              = 0x4060
-    EW_CFG              = 0x4070
-    OUT_CVT_SCALE       = 0x4084
-    SURFACE_ADD         = 0x40c0
+    # --- PC (0x0000) ---
+    OPERATION_ENABLE    = 0x0008   # PC operation enable
 
-    RDMA_DATA_CUBE_WIDTH  = 0x500c
-    RDMA_DATA_CUBE_HEIGHT = 0x5010
-    RDMA_DATA_CUBE_CHANNEL= 0x5014
-    RDMA_ERDMA_CFG        = 0x5034
-    RDMA_SRC_BASE_ADDR    = 0x5018
-    RDMA_EW_BASE_ADDR    = 0x5038
-    RDMA_FEATURE_MODE_CFG = 0x5044
-    RDMA_DMA_MAP          = 0x504c
+    # --- DPU (0x4000) ---
+    S_POINTER           = 0x4004   # DPU S pointer config (pp/exec)
+    FEATURE_MODE_CFG    = 0x400c   # DPU feature mode config
+    DATA_FORMAT         = 0x4010   # DPU data format config
+    DST_BASE_ADDR       = 0x4020   # DPU destination base address
+    DST_SURF_STRIDE     = 0x4024   # DPU destination surface stride
+    DATA_CUBE_WIDTH     = 0x4030   # DPU data cube width
+    DATA_CUBE_HEIGHT    = 0x4034   # DPU data cube height
+    DATA_CUBE_NOTCH     = 0x4038   # DPU data cube notch
+    DATA_CUBE_CHANNEL   = 0x403c   # DPU data cube channel
+    BS_CFG              = 0x4040   # DPU batch config
+    BS_OW_CFG           = 0x4050   # DPU batch OW config
+    WDMA_SIZE_0         = 0x4058   # DPU write DMA size 0
+    WDMA_SIZE_1         = 0x405c   # DPU write DMA size 1
+    BN_CFG              = 0x4060   # DPU batch norm config
+    EW_CFG              = 0x4070   # DPU elementwise config
+    OUT_CVT_SCALE       = 0x4084   # DPU output conversion scale
+    SURFACE_ADD         = 0x40c0   # DPU surface address addend
 
-    CNA_CONV_CON1          = 0x100c
-    CNA_CONV_CON2          = 0x1010
-    CNA_CONV_CON3          = 0x1014
-    CNA_DATA_SIZE0         = 0x1020
-    CNA_DATA_SIZE1         = 0x1024
-    CNA_DATA_SIZE2         = 0x1028
-    CNA_DATA_SIZE3         = 0x102c
-    CNA_WEIGHT_SIZE0       = 0x1030
-    CNA_WEIGHT_SIZE1       = 0x1034
-    CNA_WEIGHT_SIZE2       = 0x1038
-    CNA_CBUF_CON0          = 0x1040
-    CNA_CBUF_CON1          = 0x1044
-    CNA_CVT_CON0           = 0x104c
-    CNA_CVT_CON1           = 0x1050
-    CNA_CVT_CON2           = 0x1054
-    CNA_CVT_CON3           = 0x1058
-    CNA_CVT_CON4           = 0x105c
-    CNA_FEATURE_DATA_ADDR  = 0x1070
-    CNA_DMA_CON0           = 0x1078
-    CNA_DMA_CON1           = 0x107c
-    CNA_DMA_CON2           = 0x1080
-    CNA_FC_DATA_SIZE0      = 0x1084
-    CNA_FC_DATA_SIZE1      = 0x1088
-    CNA_DCOMP_ADDR0        = 0x1110
+    # --- RDMA (0x5000) ---
+    RDMA_DATA_CUBE_WIDTH  = 0x500c   # RDMA input width
+    RDMA_DATA_CUBE_HEIGHT = 0x5010   # RDMA input height
+    RDMA_DATA_CUBE_CHANNEL= 0x5014   # RDMA input channels
+    RDMA_ERDMA_CFG        = 0x5034   # RDMA ERDMA config
+    RDMA_SRC_BASE_ADDR    = 0x5018   # RDMA source addr (input)
+    RDMA_EW_BASE_ADDR    = 0x5038   # RDMA EW base addr (weights)
+    RDMA_FEATURE_MODE_CFG = 0x5044   # RDMA feature mode config
+    RDMA_DMA_MAP          = 0x504c   # RDMA DMA map
 
-    CORE_MISC_CFG          = 0x3010
-    CORE_DATAOUT_SIZE_0    = 0x3014
-    CORE_DATAOUT_SIZE_1    = 0x3018
-    CORE_RESERVED_3030     = 0x3030
+    # --- CNA (0x1000) ---
+    CNA_CONV_CON1          = 0x100c   # CNA convolution control 1
+    CNA_CONV_CON2          = 0x1010   # CNA convolution control 2 (grains)
+    CNA_CONV_CON3          = 0x1014   # CNA convolution control 3 (stride)
+    CNA_DATA_SIZE0         = 0x1020   # CNA input data size 0
+    CNA_DATA_SIZE1         = 0x1024   # CNA input data size 1 (channel)
+    CNA_DATA_SIZE2         = 0x1028   # CNA data size 2
+    CNA_DATA_SIZE3         = 0x102c   # CNA data size 3 (atomics)
+    CNA_WEIGHT_SIZE0       = 0x1030   # CNA weight total size
+    CNA_WEIGHT_SIZE1       = 0x1034   # CNA weight per-kernel size
+    CNA_WEIGHT_SIZE2       = 0x1038   # CNA weight dims
+    CNA_CBUF_CON0          = 0x1040   # CNA CBUF config 0 (banks)
+    CNA_CBUF_CON1          = 0x1044   # CNA CBUF config 1 (entries)
+    CNA_CVT_CON0           = 0x104c   # CNA convert config 0
+    CNA_CVT_CON1           = 0x1050   # CNA convert config 1 (scale)
+    CNA_CVT_CON2           = 0x1054   # CNA convert config 2 (scale)
+    CNA_CVT_CON3           = 0x1058   # CNA convert config 3 (scale)
+    CNA_CVT_CON4           = 0x105c   # CNA convert config 4 (scale)
+    CNA_FEATURE_DATA_ADDR  = 0x1070   # CNA feature data base addr
+    CNA_DMA_CON0           = 0x1078   # CNA DMA control 0 (burst)
+    CNA_DMA_CON1           = 0x107c   # CNA DMA control 1 (line stride)
+    CNA_DMA_CON2           = 0x1080   # CNA DMA control 2 (surface stride)
+    CNA_FC_DATA_SIZE0      = 0x1084   # CNA FC data size 0
+    CNA_FC_DATA_SIZE1      = 0x1088   # CNA FC data size 1 (channel)
+    CNA_DCOMP_ADDR0        = 0x1110   # CNA weight decompress addr
+
+    # --- CORE (0x3000) ---
+    CORE_MISC_CFG          = 0x3010   # CORE misc config
+    CORE_DATAOUT_SIZE_0    = 0x3014   # CORE data out size 0 (h/w)
+    CORE_DATAOUT_SIZE_1    = 0x3018   # CORE data out size 1 (c)
+    CORE_RESERVED_3030     = 0x3030   # CORE reserved (must be zeroed)
 
 RKNPU_MEM_KERNEL_MAPPING = 8
 RKNPU_MEM_NON_CACHEABLE = 0
@@ -141,8 +148,10 @@ class struct_rknpu_task(ctypes.Structure):
     ]
 
 def mem_allocate(fd, size, flags=0):
+    # Allocate NPU memory via DRM ioctl
     mem_create = rknpu_mem_create(flags=flags, size=size)
     ret = ioctl(fd, DRM_IOCTL_RKNPU_MEM_CREATE, mem_create)
+    # Map to user-space for CPU access
     mem_map = rknpu_mem_map(handle=mem_create.handle)
     ioctl(fd, DRM_IOCTL_RKNPU_MEM_MAP, mem_map)
     buf = mmap.mmap(fd, mem_create.size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=mem_map.offset)
@@ -163,6 +172,7 @@ def submit(task_obj_addr):
         core_mask=1,
         fence_fd=-1,
     )
+    # Only 1 NPU core used; remaining subcore tasks zeroed (struct len is 5 but only 3 cores)
     submit_struct.subcore_task[0] = rknpu_subcore_task(task_start=0, task_number=1)
     submit_struct.subcore_task[1] = rknpu_subcore_task(task_start=1, task_number=0)
     submit_struct.subcore_task[2] = rknpu_subcore_task(task_start=2, task_number=0)
@@ -171,6 +181,7 @@ def submit(task_obj_addr):
     return ioctl(fd, DRM_IOCTL_RKNPU_SUBMIT, submit_struct)
 
 def reset_npu(fd):
+    # Reset NPU hardware state before each submission
     action = rknpu_action(flags=RKNPU_ACT_RESET, value=0)
     return ioctl(fd, DRM_IOCTL_RKNPU_ACTION, action)
 
@@ -184,7 +195,7 @@ tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctype
 regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
 
 # ---------------------------------------------------------------------------
-# Packing dispatch: table of (m,n,k) -> (pack_input, pack_weight, decode_output)
+# Packing dispatch: rule-based (m,n,k) -> (pack_input, pack_weight, decode_output)
 # ---------------------------------------------------------------------------
 
 def pack_input_row_major(m, n, k, a_matrix, in_pack, align_in):
@@ -201,6 +212,8 @@ def pack_weight_tile_16x32(m, n, k, b_matrix, wt_pack, align_in, align_out):
     wt[:n, :k] = b_matrix.T[:n, :k]
     wt_pack[:] = wt.reshape(align_out // 16, 16, align_in // 32, 32).transpose(0, 2, 1, 3).ravel()
 
+
+
 def decode_output_linear(m, n, k, raw, align_out):
     row_start = np.arange(m) * align_out
     return raw[row_start[:, None] + np.arange(n)]
@@ -211,6 +224,7 @@ def decode_output_c2_4(m, n, k, raw, align_out):
 # Hardware constants
 C2_INPUT = 8   # NC1HWC2 channel group size for input (derived from ATOMIC_K_SIZE=32)
 C2_OUTPUT = 4  # NC1HWC2 channel group size for output (DPU formatter atomic width)
+CBUF_BANK_SIZE = 32768  # 2^15 bytes per CBUF bank (CBUF has 2 banks = 65536 total)
 
 def _uses_c2_input(m, n, k):
     return (m, n, k) in ((64, 64, 64), (256, 256, 256))
@@ -240,12 +254,8 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     no_group_line_off = (k == n) and (align_in >= 64)
 
     # CDMA line_stride register (CNA_DMA_CON1): byte_stride = register << 5 (× ATOM_CUBE_SIZE=32).
-    # For packed data (is_line_packed): byte_stride == ATOM_CUBE_SIZE * cube_width = 32 bytes.
-    # For C2=8 NC1HWC2: 4 atoms = 128 bytes (matches M*C2/8 elements per C1-plane chunk for these shapes).
-    # For row-major: burst covers ceil(eff_k/32) atoms of 32 bytes each.
-    line_stride = 4
-    if 32 < eff_k < 512 and not _uses_c2_input(m, n, k):
-        line_stride = min(13, (eff_k + 31) // 32) * 4
+    # 4 = is_line_packed (single atom, 32B). Non-packed: ceil(eff_k/32) atoms × 4, capped at 13.
+    line_stride = 4 if (eff_k <= 32 or eff_k >= 512 or _uses_c2_input(m, n, k)) else min(13, (eff_k + 31) // 32) * 4
 
     # surf_stride: non-zero only for C2=8 NC1HWC2 shapes, where surface groups
     # span multiple C1 planes in CBUF. For all other shapes: 0 (contiguous).
@@ -254,21 +264,21 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     if align_in >= 64 and _uses_c2_input(m, n, k):
         surf_stride = line_stride * (surf_groups - 1) + int(surf_groups == 0)
 
-    input_bytes = 1 * m * align_in * 2
-    data_bank = max(1, min(11, (input_bytes + 32767) // 32768))  # ceiling / 32768; +32767 NOT +32768 (extra bank at exact boundary)
+    input_bytes = m * align_in * 2  # M planes × align_in elements × 2 bytes (fp16)
+    data_bank = max(1, min(11, (input_bytes + CBUF_BANK_SIZE - 1) // CBUF_BANK_SIZE))  # ceil div; +BOFSIZE-1 avoids extra bank at exact boundary
     data_entries = (1 * align_in + 31) // 32
 
     # dst_surf_stride = align_out when k==n (no_group_line_off), else 1
     # is_matmul_64/256 special cases are redundant: align_out==64 for 64x64, 256 for 256x256
     dst_surf_stride = align_out if no_group_line_off else 1
 
-    # feature_grains = CBUF capacity / bytes_per_line, derived from 2 banks (65536 bytes) / (align_in * 2)
+    # feature_grains = CBUF capacity / bytes_per_line, derived from 2 banks (2×CBUF_BANK_SIZE) / (align_in × 2 bytes/fp16)
     feature_grains = m + 1
     if eff_k > 7872:
         feature_grains = 2
     elif m > 80:
         denom = align_in * 2
-        grains = (2 * 32768 + denom - 1) // denom
+        grains = (2 * CBUF_BANK_SIZE + denom - 1) // denom
         grains = (grains + 1) & ~1
         feature_grains = max(80, grains)
 
