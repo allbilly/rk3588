@@ -8,7 +8,34 @@ http://www.orangepi.org/html/hardWare/computerAndMicrocontrollers/service-and-su
 
 This repo run ops on RK3588 NPU with pure python and NPU register programming. No RKNN, no ONNX, no compiler, nothing.
 
-# Driver Comparison: rknpu (0.9.8) vs rocket (Linux 6.18)
+TODO
+- Aim to write details documentation as my [ane](https://github.com/allbilly/ane) repo
+- test openrockchip kernel driver merged in kernel 6.18 thanks to [Tomeu Vizoso](https://blog.tomeuvizoso.net/2025/07/rockchip-npu-update-6-we-are-in-mainline.html)
+- PR my rk3588 npu knowledge to [mesa](https://gitlab.freedesktop.org/mesa/mesa)
+- NVDLA docker simulation
+- multi op in one submit
+
+
+
+
+
+
+# For Normal user
+
+## What is rk3588
+
+rk3588 is a NVDLA like NPU designed for convulution.
+You can send op to npu with pure python.
+
+```bash
+python examples/elementwise.py
+python examples/gemm.py
+python examples/conv.py
+```
+
+# For Developer
+
+## Driver Comparison: rknpu (0.9.8) vs rocket (Linux 6.18)
 
 | Feature | rknpu 0.9.8 (stock OrangePi 6.1.99) | rocket (upstream Linux 6.18) |
 |---|---|---|
@@ -24,24 +51,7 @@ This repo run ops on RK3588 NPU with pure python and NPU register programming. N
 
 **Key takeaway:** rknpu 0.9.8 is builtin with no escape hatch — when the NPU hangs hard enough to survive soft reset, reboot is the only option. The rocket driver uses the DRM scheduler's proper timeout framework (kernel-enforced, not userspace), has a cleaner reset path with scheduler restart, and supports module unload as a last resort.
 
-TODO
-- test openrockchip kernel driver merged in kernel 6.18 thanks to [Tomeu Vizoso](https://blog.tomeuvizoso.net/2025/07/rockchip-npu-update-6-we-are-in-mainline.html)
-- PR my rk3588 npu knowledge to [mesa](https://gitlab.freedesktop.org/mesa/mesa)
-- Aim to write details documentation as my [ane](https://github.com/allbilly/ane) repo
-
-# For Normal user
-
-```bash
-python examples/elementwise.py
-python examples/gemm.py
-```
-
-
-# For Reverse Engineer
-
-## What is rk3588
-
-rk3588 is a NVDLA like NPU designed for convulution.
+## How to submit task to NPU with IOCTL
 
 To submit a compute job to the NPU using ioctl
 ```C

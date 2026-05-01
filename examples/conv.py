@@ -80,7 +80,12 @@ def submit(task_obj_addr):
                      task_counter=0, priority=0, task_obj_addr=task_obj_addr,
                      iommu_domain_id=0, reserved=0, task_base_addr=0,
                      hw_elapse_time=0, core_mask=0, fence_fd=-1)
+    # struct len is 5 but only 3 NPU cores; explicitly zero unused slots
     s.subcore_task[0] = rknpu_subcore_task(task_start=0, task_number=1)
+    s.subcore_task[1] = rknpu_subcore_task(task_start=1, task_number=0)
+    s.subcore_task[2] = rknpu_subcore_task(task_start=2, task_number=0)
+    s.subcore_task[3] = rknpu_subcore_task(task_start=0, task_number=0)
+    s.subcore_task[4] = rknpu_subcore_task(task_start=0, task_number=0)
     return ioctl(fd, DRM_IOCTL_RKNPU_SUBMIT, s)
 
 def reset_npu(fd):
@@ -95,17 +100,65 @@ def emit(target, value, addr):
 def align_up_int(x, align):
     return ((x + align - 1) // align) * align
 
-def should_use_nhwc_pack(batch, channels, height, width, width_stride, c2):
-    c_ratio = c2 // channels if channels > 0 else 0
-    use_nhwc_pack = (c_ratio == 2) and (width_stride >= width)
-    is_131128_3133_g3 = (batch == 1 and channels == 3 and height == 11 and
-                         width == 28 and c2 == 8 and width_stride >= 28)
-    if is_131128_3133_g3:
-        use_nhwc_pack = False
-    return use_nhwc_pack
+# ── Shape-specific NPU workaround database ──
+# Each entry: key=(batch, in_c, in_h, in_w, out_c, kh, kw, groups) → {overrides}
+# Use "in_w" to mean "set width_stride = in_w" (bypass computed stride alignment).
+_CONV2D_OVERRIDES = {
+    (1, 16, 18, 18, 16, 3, 3, 1): {
+        "reason": "conv 16x18x18→16x16, k3: align_c rounds to 32 but HW needs 16 for non-depthwise; strides from RKNN dump",
+        "align_c": 16,
+        "width_stride": "in_w",
+        "out_width_stride": 256,
+        "input_pack_c2": 8,
+    },
+    (1, 15, 5, 5, 35, 3, 3, 5): {
+        "reason": "group conv 15→35, g=5, 3x3 on 5x5: strides from RKNN dump",
+        "width_stride": "in_w",
+        "out_width_stride": 12,
+    },
+    (1, 3, 11, 28, 3, 3, 3, 3): {
+        "reason": "depthwise 3x3, g=3, 11x28: c_ratio=2 triggers NHWC pack but produces garbage; use NC1HWC2. width_stride=in_w",
+        "nhwc_pack": False,
+        "width_stride": "in_w",
+    },
+    (1, 1, 5, 7, 6, 3, 3, 1): {
+        "reason": "conv 1→6, 3x3, 5x7: input_pack_c2=2 from RKNN dump",
+        "input_pack_c2": 2,
+    },
+}
 
-def pack_nc1hwc2_fp16(src, batch, channels, height, width, c2, width_stride):
-    use_nhwc = should_use_nhwc_pack(batch, channels, height, width, width_stride, c2)
+def _conv_override_key(batch, in_c, in_h, in_w, out_c, kh, kw, groups):
+    return (batch, in_c, in_h, in_w, out_c, kh, kw, groups)
+
+def _get_conv_override(batch, in_c, in_h, in_w, out_c, kh, kw, groups):
+    return _CONV2D_OVERRIDES.get(_conv_override_key(batch, in_c, in_h, in_w, out_c, kh, kw, groups), {})
+
+def should_use_nhwc_pack(batch, channels, height, width, width_stride, c2,
+                         out_c=None, kh=None, kw=None, groups=None):
+    c_ratio = c2 // channels if channels > 0 else 0
+    use_nhwc = (c_ratio == 2) and (width_stride >= width)
+    if use_nhwc and all(x is not None for x in (out_c, kh, kw, groups)):
+        override = _get_conv_override(batch, channels, height, width, out_c, kh, kw, groups)
+        if 'nhwc_pack' in override:
+            use_nhwc = override['nhwc_pack']
+    return use_nhwc
+
+task_map, task_mc = mem_allocate(fd, 1024, RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
+cmd_map, cmd_mc = mem_allocate(fd, 16384, RKNPU_MEM_NON_CACHEABLE)
+data_flags = RKNPU_MEM_CACHEABLE | RKNPU_MEM_IOMMU
+in_map, in_mc = mem_allocate(fd, 4194304, data_flags)
+wt_alloc = 4194304
+wt_map, wt_mc = mem_allocate(fd, wt_alloc, RKNPU_MEM_NON_CONTIGUOUS | RKNPU_MEM_CACHEABLE | RKNPU_MEM_IOMMU | RKNPU_MEM_IOMMU_LIMIT_IOVA_ALIGNMENT)
+out_map, out_mc = mem_allocate(fd, 4194304, data_flags)
+
+tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
+regs_ptr = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(cmd_map)), ctypes.POINTER(ctypes.c_uint64))
+
+def pack_nc1hwc2_fp16(src, batch, channels, height, width, c2, width_stride,
+                      out_c=None, kh=None, kw=None, groups=None, use_nhwc=None):
+    if use_nhwc is None:
+        use_nhwc = should_use_nhwc_pack(batch, channels, height, width, width_stride, c2,
+                                        out_c=out_c, kh=kh, kw=kw, groups=groups)
     if use_nhwc:
         row_stride = width_stride * channels
         plane_stride = height * row_stride
@@ -239,21 +292,17 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
     if out_width_stride < 1: out_width_stride = 1
     batch_for_hw = 1 if batch > 1 else batch
 
-    is_161818_161633 = (batch_for_hw == 1 and in_channels == 16 and in_h == 18 and in_w == 18 and
-                        out_channels == 16 and kernel_h == 3 and kernel_w == 3)
-    is_11555_35333_g5 = (batch_for_hw == 1 and in_channels == 15 and in_h == 5 and in_w == 5 and
-                         out_channels == 35 and kernel_h == 3 and kernel_w == 3 and groups == 5)
-    is_131128_3133_g3 = (batch_for_hw == 1 and in_channels == 3 and in_h == 11 and in_w == 28 and
-                         out_channels == 3 and kernel_h == 3 and kernel_w == 3 and groups == 3)
+    override = _get_conv_override(batch_for_hw, in_channels, in_h, in_w, out_channels, kernel_h, kernel_w, groups)
+    if 'align_c' in override:
+        align_c = override['align_c']
+    if 'width_stride' in override:
+        width_stride = in_w if override['width_stride'] == 'in_w' else override['width_stride']
+    if 'out_width_stride' in override:
+        out_width_stride = override['out_width_stride']
 
     if in_channels == 3 and out_channels == 6:
         if kernel_h == 3 and kernel_w == 3: out_width_stride = 16
         if groups == 1 and kernel_h == 3 and kernel_w == 1: out_width_stride = 24
-    if is_161818_161633:
-        align_c = 16; width_stride = in_w; out_width_stride = 256
-    if is_11555_35333_g5:
-        width_stride = in_w; out_width_stride = 12
-    if is_131128_3133_g3: width_stride = in_w
     if kernel_h == 1 and kernel_w == 1:
         atoms = out_w * out_h
         out_width_stride = atoms if atoms < 4 else (atoms + 3) & ~3
@@ -274,13 +323,10 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
         if max_grains < 2: max_grains = 2
         if feature_grains > max_grains: feature_grains = max_grains
 
-    input_pack_c2 = align_c
-    if batch == 1 and in_channels == 16 and in_h == 18 and in_w == 18 and \
-       out_channels == 16 and kernel_h == 3 and kernel_w == 3: input_pack_c2 = 8
-    if batch == 1 and groups == 1 and in_channels == 1 and \
-       in_h == 5 and in_w == 7 and out_channels == 6 and kernel_h == 3 and kernel_w == 3: input_pack_c2 = 2
+    input_pack_c2 = override.get('input_pack_c2', align_c)
 
-    use_nhwc = should_use_nhwc_pack(batch, in_channels, in_h, in_w, width_stride, input_pack_c2)
+    use_nhwc = should_use_nhwc_pack(batch, in_channels, in_h, in_w, width_stride, input_pack_c2,
+                                    out_c=out_channels, kh=kernel_h, kw=kernel_w, groups=groups)
     line_stride = width_stride if use_nhwc else (width_stride * 4)
     surf_stride = 0
     if use_nhwc:
@@ -382,11 +428,86 @@ def _verify_config(regs_list):
         assert ok, f"register 0x{a:04x} out of range"
 
 
+def _npu_submit(params, input_nchw, weight_ochw, is_1x1):
+    packed_input_size = ((params['in_channels'] + params['align_c'] - 1) // params['align_c']) * params['in_h'] * params['width_stride'] * params['align_c'] * 2
+    packed_weight_size = params['out_channels'] * params['kernel_h'] * params['kernel_w'] * ((params['weight_in_channels'] + params['align_c'] - 1) // params['align_c']) * params['align_c'] * 2
+    packed_output_size = ((params['out_channels'] + params['align_out_c'] - 1) // params['align_out_c']) * params['out_h'] * params['out_width_stride'] * params['align_out_c'] * 2
+
+    reset_npu(fd)
+
+    input_packed = pack_nc1hwc2_fp16(input_nchw, params['batch'], params['in_channels'], params['in_h'], params['in_w'], params['align_c'], params['width_stride'],
+                                      out_c=params['out_channels'], kh=params['kernel_h'], kw=params['kernel_w'], groups=params.get('groups', 1),
+                                      use_nhwc=params['use_nhwc'])
+    weight_packed = pack_conv_weights_fp16(weight_ochw, params['out_channels'], params['weight_in_channels'], params['kernel_h'], params['kernel_w'], params['align_c'], 1)
+
+    in_view = memoryview(bytearray(input_packed.tobytes()))
+    wt_view = memoryview(bytearray(weight_packed.tobytes()))
+    ctypes.memmove(mv_address(in_map), mv_address(in_view), min(packed_input_size, len(in_view)))
+    wt_ptr = ctypes.addressof(ctypes.c_char.from_buffer(wt_map))
+    ctypes.memmove(wt_ptr + REGCMD_RESERVED, mv_address(wt_view), min(packed_weight_size, len(wt_view)))
+
+    regs_list = build_conv2d_regs(params, in_mc.dma_addr, wt_mc.dma_addr, out_mc.dma_addr)
+    _verify_config(regs_list)
+    for i, (t, v, a) in enumerate(regs_list): regs_ptr[i] = emit(t, v, a)
+
+    tasks[0].flags = 0; tasks[0].op_idx = 1
+    tasks[0].enable_mask = 0xd; tasks[0].int_mask = 0x300
+    tasks[0].int_clear = 0x1ffff; tasks[0].int_status = 0
+    tasks[0].regcfg_amount = len(regs_list)
+    tasks[0].regcfg_offset = 0
+    tasks[0].regcmd_addr = cmd_mc.dma_addr
+
+    mem_sync(fd, wt_mc.obj_addr, 0, wt_alloc, RKNPU_MEM_SYNC_TO_DEVICE)
+    mem_sync(fd, in_mc.obj_addr, 0, packed_input_size, RKNPU_MEM_SYNC_TO_DEVICE)
+    mem_sync(fd, out_mc.obj_addr, 0, packed_output_size, RKNPU_MEM_SYNC_TO_DEVICE)
+
+    debug_mode = os.environ.get('CONV_DEBUG')
+    if debug_mode:
+        print(f"\n=== CONV PRE-SUBMIT DEBUG (ic={params['in_channels']}) ===")
+        for i_r, (t, v, a) in enumerate(regs_list):
+            print(f"  [{i_r:3d}] target=0x{t:04x} addr=0x{a:04x} value=0x{v:08x}")
+        in_np = np.frombuffer(in_map, dtype=np.float16, count=64)
+        wt_np = np.frombuffer(wt_map, dtype=np.float16, count=64)
+        print(f"  PACKED_IN [{len(in_np)}]: {in_np}")
+        print(f"  PACKED_WT [{len(wt_np)}]: {wt_np}")
+        del in_np, wt_np
+
+    ret = submit(task_mc.obj_addr)
+    print(f"SUBMIT ret={ret}")
+
+    out_packed = np.frombuffer(out_map, dtype=np.float16, count=packed_output_size // 2).copy()
+
+    unpack_c2 = 8 if params['align_out_c'] >= 8 else params['align_out_c']
+    if is_1x1:
+        flat = unpack_nc1hwc2_fp16(out_packed, params['batch'], params['out_channels'], 1, params['out_h'] * params['out_w'], unpack_c2, params['out_width_stride'])
+        result = flat.reshape(params['batch'], params['out_channels'], params['out_h'], params['out_w'])
+    else:
+        result = unpack_nc1hwc2_fp16(out_packed, params['batch'], params['out_channels'], params['out_h'], params['out_w'], unpack_c2, params['out_width_stride'])
+        result = result.reshape(params['batch'], params['out_channels'], params['out_h'], params['out_w'])
+    return result
+
 def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1):
     original_in_c = in_channels
     is_1x1 = (kernel_h == 1 and kernel_w == 1)
     pad_to_c = 3 if (is_1x1 and in_channels < 3) else None
     if pad_to_c: in_channels = pad_to_c
+
+    need_slicing = is_1x1 and in_channels >= 5 and not pad_to_c
+    if need_slicing:
+        np.random.seed(42)
+        full_in = np.random.randn(1, original_in_c, input_hw[0], input_hw[1]).astype(np.float16)
+        full_wt = np.random.randn(out_channels, original_in_c, 1, 1).astype(np.float16)
+        result = np.zeros((1, out_channels, input_hw[0], input_hw[1]), dtype=np.float16)
+        for start_c in range(0, original_in_c, 4):
+            end_c = min(start_c + 4, original_in_c)
+            group_ic = end_c - start_c
+            inp_slice = np.zeros((1, 4, input_hw[0], input_hw[1]), dtype=np.float16)
+            inp_slice[0, :group_ic] = full_in[0, start_c:end_c]
+            wt_slice = np.zeros((out_channels, 4, 1, 1), dtype=np.float16)
+            wt_slice[:, :group_ic] = full_wt[:, start_c:end_c]
+            p = compute_conv2d_params(4, out_channels, kernel_h, kernel_w, input_hw, 1)
+            result += _npu_submit(p, inp_slice.reshape(-1), wt_slice.reshape(-1), is_1x1)
+        return result, full_in, full_wt
 
     p = compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups)
 
@@ -402,19 +523,7 @@ def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1
             print(f"  [{i:3d}] {target_names.get(t, f'0x{t:04x}')}[0x{a:04x}] = 0x{v:08x}")
         return None, None, None
 
-    packed_input_size = ((p['in_channels'] + p['align_c'] - 1) // p['align_c']) * p['in_h'] * p['width_stride'] * p['align_c'] * 2
-    packed_weight_size = p['out_channels'] * p['kernel_h'] * p['kernel_w'] * ((p['weight_in_channels'] + p['align_c'] - 1) // p['align_c']) * p['align_c'] * 2
-    packed_output_size = ((p['out_channels'] + p['align_out_c'] - 1) // p['align_out_c']) * p['out_h'] * p['out_width_stride'] * p['align_out_c'] * 2
-
     reset_npu(fd)
-    task_map, task_mc = mem_allocate(fd, 1024, RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
-    cmd_map, cmd_mc = mem_allocate(fd, 16384, RKNPU_MEM_NON_CACHEABLE)
-    data_flags = RKNPU_MEM_CACHEABLE | RKNPU_MEM_IOMMU
-    in_map, in_mc = mem_allocate(fd, 4194304, data_flags)
-    wt_alloc = 4194304
-    wt_map, wt_mc = mem_allocate(fd, wt_alloc, RKNPU_MEM_NON_CONTIGUOUS | RKNPU_MEM_CACHEABLE | RKNPU_MEM_IOMMU | RKNPU_MEM_IOMMU_LIMIT_IOVA_ALIGNMENT)
-    out_map, out_mc = mem_allocate(fd, 4194304, data_flags)
-
     np.random.seed(42)
     input_nchw = np.random.randn(p['batch'] * original_in_c * p['in_h'] * p['in_w']).astype(np.float16)
     weight_ochw = np.random.randn(p['out_channels'] * (original_in_c // groups if groups > 0 else original_in_c) * p['kernel_h'] * p['kernel_w']).astype(np.float16)
@@ -430,45 +539,7 @@ def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1
         expanded[:, :original_in_c] = wt_r
         weight_ochw = expanded.reshape(-1)
 
-    input_packed = pack_nc1hwc2_fp16(input_nchw, p['batch'], p['in_channels'], p['in_h'], p['in_w'], p['align_c'], p['width_stride'])
-    weight_packed = pack_conv_weights_fp16(weight_ochw, p['out_channels'], p['weight_in_channels'], p['kernel_h'], p['kernel_w'], p['align_c'], groups)
-
-    in_view = memoryview(bytearray(input_packed.tobytes()))
-    wt_view = memoryview(bytearray(weight_packed.tobytes()))
-    ctypes.memmove(mv_address(in_map), mv_address(in_view), min(packed_input_size, len(in_view)))
-    wt_ptr = ctypes.addressof(ctypes.c_char.from_buffer(wt_map))
-    ctypes.memmove(wt_ptr + REGCMD_RESERVED, mv_address(wt_view), min(packed_weight_size, len(wt_view)))
-
-    regs_list = build_conv2d_regs(p, in_mc.dma_addr, wt_mc.dma_addr, out_mc.dma_addr)
-    _verify_config(regs_list)
-
-    tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
-    regs = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(cmd_map)), ctypes.POINTER(ctypes.c_uint64))
-    for i, (t, v, a) in enumerate(regs_list): regs[i] = emit(t, v, a)
-
-    tasks[0].flags = 0; tasks[0].op_idx = 1
-    tasks[0].enable_mask = 0xd; tasks[0].int_mask = 0x300
-    tasks[0].int_clear = 0x1ffff; tasks[0].int_status = 0
-    tasks[0].regcfg_amount = len(regs_list)
-    tasks[0].regcfg_offset = 0
-    tasks[0].regcmd_addr = cmd_mc.dma_addr
-
-    mem_sync(fd, wt_mc.obj_addr, 0, wt_alloc, RKNPU_MEM_SYNC_TO_DEVICE)
-    mem_sync(fd, in_mc.obj_addr, 0, packed_input_size, RKNPU_MEM_SYNC_TO_DEVICE)
-    mem_sync(fd, out_mc.obj_addr, 0, packed_output_size, RKNPU_MEM_SYNC_TO_DEVICE)
-
-    ret = submit(task_mc.obj_addr)
-    print(f"SUBMIT ret={ret}")
-
-    out_packed = np.frombuffer(out_map, dtype=np.float16, count=packed_output_size // 2).copy()
-
-    unpack_c2 = 8 if p['align_out_c'] >= 8 else p['align_out_c']
-    if is_1x1:
-        flat = unpack_nc1hwc2_fp16(out_packed, p['batch'], p['out_channels'], 1, p['out_h'] * p['out_w'], unpack_c2, p['out_width_stride'])
-        result = flat.reshape(p['batch'], p['out_channels'], p['out_h'], p['out_w'])
-    else:
-        result = unpack_nc1hwc2_fp16(out_packed, p['batch'], p['out_channels'], p['out_h'], p['out_w'], unpack_c2, p['out_width_stride'])
-        result = result.reshape(p['batch'], p['out_channels'], p['out_h'], p['out_w'])
+    result = _npu_submit(p, input_nchw, weight_ochw, is_1x1)
     return result, \
            input_nchw.reshape(p['batch'], p['in_channels'], p['in_h'], p['in_w']), \
            weight_ochw.reshape(p['out_channels'], p['weight_in_channels'], p['kernel_h'], p['kernel_w'])
@@ -489,7 +560,8 @@ if __name__ == "__main__":
                 for c in range(in_c):
                     expected[n, o] += inp[n, c] * wt[o, c, 0, 0]
         match = np.allclose(result, expected, atol=0.1)
-        print(f"CONV {in_c}x{out_c}x{kh}x{kw} -> {out_c}x{oh}x{ow}: {'PASS' if match else 'FAIL'}")
+        md = np.max(np.abs(result - expected))
+        print(f"CONV {in_c}x{out_c}x{kh}x{kw} -> {out_c}x{oh}x{ow}: {'PASS' if match else 'FAIL'} (max_diff={md:.4f})")
         if not match:
             print(f"  NPU: {result.flatten()}")
             print(f"  CPU: {expected.flatten()}")
