@@ -34,6 +34,25 @@ test_cases = [
     # Non-square kernels
     (1, 6, 3, 1, (5, 7), 1, "ic=1 oc=6 3x1"),
     (3, 6, 1, 3, (5, 5), 1, "1x3 kernel"),
+
+    # ── Missing shapes from test_ops.py _test_conv2d(cin=3): (1,3,5,7) @ (6,1,kh,kw) ──
+    (3, 6, 3, 3, (5, 7), 3, "test_ops _test_conv2d cin=3 3x3 g=3"),
+    (3, 6, 2, 1, (5, 7), 1, "test_ops _test_conv2d cin=3 2x1"),
+    (3, 6, 2, 3, (5, 7), 1, "test_ops _test_conv2d cin=3 2x3"),
+    (3, 6, 3, 1, (5, 7), 1, "test_ops _test_conv2d cin=3 3x1"),
+    (3, 6, 3, 5, (5, 7), 1, "test_ops _test_conv2d cin=3 3x5"),
+
+    # ── Missing from test_ops.py _test_conv2d(cin=1): (1,1,5,7) @ (6,1,kh,kw) ──
+    (1, 6, 3, 3, (5, 7), 1, "test_ops _test_conv2d cin=1 3x3"),
+    (1, 6, 2, 1, (5, 7), 1, "test_ops _test_conv2d cin=1 2x1"),
+    (1, 6, 2, 3, (5, 7), 1, "test_ops _test_conv2d cin=1 2x3"),
+    (1, 6, 3, 1, (5, 7), 1, "test_ops _test_conv2d cin=1 3x1"),
+    (1, 6, 3, 5, (5, 7), 1, "test_ops _test_conv2d cin=1 3x5"),
+
+    # ── Grouped/depthwise convs from test_ops.py ──
+    (4, 2, 1, 1, (1, 1), 2, "test_ops simple_grouped_conv2d"),
+    (4, 4, 1, 1, (1, 1), 2, "test_ops medium_grouped_conv2d"),
+    (32, 32, 1, 1, (32, 32), 32, "test_ops depthwise_conv2d"),
 ]
 
 def compute_expected(result, inp, wt, in_c, out_c, kh, kw, oh, ow, groups):

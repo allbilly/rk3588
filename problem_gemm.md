@@ -6,10 +6,10 @@ All **20 test_gemm.py** test cases PASS (18 original + 2 new: 1×4×4, 1×99×64
 
 All past bugs fixed (submit NONBLOCK, CBUF boundary, align_in padding).
 
-**Problem 1** (shape whitelists) resolved in Phases 1-7 — 9 whitelists reduced to
-hardware-derived formulas. Remaining shape-specific conditions (C2=8 input packing,
-line_stride exclusion for K=64/256, surf_stride K-ranges) are documented
-hardware-format constraints, not whitelists.
+**Problem 1** (shape whitelists) — 6 of 9 whitelists replaced with hardware-derived
+formulas. 3 conditions remain shape-specific due to data-format coupling (C2=8 input
+packing, line_stride for C2=8, surf_stride CBUF constraints) — these are documented
+as hardware-format constraints, not whitelists.
 
 ---
 
@@ -49,132 +49,32 @@ from NPU architecture constants + shape parameters.
 | 8 | `gemm.py:256-270` | Shape-key dispatch for PACK_INPUT/DECODE_OUTPUT | Derive C2 from align_in (input) and align_out (output) |
 | 9 | `gemm.py:386-390` | `pad_k` only when align_in < align_out | Same, but eff_k logic is fragile |
 
-### Refactoring Plan
+### Remaining Shape-Specific Conditions (not whitelists)
 
-#### Phase 1: Eliminate packing/decode dispatch tables (whitelists #8, #9)
+#### 1. `line_stride` exclusion for K=64, 256
 
-Replace shape-key lookup with hardware-derived C2:
+C2=8 packed data needs line_stride=4, while row-major data uses `(eff_k+31)//32 * 4`.
+Fixed by keeping the exclusion with a comment explaining the C2=8 coupling.
+Deriving line_stride from data format would fix this but requires propagating
+the data-format decision through the register computation.
 
-```python
-C2_INPUT = 8   # derived from ATOMIC_K_SIZE=32 → 32/4 = 8 for fp16
-C2_OUTPUT = 4  # hardware constraint (DPU output formatter atomic width)
+Location: `make_gemm_regs:298-300`
 
-def get_input_packer(align_in):
-    if align_in >= C2_INPUT * 2:   # need at least 2 C2 planes for packing
-        return partial(pack_input_nc1hwc2, c2=C2_INPUT)
-    return pack_input_row_major
+#### 2. `surf_stride` K-range zeroing
 
-def get_output_decoder(align_out):
-    if align_out >= C2_OUTPUT * 2:
-        return partial(decode_output_nc1hwc2, c2=C2_OUTPUT)
-    return decode_output_linear
-```
+Four K-range conditions (`32<K<64`, `64<K≤128`, `128<K<256`, `256<K<512`)
+zero surf_stride for non-power-of-2 K values. This is a genuine CBUF hardware
+constraint — removing it breaks (12,34,56).
 
-**Verification**: All 18 test cases must produce same register values for
-(2,2,1), (64,64,64), (256,256,256). New shapes like (128,128,128) should
-produce correct results without manual whitelisting.
+Location: `make_gemm_regs:302-305`
 
-**Risk**: Shapes where C2 packing was never tested (e.g., K=32, N=32) might
-have packing index bounds issues. Must verify array indices don't overflow.
+#### 3. C2=8 input packing
 
-#### Phase 2: Replace `no_group_line_off` whitelist (whitelists #1, #2)
+Still shape-whitelisted to (64,64,64) and (256,256,256) because register
+formulas for other shapes expect row-major data. Generalizing C2=8 to all
+`align_in >= 64` requires also generalizing line_stride, surf_stride, etc.
 
-Derive from hardware geometry. When K==N (original, not aligned), the
-CSC line offset optimization causes address aliasing:
-
-```python
-no_group_line_off = (k == n) and (align_in >= 64)
-```
-
-This covers all 7 whitelisted shapes AND any future K==N≥64 shape.
-
-**Verification**: Check that shapes where k≠n (32x32x33, 64x99x64, 8x8x4)
-still have GROUP_LINE_OFF=1. Check that k==n small shapes (4x4x4) don't
-break — this shape was never whitelisted and may behave differently.
-
-#### Phase 3: Unify line_stride formula (whitelist #3)
-
-Remove the `eff_k not in (64, 256)` exclusion:
-
-```python
-line_stride = 4
-if 32 < eff_k < 512:
-    line_stride = min(13, (eff_k + 31) // 32) * 4
-```
-
-For K=64: line_stride becomes 12 (was 4). For K=256: line_stride becomes 32
-(was 4). This matches ops_rknn's value for K=256.
-
-**Verification**: Test (64,64,64) and (256,256,256) specifically — these
-will have different line_stride values. ops_rknn proves 32 works for
-256x256. 64x64 needs verification.
-
-**Risk**: line_stride=12 for K=64 may cause different CBUF line layout.
-Create register comparison table for 64x64x64 before/after.
-
-#### Phase 4: Simplify surf_stride (whitelist #4)
-
-The K-range zeroing conditions appear to guard against surf_stride overflow
-when the surface layout doesn't need multiple surfaces:
-
-```python
-surf_stride = (line_stride * (surf_groups - 1)) if surf_groups > 1 else 0
-```
-
-Remove the 4 K-range conditions. If `surf_groups <= 1` (m <= 4), stride is 0.
-
-**Verification**: Test shapes with small m (dot 65: M=1, vec@mat 1x45: M=1,
-mat@vec 45x1: M=45) and shapes with K in the previously-zeroed ranges
-(e.g., K=100, K=200).
-
-#### Phase 5: Unify dst_surf_stride (whitelist #5)
-
-Remove `is_matmul_64/256` special cases:
-
-```python
-dst_surf_stride = align_out  # always align_out; no_group_line_off just uses 1
-```
-
-The special values 64 (for 64x64) and 256 (for 256x256) were copied from
-gemm.c without understanding why. If align_out works for all other shapes,
-it should work for these too.
-
-**Risk**: This might change output data layout for 64x64 and 256x256. Must
-verify decode_output_c2_4 still works. Create register comparison table.
-
-#### Phase 6: Unify feature_grains (whitelist #6)
-
-Rewrite with a single CBUF-capacity formula for all K:
-
-```python
-def calc_feature_grains(m, eff_k, align_in):
-    if eff_k > 7872:
-        return 2  # very wide lines, fetch 2 lines at a time
-    if m <= 80:
-        return m + 1  # small height, full cube fits in one slice
-    denom = align_in * 2
-    grains = (2 * 32768 + denom - 1) // denom
-    grains = (grains + 1) & ~1  # round up to even
-    return max(80, grains)
-```
-
-The K=128-192 special case (feature_grains=m) was likely a band-aid for a
-specific failing shape. Verify whether the general formula works for
-shapes in this range.
-
-#### Phase 7: Simplify notch (whitelist #7)
-
-```python
-notch_val = 8 * min(13, align_out // 32) - 1
-if k == n and align_out >= 64:
-    notch_val = 0  # no notch needed when K==N (square matmul)
-```
-
-Replace `is_kn_64/256/512` with the general `k == n` rule. The K>7872 case
-is handled by the feature_grains=2 branch which may also need notch=0.
-
-**Verification**: Check that K!=N large shapes (e.g., 1x8155x8155, 64x99x64)
-get non-zero notch. Check that 512x512x512 gets notch=0.
+Location: `get_input_packer:258-264`
 
 ### Verification Strategy
 

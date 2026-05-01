@@ -292,6 +292,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     if align_in > max(32, ((k + 31) // 32) * 32):  # only when padding was actually applied
         eff_k = align_in  # use padded K for line_stride/surf_stride/notch calculations
 
+    # GROUP_LINE_OFF = 0 when K==N (square matmul, CSC line offset would alias); else 1
     no_group_line_off = (k == n) and (align_in >= 64)
 
     line_stride = 4
@@ -312,6 +313,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     # is_matmul_64/256 special cases are redundant: align_out==64 for 64x64, 256 for 256x256
     dst_surf_stride = align_out if no_group_line_off else 1
 
+    # feature_grains = CBUF capacity / bytes_per_line, derived from 2 banks (65536 bytes) / (align_in * 2)
     feature_grains = m + 1
     if eff_k > 7872:
         feature_grains = 2
