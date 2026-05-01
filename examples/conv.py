@@ -1,4 +1,4 @@
-import sys, os, mmap, ctypes, struct, math
+import sys, os, mmap, ctypes
 import numpy as np
 from fcntl import ioctl
 
@@ -34,14 +34,12 @@ class rknpu_subcore_task(ctypes.Structure):
     _fields_ = [("task_start", ctypes.c_uint32), ("task_number", ctypes.c_uint32)]
 
 class rknpu_submit(ctypes.Structure):
-    _fields_ = [("flags", ctypes.c_uint32), ("timeout", ctypes.c_uint32),
-                ("task_start", ctypes.c_uint32), ("task_number", ctypes.c_uint32),
-                ("task_counter", ctypes.c_uint32), ("priority", ctypes.c_int32),
+    _fields_ = [("flags", ctypes.c_uint32), ("timeout", ctypes.c_uint32), ("task_start", ctypes.c_uint32),
+                ("task_number", ctypes.c_uint32), ("task_counter", ctypes.c_uint32), ("priority", ctypes.c_int32),
                 ("task_obj_addr", ctypes.c_uint64), ("iommu_domain_id", ctypes.c_uint32),
                 ("reserved", ctypes.c_uint32), ("task_base_addr", ctypes.c_uint64),
                 ("hw_elapse_time", ctypes.c_int64), ("core_mask", ctypes.c_uint32),
-                ("fence_fd", ctypes.c_int32),
-                ("subcore_task", rknpu_subcore_task * 5)]
+                ("fence_fd", ctypes.c_int32), ("subcore_task", rknpu_subcore_task * 5)]
 
 class struct_rknpu_task(ctypes.Structure):
     _fields_ = [("flags", ctypes.c_uint32), ("op_idx", ctypes.c_uint32),
@@ -65,13 +63,14 @@ def mem_allocate(fd, size, flags=0):
     buf = mmap.mmap(fd, mc.size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=mm.offset)
     return buf, mc
 
+class rknpu_mem_sync(ctypes.Structure):
+    _fields_ = [("flags", ctypes.c_uint32), ("obj_addr", ctypes.c_uint64),
+                ("offset", ctypes.c_uint64), ("size", ctypes.c_uint64)]
+
+DRM_IOCTL_RKNPU_MEM_SYNC = _IOWR('d', 0x45, ctypes.sizeof(rknpu_mem_sync))
+
 def mem_sync(fd, obj_addr, offset, size, flags):
-    class rknpu_mem_sync(ctypes.Structure):
-        _fields_ = [("flags", ctypes.c_uint32), ("obj_addr", ctypes.c_uint64),
-                    ("offset", ctypes.c_uint64), ("size", ctypes.c_uint64)]
-    DRM_IOCTL_RKNPU_MEM_SYNC = _IOWR('d', 0x45, ctypes.sizeof(rknpu_mem_sync))
-    sync = rknpu_mem_sync(flags=flags, obj_addr=obj_addr, offset=offset, size=size)
-    ioctl(fd, DRM_IOCTL_RKNPU_MEM_SYNC, sync)
+    ioctl(fd, DRM_IOCTL_RKNPU_MEM_SYNC, rknpu_mem_sync(flags=flags, obj_addr=obj_addr, offset=offset, size=size))
 
 RKNPU_MEM_SYNC_TO_DEVICE = 1
 RKNPU_MEM_SYNC_FROM_DEVICE = 2
@@ -82,10 +81,6 @@ def submit(task_obj_addr):
                      iommu_domain_id=0, reserved=0, task_base_addr=0,
                      hw_elapse_time=0, core_mask=0, fence_fd=-1)
     s.subcore_task[0] = rknpu_subcore_task(task_start=0, task_number=1)
-    s.subcore_task[1] = rknpu_subcore_task(task_start=0, task_number=0)
-    s.subcore_task[2] = rknpu_subcore_task(task_start=0, task_number=0)
-    s.subcore_task[3] = rknpu_subcore_task(task_start=0, task_number=0)
-    s.subcore_task[4] = rknpu_subcore_task(task_start=0, task_number=0)
     return ioctl(fd, DRM_IOCTL_RKNPU_SUBMIT, s)
 
 def reset_npu(fd):
@@ -222,48 +217,28 @@ def _target(addr):
     if addr < 0x1000: return addr | 0x1
     raise ValueError(f"Unknown address 0x{addr:x}")
 
-def reg_desc(regs_list):
-    target_names = {0x0201: "CNA", 0x0801: "CORE", 0x1001: "DPU", 0x2001: "RDMA", 0x0081: "PC", 0x0001: "???"}
-    for i, (tgt, val, addr) in enumerate(regs_list):
-        name = target_names.get(tgt, f"0x{tgt:04x}")
-        print(f"  [{i:3d}] {name}[0x{addr:04x}] = 0x{val:08x}")
-
 
 def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1):
     batch, in_h, in_w = 1, input_hw[0], input_hw[1]
     weight_in_channels = in_channels // groups if groups > 0 else in_channels
     is_depthwise = (groups == in_channels and out_channels == in_channels)
-    out_h = in_h - kernel_h + 1
-    out_w = in_w - kernel_w + 1
-
-    # auto_align (C 1154-1166)
+    out_h, out_w = in_h - kernel_h + 1, in_w - kernel_w + 1
     max_align = 32 if is_depthwise else 16
     pow2 = 1
     c = in_channels if in_channels > 0 else 1
-    while pow2 < c and pow2 < max_align:
-        pow2 <<= 1
+    while pow2 < c and pow2 < max_align: pow2 <<= 1
     if pow2 < 8: pow2 = 8
     if pow2 > max_align: pow2 = max_align
     align_c = pow2
-
-    # align_out_c (C 1169)
     align_out_c = ((out_channels + 15) // 16) * 16
     if align_out_c < 16: align_out_c = 16
-
-    # width_stride: align to align_c (matching main.c run_conv2d_case)
     width_stride = align_up_int(in_w, align_c)
-
-    # out_channel_field (C 1174)
     out_channel_field = (align_up_int(align_out_c, 32) if is_depthwise else align_out_c) - 1
     orig_channel = out_channels - 1 if out_channels > 0 else 0
-
-    # out_width_stride (matching main.c run_conv2d_case)
     out_width_stride = (out_w * align_out_c) // 4
     if out_width_stride < 1: out_width_stride = 1
-
     batch_for_hw = 1 if batch > 1 else batch
 
-    # Special cases from main.c run_conv2d_case (empirically determined)
     is_161818_161633 = (batch_for_hw == 1 and in_channels == 16 and in_h == 18 and in_w == 18 and
                         out_channels == 16 and kernel_h == 3 and kernel_w == 3)
     is_11555_35333_g5 = (batch_for_hw == 1 and in_channels == 15 and in_h == 5 and in_w == 5 and
@@ -272,37 +247,25 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
                          out_channels == 3 and kernel_h == 3 and kernel_w == 3 and groups == 3)
 
     if in_channels == 3 and out_channels == 6:
-        if kernel_h == 3 and kernel_w == 3:
-            out_width_stride = 16
-        if groups == 1 and kernel_h == 3 and kernel_w == 1:
-            out_width_stride = 24
+        if kernel_h == 3 and kernel_w == 3: out_width_stride = 16
+        if groups == 1 and kernel_h == 3 and kernel_w == 1: out_width_stride = 24
     if is_161818_161633:
-        align_c = 16
-        width_stride = in_w
-        out_width_stride = 256
+        align_c = 16; width_stride = in_w; out_width_stride = 256
     if is_11555_35333_g5:
-        width_stride = in_w
-        out_width_stride = 12
-    if is_131128_3133_g3:
-        width_stride = in_w
+        width_stride = in_w; out_width_stride = 12
+    if is_131128_3133_g3: width_stride = in_w
     if kernel_h == 1 and kernel_w == 1:
         atoms = out_w * out_h
-        if atoms < 4:
-            out_width_stride = atoms
-        else:
-            out_width_stride = (atoms + 3) & ~3
+        out_width_stride = atoms if atoms < 4 else (atoms + 3) & ~3
 
     out_atoms = out_w * out_h
     if out_atoms < 1: out_atoms = 1
-
     data_in_channel_real = in_channels - 1 if in_channels > 0 else 0
     data_in_channel_aligned = align_up_int(in_channels, align_c)
     if data_in_channel_aligned < align_c: data_in_channel_aligned = align_c
-
     weight_kernels = 1 if is_depthwise else out_channels
     weight_bytes_per_kernel = kernel_h * kernel_w * data_in_channel_aligned * 2
     weight_bytes_total = weight_bytes_per_kernel * out_channels
-
     feature_grains = in_h + kernel_h
     row_bytes = width_stride * align_c * 2
     if row_bytes > 0:
@@ -313,41 +276,30 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
 
     input_pack_c2 = align_c
     if batch == 1 and in_channels == 16 and in_h == 18 and in_w == 18 and \
-       out_channels == 16 and kernel_h == 3 and kernel_w == 3:
-        input_pack_c2 = 8
+       out_channels == 16 and kernel_h == 3 and kernel_w == 3: input_pack_c2 = 8
     if batch == 1 and groups == 1 and in_channels == 1 and \
-       in_h == 5 and in_w == 7 and out_channels == 6 and kernel_h == 3 and kernel_w == 3:
-        input_pack_c2 = 2
+       in_h == 5 and in_w == 7 and out_channels == 6 and kernel_h == 3 and kernel_w == 3: input_pack_c2 = 2
 
     use_nhwc = should_use_nhwc_pack(batch, in_channels, in_h, in_w, width_stride, input_pack_c2)
     line_stride = width_stride if use_nhwc else (width_stride * 4)
     surf_stride = 0
     if use_nhwc:
         if in_h > 1: surf_stride = line_stride * (in_h - 1)
-    else:
-        if in_h > 4: surf_stride = width_stride * (in_h - 4)
+    elif in_h > 4: surf_stride = width_stride * (in_h - 4)
 
-    cvt_bits_per_elem = 16
-    cvt_lanes = 128 // cvt_bits_per_elem
-    if cvt_lanes < 1: cvt_lanes = 1
+    cvt_lanes = 128 // 16
     cvt_active = in_channels if use_nhwc else input_pack_c2
     if cvt_active < 1: cvt_active = 1
     if cvt_active > cvt_lanes: cvt_active = cvt_lanes
     cvt_mask = 0xFFFFFFFF if cvt_active >= 32 else ((1 << cvt_active) - 1)
-
     row_entries = (width_stride * align_c + 31) // 32
     if row_entries < 1: row_entries = 1
-    if align_c >= 16 or is_depthwise:
-        cbuf_entries = row_entries
-    else:
-        cbuf_entries = row_entries * in_h * 4
+    cbuf_entries = row_entries if (align_c >= 16 or is_depthwise) else row_entries * in_h * 4
     if cbuf_entries < 1: cbuf_entries = 1
-
     fd_bytes = width_stride * feature_grains * align_c * 2
     data_bank = (fd_bytes + NPU_CBUF_BANK_SIZE - 1) // NPU_CBUF_BANK_SIZE
     if data_bank < 1: data_bank = 1
     if data_bank > NPU_CBUF_BANKS - 1: data_bank = NPU_CBUF_BANKS - 1
-
     effective_align_out = out_channel_field + 1
     if groups > 1 and not is_depthwise:
         per_group_out = (out_channels + groups - 1) // groups
@@ -355,191 +307,99 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
         if per_group_align < 16: per_group_align = 16
         effective_align_out = per_group_align
     surface_add = out_width_stride * (effective_align_out // 8)
-
     return locals()
 
 
 def build_conv2d_regs(params, input_dma=0, weights_dma=0, output_dma=0):
     p = params
     regs = []
-    def E(addr, val):
-        regs.append((_target(addr), val, addr))
+    def E(addr, val): regs.append((_target(addr), val, addr))
 
-    # S_POINTER: pointer_pp_mode(bit3)=1, executer_pp_en(bit2)=1, pointer_pp_en(bit1)=1
     E(rk.REG_DPU_S_POINTER, (1 << 3) | (1 << 2) | (1 << 1))
-
-    # CONV_CON1: proc_precision(bits7-9)=2, in_precision(bits4-6)=2
     conv_con1 = (2 << 7) | (2 << 4)
     if (p['in_channels'] >= 1 and p['in_channels'] <= 4) and not p['is_depthwise']:
         conv_con1 |= (1 << 30) | (1 << 29) | ((7 + p['in_channels']) << 12)
-    if p['is_depthwise']:
-        conv_con1 |= 0x3  # CONV_MODE(3)
+    if p['is_depthwise']: conv_con1 |= 0x3
     E(rk.REG_CNA_CONV_CON1, conv_con1)
-
-    # CONV_CON2: feature_grains(bits4-13)
     E(rk.REG_CNA_CONV_CON2, p['feature_grains'] << 4)
-
-    # CONV_CON3: conv_y_stride(bits3-5)=1, conv_x_stride(bits0-2)=1
     E(rk.REG_CNA_CONV_CON3, (1 << 3) | 1)
-
-    # DATA_SIZE0: data_in_width(bits16-26)=width_stride, data_in_height(bits0-10)=in_h
     E(rk.REG_CNA_DATA_SIZE0, (p['width_stride'] << 16) | p['in_h'])
-
-    # DATA_SIZE1: channel_real(bits16-30), channel(bits0-15)
     E(rk.REG_CNA_DATA_SIZE1, (p['data_in_channel_real'] << 16) | p['data_in_channel_aligned'])
-
-    # DATA_SIZE2: dataout_width(bits0-10)
     E(rk.REG_CNA_DATA_SIZE2, p['out_w'])
-
-    # DATA_SIZE3: dataout_atomics(bits0-21)
     E(rk.REG_CNA_DATA_SIZE3, p['out_atoms'])
-
-    # WEIGHT_SIZE0: weight_bytes(bits0-31)
     E(rk.REG_CNA_WEIGHT_SIZE0, p['weight_bytes_total'])
-
-    # WEIGHT_SIZE1: weight_bytes_per_kernel(bits0-18)
     E(rk.REG_CNA_WEIGHT_SIZE1, p['weight_bytes_per_kernel'])
-
-    # WEIGHT_SIZE2: width(bits24-28)=kernel_w, height(bits16-20)=kernel_h, kernels(bits0-13)
     wk = p['weight_kernels']
     if wk == 0: wk = p['out_channels']
     E(rk.REG_CNA_WEIGHT_SIZE2, (p['kernel_w'] << 24) | (p['kernel_h'] << 16) | wk)
-
-    # CBUF_CON0: weight_bank(bits4-7)=12-db, data_bank(bits0-3)=db
     E(rk.REG_CNA_CBUF_CON0, ((NPU_CBUF_BANKS - p['data_bank']) << 4) | p['data_bank'])
-
-    # CBUF_CON1: data_entries(bits0-13)
     E(rk.REG_CNA_CBUF_CON1, p['cbuf_entries'])
-
-    # CVT_CON0: data_sign(bit3)=1, cvt_type(bit1)=1, cvt_bypass(bit0)=1
-    cvt = 0xB if not p['use_nhwc'] else 0x1
-    E(rk.REG_CNA_CVT_CON0, cvt)
-
-    # CVT_CON1..CON4: cvt_scale=1 at bit16
+    E(rk.REG_CNA_CVT_CON0, 0xB if not p['use_nhwc'] else 0x1)
     for a in [rk.REG_CNA_CVT_CON1, rk.REG_CNA_CVT_CON2, rk.REG_CNA_CVT_CON3, rk.REG_CNA_CVT_CON4]:
         E(a, 1 << 16)
-
-    # FEATURE_DATA_ADDR
     E(rk.REG_CNA_FEATURE_DATA_ADDR, input_dma & 0xFFFFFFFF)
-
-    # DMA_CON0: weight_burst_len(bits16-19)=15, data_burst_len(bits0-3)=15
     E(rk.REG_CNA_DMA_CON0, (15 << 16) | 15)
-
-    # DMA_CON1: line_stride(bits0-27)
     E(rk.REG_CNA_DMA_CON1, p['line_stride'])
-
-    # DMA_CON2: surf_stride(bits0-27)
     E(rk.REG_CNA_DMA_CON2, p['surf_stride'])
-
-    # FC_DATA_SIZE0: dma_width(bits16-30)=in_w, dma_height(bits0-10)=in_h
     E(rk.REG_CNA_FC_DATA_SIZE0, (p['in_w'] << 16) | p['in_h'])
-
-    # FC_DATA_SIZE1: dma_channel(bits0-15)=align_c
     E(rk.REG_CNA_FC_DATA_SIZE1, p['align_c'])
-
-    # DCOMP_ADDR0: weights start after REGCMD_RESERVED
     E(rk.REG_CNA_DCOMP_ADDR0, (weights_dma + REGCMD_RESERVED) & 0xFFFFFFFF)
-
-    # CVT_CON5: cvt_mask(bits0-31)
     E(rk.REG_CNA_CVT_CON5, p['cvt_mask'])
-
-    # CORE_MISC_CFG: proc_precision(bits8-10)=2, dw_en(bit1 if depthwise)
     core = (2 << 8)
     if p['is_depthwise']: core |= (1 << 1)
     E(rk.REG_CORE_MISC_CFG, core)
-
-    # CORE_DATAOUT_SIZE_0: height(bits16-31)=out_h-1, width(bits0-15)=out_w-1
     E(rk.REG_CORE_DATAOUT_SIZE_0, ((p['out_h'] - 1) << 16) | (p['out_w'] - 1))
-
-    # CORE_DATAOUT_SIZE_1: channel(bits0-15)=out_channel_field
     E(rk.REG_CORE_DATAOUT_SIZE_1, p['out_channel_field'])
-
-    # CORE 0x3030 = 0 (unknown register, must be written)
     regs.append((rk.CORE | 0x1, 0, 0x3030))
-
-    # DPU_FEATURE_MODE_CFG: burst_len(bits5-9)=15, output_mode(bits1-2)=2
     dpu_fmc = (15 << 5) | (2 << 1)
-    if p['is_depthwise']:
-        dpu_fmc |= (3 << 3)  # CONV_MODE(3)
+    if p['is_depthwise']: dpu_fmc |= (3 << 3)
     E(rk.REG_DPU_FEATURE_MODE_CFG, dpu_fmc)
-
-    # DPU_DATA_FORMAT: out_precision(bits29-31)=2, in_precision(bits26-28)=2, proc_precision(bits0-2)=2
     E(rk.REG_DPU_DATA_FORMAT, (2 << 29) | (2 << 26) | 2)
-
-    # DPU_DST_BASE_ADDR
     E(rk.REG_DPU_DST_BASE_ADDR, output_dma & 0xFFFFFFFF)
-
-    # DPU_DST_SURF_STRIDE: stride(bits4-31)
     E(rk.REG_DPU_DST_SURF_STRIDE, p['out_width_stride'] << 4)
-
-    # DPU_DATA_CUBE_WIDTH(bits0-12)=out_w-1
     E(rk.REG_DPU_DATA_CUBE_WIDTH, p['out_w'] - 1)
-
-    # DPU_DATA_CUBE_HEIGHT(bits0-12)=out_h-1
     E(rk.REG_DPU_DATA_CUBE_HEIGHT, p['out_h'] - 1)
-
-    # DPU_DATA_CUBE_CHANNEL: orig(bits16-28), channel(bits0-12)
     E(rk.REG_DPU_DATA_CUBE_CHANNEL, (p['orig_channel'] << 16) | p['out_channel_field'])
-
-    # DPU_BS_CFG: all bypassed = 0x53
     E(rk.REG_DPU_BS_CFG, 0x53)
-
-    # DPU_BS_OW_CFG: size_e_2(bits8-10), size_e_1(bits5-7), size_e_0(bits2-4), od_bypass(bit1)
-    ow_cfg = 1  # SIZE_E value for non-depthwise
-    if p['is_depthwise']:
-        ow_cfg = 3
+    ow_cfg = 3 if p['is_depthwise'] else 1
     E(rk.REG_DPU_BS_OW_CFG, (ow_cfg << 8) | (ow_cfg << 5) | (ow_cfg << 2) | (1 << 1))
-
-    # DPU_WDMA_SIZE_0: channel(bits0-12)
     E(rk.REG_DPU_WDMA_SIZE_0, p['out_channel_field'])
-
-    # DPU_WDMA_SIZE_1: height(bits16-28)=out_h-1, width(bits0-12)=out_w-1
     E(rk.REG_DPU_WDMA_SIZE_1, ((p['out_h'] - 1) << 16) | (p['out_w'] - 1))
-
-    # DPU_BN_CFG: all bypassed = 0x53
     E(rk.REG_DPU_BN_CFG, 0x53)
-
-    # DPU_EW_CFG: all bypassed = 0x383
     E(rk.REG_DPU_EW_CFG, 0x383)
-
-    # DPU_EW_CVT_SCALE_VALUE(bits0-15)=1
     E(rk.REG_DPU_EW_CVT_SCALE_VALUE, 1)
-
-    # DPU_OUT_CVT_SCALE: fp32tofp16(bits16)=1, scale(bits0-15)=1
     E(rk.REG_DPU_OUT_CVT_SCALE, (1 << 16) | 1)
-
-    # DPU_SURFACE_ADD: surf_add(bits4-31)
     E(rk.REG_DPU_SURFACE_ADD, p['surface_add'] << 4)
-
-    # raw emit target=0x1, addr=0x40c4, val=0
     regs.append((0x1, 0, 0x40c4))
-
-    # PC operation enable (conv2d: 0x0d)
     regs.append((0x81, 0xD, rk.REG_PC_OPERATION_ENABLE))
-
     return regs
+
+
+def _verify_config(regs_list):
+    assert ctypes.sizeof(rknpu_submit) == 104, f"submit struct {ctypes.sizeof(rknpu_submit)} != 104"
+    for _, _, a in regs_list:
+        ok = a < 0x1000 or 0x1000 <= a < 0x2000 or 0x3000 <= a < 0x4000 or 0x4000 <= a < 0x5000
+        assert ok, f"register 0x{a:04x} out of range"
 
 
 def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1):
     original_in_c = in_channels
     is_1x1 = (kernel_h == 1 and kernel_w == 1)
-    # NPU quirk: 1x1 kernels with in_c < 3 produce partial output.
-    # Pad to 3 input channels to work around this.
-    pad_to_c = None
-    if is_1x1 and in_channels < 3:
-        pad_to_c = 3
-        in_channels = pad_to_c
+    pad_to_c = 3 if (is_1x1 and in_channels < 3) else None
+    if pad_to_c: in_channels = pad_to_c
 
     p = compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups)
 
     if DRY_RUN:
-        regs_list = build_conv2d_regs(p, 0, 0, 0)
-        print(f"\n=== CONV2D DRY RUN (registers only) ===")
-        print(f"  shape: in=({p['batch']},{p['in_channels']},{p['in_h']},{p['in_w']}) "
+        regs = build_conv2d_regs(p, 0, 0, 0)
+        _verify_config(regs)
+        target_names = {0x0201: "CNA", 0x0801: "CORE", 0x1001: "DPU", 0x0081: "PC"}
+        print(f"\n=== CONV2D DRY RUN ({len(regs)} regs) ===")
+        print(f"  in=({p['batch']},{p['in_channels']},{p['in_h']},{p['in_w']}) "
               f"out=({p['batch']},{p['out_channels']},{p['out_h']},{p['out_w']}) "
               f"kernel=({p['kernel_h']},{p['kernel_w']}) groups={groups}")
-        reg_desc(regs_list)
-        print(f"  Register count: {len(regs_list)}")
+        for i, (t, v, a) in enumerate(regs):
+            print(f"  [{i:3d}] {target_names.get(t, f'0x{t:04x}')}[0x{a:04x}] = 0x{v:08x}")
         return None, None, None
 
     packed_input_size = ((p['in_channels'] + p['align_c'] - 1) // p['align_c']) * p['in_h'] * p['width_stride'] * p['align_c'] * 2
@@ -559,23 +419,16 @@ def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1
     input_nchw = np.random.randn(p['batch'] * original_in_c * p['in_h'] * p['in_w']).astype(np.float16)
     weight_ochw = np.random.randn(p['out_channels'] * (original_in_c // groups if groups > 0 else original_in_c) * p['kernel_h'] * p['kernel_w']).astype(np.float16)
 
-    if pad_to_c is not None:
-        padded = np.zeros((p['batch'] * pad_to_c * p['in_h'] * p['in_w'],), dtype=np.float16)
-        for n in range(p['batch']):
-            for c in range(original_in_c):
-                src = n * original_in_c * p['in_h'] * p['in_w'] + c * p['in_h'] * p['in_w']
-                dst = n * pad_to_c * p['in_h'] * p['in_w'] + c * p['in_h'] * p['in_w']
-                padded[dst:dst + p['in_h'] * p['in_w']] = input_nchw[src:src + p['in_h'] * p['in_w']]
-        input_nchw = padded
-        expanded = np.zeros((p['out_channels'] * pad_to_c * p['kernel_h'] * p['kernel_w'],), dtype=np.float16)
-        for oc in range(p['out_channels']):
-            for c in range(original_in_c):
-                for kh_idx in range(p['kernel_h']):
-                    for kw_idx in range(p['kernel_w']):
-                        src = oc * original_in_c * p['kernel_h'] * p['kernel_w'] + c * p['kernel_h'] * p['kernel_w'] + kh_idx * p['kernel_w'] + kw_idx
-                        dst = oc * pad_to_c * p['kernel_h'] * p['kernel_w'] + c * p['kernel_h'] * p['kernel_w'] + kh_idx * p['kernel_w'] + kw_idx
-                        expanded[dst] = weight_ochw[src]
-        weight_ochw = expanded
+    if pad_to_c:
+        pad = pad_to_c
+        inp_r = input_nchw.reshape(p['batch'], original_in_c, p['in_h'] * p['in_w'])
+        padded = np.zeros((p['batch'], pad, p['in_h'] * p['in_w']), dtype=np.float16)
+        padded[:, :original_in_c] = inp_r
+        input_nchw = padded.reshape(-1)
+        wt_r = weight_ochw.reshape(p['out_channels'], original_in_c, p['kernel_h'] * p['kernel_w'])
+        expanded = np.zeros((p['out_channels'], pad, p['kernel_h'] * p['kernel_w']), dtype=np.float16)
+        expanded[:, :original_in_c] = wt_r
+        weight_ochw = expanded.reshape(-1)
 
     input_packed = pack_nc1hwc2_fp16(input_nchw, p['batch'], p['in_channels'], p['in_h'], p['in_w'], p['align_c'], p['width_stride'])
     weight_packed = pack_conv_weights_fp16(weight_ochw, p['out_channels'], p['weight_in_channels'], p['kernel_h'], p['kernel_w'], p['align_c'], groups)
@@ -587,12 +440,11 @@ def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1
     ctypes.memmove(wt_ptr + REGCMD_RESERVED, mv_address(wt_view), min(packed_weight_size, len(wt_view)))
 
     regs_list = build_conv2d_regs(p, in_mc.dma_addr, wt_mc.dma_addr, out_mc.dma_addr)
+    _verify_config(regs_list)
 
     tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
     regs = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(cmd_map)), ctypes.POINTER(ctypes.c_uint64))
-
-    for i, (t, v, a) in enumerate(regs_list):
-        regs[i] = emit(t, v, a)
+    for i, (t, v, a) in enumerate(regs_list): regs[i] = emit(t, v, a)
 
     tasks[0].flags = 0; tasks[0].op_idx = 1
     tasks[0].enable_mask = 0xd; tasks[0].int_mask = 0x300
@@ -607,21 +459,12 @@ def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1
 
     ret = submit(task_mc.obj_addr)
     print(f"SUBMIT ret={ret}")
-    print(f"  batch={p['batch']} in=({p['batch']},{p['in_channels']},{p['in_h']},{p['in_w']}) out=({p['batch']},{p['out_channels']},{p['out_h']},{p['out_w']})")
-    print(f"  kernel=({p['kernel_h']},{p['kernel_w']}) groups={groups} depthwise={p['is_depthwise']}")
-    print(f"  in_dma=0x{in_mc.dma_addr:x}, wt_dma=0x{wt_mc.dma_addr:x}, out_dma=0x{out_mc.dma_addr:x}")
-    print(f"  regs count={len(regs_list)}")
 
-    out_mv = memoryview(bytearray(packed_output_size))
-    ctypes.memmove(mv_address(out_mv), ctypes.addressof(ctypes.c_char.from_buffer(out_map)), packed_output_size)
-    out_packed = np.frombuffer(out_mv.tobytes(), dtype=np.float16).copy()
+    out_packed = np.frombuffer(out_map, dtype=np.float16, count=packed_output_size // 2).copy()
 
-    # NPU output is NC1HWC2 with c2=8, 1x1 kernels flatten H*W into W.
     unpack_c2 = 8 if p['align_out_c'] >= 8 else p['align_out_c']
-    is_1x1 = (p['kernel_h'] == 1 and p['kernel_w'] == 1)
     if is_1x1:
-        flat_width = p['out_h'] * p['out_w']
-        flat = unpack_nc1hwc2_fp16(out_packed, p['batch'], p['out_channels'], 1, flat_width, unpack_c2, p['out_width_stride'])
+        flat = unpack_nc1hwc2_fp16(out_packed, p['batch'], p['out_channels'], 1, p['out_h'] * p['out_w'], unpack_c2, p['out_width_stride'])
         result = flat.reshape(p['batch'], p['out_channels'], p['out_h'], p['out_w'])
     else:
         result = unpack_nc1hwc2_fp16(out_packed, p['batch'], p['out_channels'], p['out_h'], p['out_w'], unpack_c2, p['out_width_stride'])
@@ -632,22 +475,19 @@ def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1
 
 
 if __name__ == "__main__":
-    if DRY_RUN:
-        print("=== DRY RUN MODE ===")
-        print("Pass --submit to actually run on NPU\n")
     in_c, out_c, kh, kw = 2, 2, 1, 1
     print(f"=== NPU test (in_c={in_c} out_c={out_c} kernel={kh}x{kw} input=4x4) ===")
     try:
         result, inp, wt = run_conv2d(in_c, out_c, kh, kw, (4, 4))
         if result is None:
-            print("DRY RUN complete.")
+            print("DRY RUN complete. Pass --submit to run on NPU.")
             sys.exit(0)
         batch, oc, oh, ow = result.shape
         expected = np.zeros((batch, oc, oh, ow), dtype=np.float16)
         for n in range(batch):
             for o in range(oc):
                 for c in range(in_c):
-                    expected[n,o] += inp[n,c] * wt[o,c,0,0]
+                    expected[n, o] += inp[n, c] * wt[o, c, 0, 0]
         match = np.allclose(result, expected, atol=0.1)
         print(f"CONV {in_c}x{out_c}x{kh}x{kw} -> {out_c}x{oh}x{ow}: {'PASS' if match else 'FAIL'}")
         if not match:
