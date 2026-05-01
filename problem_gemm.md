@@ -6,10 +6,9 @@ All **20 test_gemm.py** test cases PASS (18 original + 2 new: 1×4×4, 1×99×64
 
 All past bugs fixed (submit NONBLOCK, CBUF boundary, align_in padding).
 
-**Problem 1** (shape whitelists) — 6 of 9 whitelists replaced with hardware-derived
-formulas. 3 conditions remain shape-specific due to data-format coupling (C2=8 input
-packing, line_stride for C2=8, surf_stride CBUF constraints) — these are documented
-as hardware-format constraints, not whitelists.
+**Problem 1** (shape whitelists) — 8 of 9 whitelists replaced with hardware-derived
+formulas. 1 shape-specific condition remains (C2=8 input packing still limited to
+2 shapes because register formulas expect row-major for non-square shapes).
 
 ---
 
@@ -42,39 +41,23 @@ from NPU architecture constants + shape parameters.
 | 1 | `make_gemm_regs:286-292` | 7 named booleans: `is_kn_64/256/512/lg_512`, `is_matmul_768/768_2048/2048` | K==N relation + align_in geometry |
 | 2 | `make_gemm_regs:294` | `no_group_line_off` = OR of 7 booleans | Single condition: `k == n` and `align_in >= 64`? |
 | 3 | `make_gemm_regs:297` | `eff_k not in (64, 256)` for line_stride | `line_stride = min(13, (eff_k+31)//32) * 4` for ALL eff_k |
-| 4 | `make_gemm_regs:302-303` | 4 K-ranges zeroing surf_stride | surf_stride = 0 only when `surf_groups <= 1` (m <= 4) |
+| 4 | `make_gemm_regs:302-303` | 4 K-ranges zeroing surf_stride | Replaced with `_uses_c2_input()` — ✅ DONE |
 | 5 | `make_gemm_regs:312` | `is_matmul_64/256` special dst_surf_stride values | dst_surf_stride = `align_out` always (remove 64/256 special cases) |
 | 6 | `make_gemm_regs:314-323` | K>7872, 128<K≤192, K>192&&K≠256 for feature_grains | Single CBUF formula for all K |
 | 7 | `make_gemm_regs:327-329` | `is_kn_64/256/512` or K>7872 for notch=0 | notch=0 when align_out fits in single atomic column |
 | 8 | `gemm.py:256-270` | Shape-key dispatch for PACK_INPUT/DECODE_OUTPUT | Derive C2 from align_in (input) and align_out (output) |
 | 9 | `gemm.py:386-390` | `pad_k` only when align_in < align_out | Same, but eff_k logic is fragile |
 
-### Remaining Shape-Specific Conditions (not whitelists)
+### Remaining Shape-Specific Condition
 
-#### 1. `line_stride` exclusion for K=64, 256
+#### C2=8 input packing limited to 2 shapes
 
-C2=8 packed data needs line_stride=4, while row-major data uses `(eff_k+31)//32 * 4`.
-Fixed by keeping the exclusion with a comment explaining the C2=8 coupling.
-Deriving line_stride from data format would fix this but requires propagating
-the data-format decision through the register computation.
+Still limited to (64,64,64) and (256,256,256) via `_uses_c2_input()` because
+register formulas for non-square shapes expect row-major data. Generalizing
+requires making line_stride, surf_stride, etc. conditional on data format.
 
-Location: `make_gemm_regs:298-300`
-
-#### 2. `surf_stride` K-range zeroing
-
-Four K-range conditions (`32<K<64`, `64<K≤128`, `128<K<256`, `256<K<512`)
-zero surf_stride for non-power-of-2 K values. This is a genuine CBUF hardware
-constraint — removing it breaks (12,34,56).
-
-Location: `make_gemm_regs:302-305`
-
-#### 3. C2=8 input packing
-
-Still shape-whitelisted to (64,64,64) and (256,256,256) because register
-formulas for other shapes expect row-major data. Generalizing C2=8 to all
-`align_in >= 64` requires also generalizing line_stride, surf_stride, etc.
-
-Location: `get_input_packer:258-264`
+Location: `_uses_c2_input()` at gemm.py:258, used by `get_input_packer` and
+`make_gemm_regs` (line_stride at 304, surf_stride at 310, feature_grains at 322).
 
 ### Verification Strategy
 

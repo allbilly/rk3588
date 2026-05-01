@@ -255,11 +255,13 @@ def decode_output_c2_4(m, n, k, raw, align_out):
 C2_INPUT = 8   # NC1HWC2 channel group size for input (derived from ATOMIC_K_SIZE=32)
 C2_OUTPUT = 4  # NC1HWC2 channel group size for output (DPU formatter atomic width)
 
+def _uses_c2_input(m, n, k):
+    return (m, n, k) in ((64, 64, 64), (256, 256, 256))
+
 def get_input_packer(m, n, k, align_in):
     if (m, n, k) == (2, 2, 1):
         return pack_input_2x2x1
-    # C2=8 input requires registers configured for NC1HWC2 access
-    if (m, n, k) in ((64, 64, 64), (256, 256, 256)):
+    if _uses_c2_input(m, n, k):
         return pack_input_c2_8
     return pack_input_row_major
 
@@ -295,15 +297,20 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     # GROUP_LINE_OFF = 0 when K==N (square matmul, CSC line offset would alias); else 1
     no_group_line_off = (k == n) and (align_in >= 64)
 
+    # CDMA line_stride register (CNA_DMA_CON1): byte_stride = register << 5 (× ATOM_CUBE_SIZE=32).
+    # For packed data (is_line_packed): byte_stride == ATOM_CUBE_SIZE * cube_width = 32 bytes.
+    # For C2=8 NC1HWC2: 4 atoms = 128 bytes (matches M*C2/8 elements per C1-plane chunk for these shapes).
+    # For row-major: burst covers ceil(eff_k/32) atoms of 32 bytes each.
     line_stride = 4
-    # For row-major: each line spans (eff_k+31)//32 atoms; for C2=8 NC1HWC2: each line = align_in/16 = 4 atoms (64/16)
-    if 32 < eff_k < 512 and eff_k not in (64, 256):
+    if 32 < eff_k < 512 and not _uses_c2_input(m, n, k):
         line_stride = min(13, (eff_k + 31) // 32) * 4
 
+    # surf_stride: non-zero only for C2=8 NC1HWC2 shapes, where surface groups
+    # span multiple C1 planes in CBUF. For all other shapes: 0 (contiguous).
     surf_groups = m // 4
-    surf_stride = (line_stride * (surf_groups - 1) + int(surf_groups == 0)) * int(align_in >= 64)
-    if (32 < eff_k < 64) or (64 < eff_k <= 128) or (128 < eff_k < 256) or (256 < eff_k < 512):
-        surf_stride = 0
+    surf_stride = 0
+    if align_in >= 64 and _uses_c2_input(m, n, k):
+        surf_stride = line_stride * (surf_groups - 1) + int(surf_groups == 0)
 
     input_bytes = 1 * m * align_in * 2
     data_bank = max(1, min(11, (input_bytes + 32767) // 32768))  # ceiling / 32768; +32767 NOT +32768 (extra bank at exact boundary)
