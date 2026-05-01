@@ -4,75 +4,69 @@ import ctypes
 import numpy as np
 
 class reg:
-    # --- Stream/Target IDs (shifted into bits 48-63) ---
-    TARGET_CNA  = 0x0201   # CNA (Convolution/Matrix unit)
-    TARGET_CORE = 0x0801   # CORE (Matrix compute engine)
-    TARGET_DPU  = 0x1001   # DPU (Elementwise/DPU unit)
-    TARGET_RDMA = 0x2001   # RDMA (Read DMA for inputs/weights)
-    TARGET_PC   = 0x0081   # PC (Program Control / operation enable)
+    TARGET_CNA  = 0x0201
+    TARGET_CORE = 0x0801
+    TARGET_DPU  = 0x1001
+    TARGET_RDMA = 0x2001
+    TARGET_PC   = 0x0081
 
-    # --- PC (0x0000) ---
-    OPERATION_ENABLE    = 0x0008   # PC operation enable
+    OPERATION_ENABLE    = 0x0008
+    S_POINTER           = 0x4004
+    FEATURE_MODE_CFG    = 0x400c
+    DATA_FORMAT         = 0x4010
+    DST_BASE_ADDR       = 0x4020
+    DST_SURF_STRIDE     = 0x4024
+    DATA_CUBE_WIDTH     = 0x4030
+    DATA_CUBE_HEIGHT    = 0x4034
+    DATA_CUBE_NOTCH     = 0x4038
+    DATA_CUBE_CHANNEL   = 0x403c
+    BS_CFG              = 0x4040
+    BS_OW_CFG           = 0x4050
+    WDMA_SIZE_0         = 0x4058
+    WDMA_SIZE_1         = 0x405c
+    BN_CFG              = 0x4060
+    EW_CFG              = 0x4070
+    OUT_CVT_SCALE       = 0x4084
+    SURFACE_ADD         = 0x40c0
 
-    # --- DPU (0x4000) ---
-    S_POINTER           = 0x4004   # DPU S pointer config (pp/exec)
-    FEATURE_MODE_CFG    = 0x400c   # DPU feature mode config
-    DATA_FORMAT         = 0x4010   # DPU data format config
-    DST_BASE_ADDR       = 0x4020   # DPU destination base address
-    DST_SURF_STRIDE     = 0x4024   # DPU destination surface stride
-    DATA_CUBE_WIDTH     = 0x4030   # DPU data cube width
-    DATA_CUBE_HEIGHT    = 0x4034   # DPU data cube height
-    DATA_CUBE_NOTCH     = 0x4038   # DPU data cube notch
-    DATA_CUBE_CHANNEL   = 0x403c   # DPU data cube channel
-    BS_CFG              = 0x4040   # DPU batch/norm/scale config
-    BS_OW_CFG           = 0x4050   # DPU batch OW config
-    WDMA_SIZE_0         = 0x4058   # DPU write DMA size 0
-    WDMA_SIZE_1         = 0x405c   # DPU write DMA size 1
-    BN_CFG              = 0x4060   # DPU batch norm config
-    EW_CFG              = 0x4070   # DPU elementwise config
-    OUT_CVT_SCALE       = 0x4084   # DPU output conversion scale
-    SURFACE_ADD         = 0x40c0   # DPU surface add
+    RDMA_DATA_CUBE_WIDTH  = 0x500c
+    RDMA_DATA_CUBE_HEIGHT = 0x5010
+    RDMA_DATA_CUBE_CHANNEL= 0x5014
+    RDMA_ERDMA_CFG        = 0x5034
+    RDMA_SRC_BASE_ADDR    = 0x5018
+    RDMA_EW_BASE_ADDR    = 0x5038
+    RDMA_FEATURE_MODE_CFG = 0x5044
+    RDMA_DMA_MAP          = 0x504c
 
-    # --- DPU RDMA (0x5000) ---
-    RDMA_DATA_CUBE_WIDTH  = 0x500c   # RDMA data cube width
-    RDMA_DATA_CUBE_HEIGHT = 0x5010   # RDMA data cube height
-    RDMA_DATA_CUBE_CHANNEL= 0x5014   # RDMA data cube channel
-    RDMA_ERDMA_CFG        = 0x5034   # RDMA ERDMA config
-    RDMA_SRC_BASE_ADDR    = 0x5018   # RDMA source base address (input)
-    RDMA_EW_BASE_ADDR    = 0x5038   # RDMA EW base address (weight)
-    RDMA_FEATURE_MODE_CFG = 0x5044   # RDMA feature mode config
+    CNA_CONV_CON1          = 0x100c
+    CNA_CONV_CON2          = 0x1010
+    CNA_CONV_CON3          = 0x1014
+    CNA_DATA_SIZE0         = 0x1020
+    CNA_DATA_SIZE1         = 0x1024
+    CNA_DATA_SIZE2         = 0x1028
+    CNA_DATA_SIZE3         = 0x102c
+    CNA_WEIGHT_SIZE0       = 0x1030
+    CNA_WEIGHT_SIZE1       = 0x1034
+    CNA_WEIGHT_SIZE2       = 0x1038
+    CNA_CBUF_CON0          = 0x1040
+    CNA_CBUF_CON1          = 0x1044
+    CNA_CVT_CON0           = 0x104c
+    CNA_CVT_CON1           = 0x1050
+    CNA_CVT_CON2           = 0x1054
+    CNA_CVT_CON3           = 0x1058
+    CNA_CVT_CON4           = 0x105c
+    CNA_FEATURE_DATA_ADDR  = 0x1070
+    CNA_DMA_CON0           = 0x1078
+    CNA_DMA_CON1           = 0x107c
+    CNA_DMA_CON2           = 0x1080
+    CNA_FC_DATA_SIZE0      = 0x1084
+    CNA_FC_DATA_SIZE1      = 0x1088
+    CNA_DCOMP_ADDR0        = 0x1110
 
-    # --- CNA (0x1000) ---
-    CNA_CONV_CON1          = 0x100c   # CNA convolution control 1
-    CNA_CONV_CON2          = 0x1010   # CNA convolution control 2 (grains)
-    CNA_CONV_CON3          = 0x1014   # CNA convolution control 3 (stride)
-    CNA_DATA_SIZE0         = 0x1020   # CNA input data size 0
-    CNA_DATA_SIZE1         = 0x1024   # CNA input data size 1 (channel)
-    CNA_DATA_SIZE2         = 0x1028   # CNA output data size 2
-    CNA_DATA_SIZE3         = 0x102c   # CNA output data size 3 (atomics)
-    CNA_WEIGHT_SIZE0       = 0x1030   # CNA weight total size
-    CNA_WEIGHT_SIZE1       = 0x1034   # CNA weight per-kernel size
-    CNA_WEIGHT_SIZE2       = 0x1038   # CNA weight dims (width/height/kernels)
-    CNA_CBUF_CON0          = 0x1040   # CNA CBUF config 0 (banks)
-    CNA_CBUF_CON1          = 0x1044   # CNA CBUF config 1 (entries)
-    CNA_CVT_CON0           = 0x104c   # CNA convert config 0
-    CNA_CVT_CON1           = 0x1050   # CNA convert config 1 (scale)
-    CNA_CVT_CON2           = 0x1054   # CNA convert config 2 (scale)
-    CNA_CVT_CON3           = 0x1058   # CNA convert config 3 (scale)
-    CNA_CVT_CON4           = 0x105c   # CNA convert config 4 (scale)
-    CNA_FEATURE_DATA_ADDR  = 0x1070   # CNA feature data base address
-    CNA_DMA_CON0           = 0x1078   # CNA DMA control 0 (burst)
-    CNA_DMA_CON1           = 0x107c   # CNA DMA control 1 (line stride)
-    CNA_DMA_CON2           = 0x1080   # CNA DMA control 2 (surface stride)
-    CNA_FC_DATA_SIZE0      = 0x1084   # CNA FC data size 0
-    CNA_FC_DATA_SIZE1      = 0x1088   # CNA FC data size 1 (channel)
-    CNA_DCOMP_ADDR0        = 0x1110   # CNA weight decompress address 0
-
-    # --- CORE (0x3000) ---
-    CORE_MISC_CFG          = 0x3010   # CORE misc config
-    CORE_DATAOUT_SIZE_0    = 0x3014   # CORE dataout size 0 (height/width)
-    CORE_DATAOUT_SIZE_1    = 0x3018   # CORE dataout size 1 (channel)
-    CORE_RESERVED_3030     = 0x3030   # CORE reserved (must be zeroed)
+    CORE_MISC_CFG          = 0x3010
+    CORE_DATAOUT_SIZE_0    = 0x3014
+    CORE_DATAOUT_SIZE_1    = 0x3018
+    CORE_RESERVED_3030     = 0x3030
 
 RKNPU_MEM_KERNEL_MAPPING = 8
 RKNPU_MEM_NON_CACHEABLE = 0
@@ -147,23 +141,16 @@ class struct_rknpu_task(ctypes.Structure):
     ]
 
 def mem_allocate(fd, size, flags=0):
-    mem_create = rknpu_mem_create(
-        flags=flags, #0x10 | 0x2,  # KERNEL_MAPPING | NON_CACHEABLE
-        size=size
-    )
+    mem_create = rknpu_mem_create(flags=flags, size=size)
     ret = ioctl(fd, DRM_IOCTL_RKNPU_MEM_CREATE, mem_create)
-    print(f"ret={ret}, handle={mem_create.handle}, obj_addr={mem_create.obj_addr:#x}, dma_addr={mem_create.dma_addr:#x}")
-    
-    # Map memory to access from userspace
     mem_map = rknpu_mem_map(handle=mem_create.handle)
     ioctl(fd, DRM_IOCTL_RKNPU_MEM_MAP, mem_map)
     buf = mmap.mmap(fd, mem_create.size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=mem_map.offset)
-    print(f"Memory mapped at offset={mem_map.offset:#x}")
     return buf, mem_create
 
 def submit(task_obj_addr):
     submit_struct = rknpu_submit(
-        flags=0x1 | 0x2 | 0x4,  # RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG
+        flags=0x1 | 0x2 | 0x4,
         timeout=6000,
         task_start=0,
         task_number=1,
@@ -176,20 +163,16 @@ def submit(task_obj_addr):
         core_mask=1,
         fence_fd=-1,
     )
-    # struct len is 5 but only 3 NPU core
     submit_struct.subcore_task[0] = rknpu_subcore_task(task_start=0, task_number=1)
     submit_struct.subcore_task[1] = rknpu_subcore_task(task_start=1, task_number=0)
     submit_struct.subcore_task[2] = rknpu_subcore_task(task_start=2, task_number=0)
     submit_struct.subcore_task[3] = rknpu_subcore_task(task_start=0, task_number=0)
     submit_struct.subcore_task[4] = rknpu_subcore_task(task_start=0, task_number=0)
-
     return ioctl(fd, DRM_IOCTL_RKNPU_SUBMIT, submit_struct)
 
 def reset_npu(fd):
     action = rknpu_action(flags=RKNPU_ACT_RESET, value=0)
-    ret = ioctl(fd, DRM_IOCTL_RKNPU_ACTION, action)
-    print(f"reset_npu ret={ret}")
-    return ret
+    return ioctl(fd, DRM_IOCTL_RKNPU_ACTION, action)
 
 task_map, tasks_mem_create = mem_allocate(fd, size=1024, flags=RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
 regcmd_map, regcmd_mem_create = mem_allocate(fd, size=8192, flags=RKNPU_MEM_NON_CACHEABLE)
@@ -199,6 +182,74 @@ output_map, output_mem_create = mem_allocate(fd, size=4*1024*1024, flags=RKNPU_M
 
 tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
 regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
+
+# ---------------------------------------------------------------------------
+# Packing dispatch: table of (m,n,k) -> (pack_input, pack_weight, decode_output)
+# ---------------------------------------------------------------------------
+
+def pack_input_row_major(m, n, k, a_matrix, in_pack, align_in):
+    in_pack.reshape(m, align_in)[:, :k] = a_matrix[:, :k]
+
+def pack_weight_row_major(m, n, k, b_matrix, wt_pack, align_in, align_out):
+    wt_pack.reshape(align_out, align_in)[:n, :k] = b_matrix[:, :n].T
+
+def pack_input_c2_8(m, n, k, a_matrix, in_pack, align_in):
+    for mm in range(m):
+        for kk in range(k):
+            plane = kk // 8
+            offset = kk % 8
+            in_pack[plane * m * 8 + mm * 8 + offset] = a_matrix[mm, kk]
+
+def pack_weight_tile_16x32(m, n, k, b_matrix, wt_pack, align_in, align_out):
+    for nn in range(n):
+        for kk in range(k):
+            kpg = nn // 16
+            cpg = kk // 32
+            tile_off = (cpg * 32 * 16) + (kpg * 16 * align_in)
+            wt_pack[tile_off + (kk % 32) + ((nn % 16) * 32)] = b_matrix[kk, nn]
+
+def pack_input_2x2x1(m, n, k, a_matrix, in_pack, align_in):
+    a = a_matrix.reshape(-1)
+    in_pack[0], in_pack[1], in_pack[32], in_pack[33] = a[0], a[1], a[2], a[3]
+
+def pack_weight_2x2x1(m, n, k, b_matrix, wt_pack, align_in, align_out):
+    b = b_matrix.reshape(-1)
+    wt_pack[0], wt_pack[1], wt_pack[32], wt_pack[33] = b[0], b[2], b[1], b[3]
+
+def decode_output_linear(m, n, k, raw, align_out):
+    out = np.empty((m, n), dtype=np.float32)
+    stride = align_out
+    for row in range(m):
+        out[row, :n] = raw[row * stride:row * stride + n]
+    return out
+
+def decode_output_c2_4(m, n, k, raw, align_out):
+    out = np.empty((m, n), dtype=np.float32)
+    for col in range(n):
+        plane, offset = col // 4, col % 4
+        plane_base = plane * m * 4
+        for row in range(m):
+            out[row, col] = raw[plane_base + row * 4 + offset]
+    return out
+
+PACK_INPUT = {
+    (2, 2, 1): pack_input_2x2x1,
+    (64, 64, 64): pack_input_c2_8,
+    (256, 256, 256): pack_input_c2_8,
+}
+
+PACK_WEIGHT = {
+    (2, 2, 1): pack_weight_2x2x1,
+}
+
+DECODE_OUTPUT = {
+    (64, 64, 64): decode_output_c2_4,
+    (256, 256, 256): decode_output_c2_4,
+}
+
+# ---------------------------------------------------------------------------
+# Register programming
+# ---------------------------------------------------------------------------
 
 def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     align_in = max(32, ((k + 31) // 32) * 32)
@@ -212,6 +263,11 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     is_matmul_768_2048 = (m == 1 and k == 768 and n == 2048)
     is_matmul_2048 = (m == 1 and k == 2048 and n == 2048)
     no_group_line_off = is_kn_64 or is_kn_256 or is_kn_512 or is_kn_lg_512 or is_matmul_768 or is_matmul_768_2048 or is_matmul_2048
+    # When K is exactly aligned (no padding), use the same register settings
+    # as the special-case shapes: no group line offset, aligned notch.
+    k_exact = (k == align_in)
+    if k_exact and m == k:
+        no_group_line_off = True
 
     line_stride = 4
     if 32 < k < 512 and k not in (64, 256):
@@ -227,7 +283,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
 
     is_matmul_64 = (m == 64 and k == 64 and n == 64)
     is_matmul_256 = (m == 256 and k == 256 and n == 256)
-    dst_surf_stride = 64 if is_matmul_64 else (256 if is_matmul_256 else 1)
+    dst_surf_stride = 64 if is_matmul_64 else (256 if is_matmul_256 else (align_out if no_group_line_off else 1))
 
     feature_grains = m + 1
     if k > 7872:
@@ -242,7 +298,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
 
     notch_blocks = min(13, align_out // 32)
     notch_val = 8 * notch_blocks - 1
-    if is_kn_64 or is_kn_256 or is_kn_512 or is_kn_lg_512 or k > 7872:
+    if is_kn_64 or is_kn_256 or is_kn_512 or is_kn_lg_512 or k > 7872 or no_group_line_off:
         notch_val = 0
 
     def E(target, reg_addr, value):
@@ -301,6 +357,10 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     ]
     return npu_regs
 
+# ---------------------------------------------------------------------------
+# Main GEMM execution
+# ---------------------------------------------------------------------------
+
 def run_gemm(m, n, k, a_matrix, b_matrix):
     align_in = max(32, ((k + 31) // 32) * 32)
     align_out = max(32, ((n + 31) // 32) * 32)
@@ -308,38 +368,11 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
     in_pack = np.zeros(align_in * m, dtype=np.float16)
     wt_pack = np.zeros(align_in * align_out, dtype=np.float16)
 
-    if (m, n, k) == (2, 2, 1):
-        in_full = a_matrix.reshape(-1)
-        wt_full = b_matrix.reshape(-1)
-        in_pack[0], in_pack[1], in_pack[32], in_pack[33] = in_full[0], in_full[1], in_full[2], in_full[3]
-        wt_pack[0], wt_pack[1], wt_pack[32], wt_pack[33] = wt_full[0], wt_full[2], wt_full[1], wt_full[3]
-    elif (m, n, k) == (64, 64, 64):
-        for mm in range(1, 65):
-            for kk in range(1, 65):
-                plane = (kk - 1) // 8
-                offset = (kk - 1) % 8
-                in_pack[plane * 64 * 8 + (mm - 1) * 8 + offset] = a_matrix[mm - 1, kk - 1]
-        for nn in range(1, 65):
-            for kk in range(1, 65):
-                kpg, cpg = (nn - 1) // 16, (kk - 1) // 32
-                wt_idx = ((cpg * 32) * 16) + (kpg * 16 * align_in) + ((kk - 1) % 32) + (((nn - 1) % 16) * 32)
-                wt_pack[wt_idx] = b_matrix[kk - 1, nn - 1]
-    elif (m, n, k) == (256, 256, 256):
-        for mm in range(256):
-            for kk in range(256):
-                plane = kk // 8
-                offset = kk % 8
-                in_pack[plane * 256 * 8 + mm * 8 + offset] = a_matrix[mm, kk]
-        for nn in range(256):
-            for kk in range(256):
-                kpg, cpg = nn // 16, kk // 32
-                wt_idx = ((cpg * 32) * 16) + (kpg * 16 * align_in) + (kk % 32) + ((nn % 16) * 32)
-                wt_pack[wt_idx] = b_matrix[kk, nn]
-    else:
-        in_mat = in_pack.reshape(m, align_in)
-        in_mat[:, :min(k, align_in)] = a_matrix[:, :min(k, align_in)]
-        wt_mat = wt_pack.reshape(align_out, align_in)
-        wt_mat[:n, :min(k, align_in)] = b_matrix[:, :n].T
+    shape_key = (m, n, k)
+    pack_input = PACK_INPUT.get(shape_key, pack_input_row_major)
+    pack_weight = PACK_WEIGHT.get(shape_key, pack_weight_tile_16x32)
+    pack_input(m, n, k, a_matrix, in_pack, align_in)
+    pack_weight(m, n, k, b_matrix, wt_pack, align_in, align_out)
 
     ct_inputs = (ctypes.c_uint16 * len(in_pack)).from_buffer(input_map)
     ct_weights = (ctypes.c_uint16 * len(wt_pack)).from_buffer(weight_map)
@@ -377,26 +410,11 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
 
     reset_npu(fd)
     ret = submit(tasks_mem_create.obj_addr)
-    print(f"SUBMIT ret={ret}")
 
     raw = np.frombuffer(output_map, dtype=np.float32, count=out_nbytes // 4).copy()
 
-    out = np.empty((m, n), dtype=np.float32)
-    if (m, n, k) in {(64, 64, 64), (256, 256, 256)}:
-        c2 = 4
-        for col in range(n):
-            plane, offset = col // c2, col % c2
-            plane_base = plane * m * c2
-            for row in range(m):
-                out[row, col] = raw[plane_base + row * c2 + offset]
-    else:
-        stride = align_out
-        for cand in range(n, min(align_out, 256)):
-            if abs(raw[cand]) > 1e-6:
-                stride = cand
-                break
-        for row in range(m):
-            out[row, :] = raw[row * stride:row * stride + n]
+    decode_output = DECODE_OUTPUT.get(shape_key, decode_output_linear)
+    out = decode_output(m, n, k, raw, align_out)
     return out
 
 if __name__ == "__main__":
