@@ -58,13 +58,24 @@ test_cases = [
 def compute_expected(result, inp, wt, in_c, out_c, kh, kw, oh, ow, groups):
     b = 1
     expected = np.zeros((b, out_c, oh, ow), dtype=np.float16)
-    for n in range(b):
-        for o in range(out_c):
-            for c in range(in_c):
-                wi = 0 if (groups > 1 and groups == in_c and groups == out_c) else c
-                for i in range(kh):
-                    for j in range(kw):
-                        expected[n, o] += inp[n, c, i:i+oh, j:j+ow] * float(wt[o, wi, i, j])
+    if groups > 1:
+        oc_per_group = out_c // groups
+        ic_per_group = in_c // groups
+        for n in range(b):
+            for o in range(out_c):
+                g = o // oc_per_group
+                for c_local in range(ic_per_group):
+                    c = g * ic_per_group + c_local
+                    for i in range(kh):
+                        for j in range(kw):
+                            expected[n, o] += inp[n, c, i:i+oh, j:j+ow] * float(wt[o, c_local, i, j])
+    else:
+        for n in range(b):
+            for o in range(out_c):
+                for c in range(in_c):
+                    for i in range(kh):
+                        for j in range(kw):
+                            expected[n, o] += inp[n, c, i:i+oh, j:j+ow] * float(wt[o, c, i, j])
     return expected
 
 all_pass = True

@@ -221,13 +221,7 @@ def pack_weight_tile_16x32(m, n, k, b_matrix, wt_pack, align_in, align_out):
     wt_pack[:] = wt.reshape(align_out // 16, 16, align_in // 32, 32
         ).transpose(0, 2, 1, 3).ravel()
 
-def pack_input_2x2x1(m, n, k, a_matrix, in_pack, align_in):
-    a = a_matrix.reshape(-1)
-    in_pack[0], in_pack[1], in_pack[32], in_pack[33] = a[0], a[1], a[2], a[3]
 
-def pack_weight_2x2x1(m, n, k, b_matrix, wt_pack, align_in, align_out):
-    b = b_matrix.reshape(-1)
-    wt_pack[0], wt_pack[1], wt_pack[32], wt_pack[33] = b[0], b[2], b[1], b[3]
 
 def decode_output_linear(m, n, k, raw, align_out):
     row_start = np.arange(m) * align_out
@@ -242,6 +236,14 @@ C2_OUTPUT = 4  # NC1HWC2 channel group size for output (DPU formatter atomic wid
 
 def _uses_c2_input(m, n, k):
     return (m, n, k) in ((64, 64, 64), (256, 256, 256))
+
+def pack_input_2x2x1(m, n, k, a_matrix, in_pack, align_in):
+    a = a_matrix.reshape(-1)
+    in_pack[0], in_pack[1], in_pack[32], in_pack[33] = a[0], a[1], a[2], a[3]
+
+def pack_weight_2x2x1(m, n, k, b_matrix, wt_pack, align_in, align_out):
+    b = b_matrix.reshape(-1)
+    wt_pack[0], wt_pack[1], wt_pack[32], wt_pack[33] = b[0], b[2], b[1], b[3]
 
 def get_input_packer(m, n, k, align_in):
     if (m, n, k) == (2, 2, 1):
