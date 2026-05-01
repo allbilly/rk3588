@@ -6,8 +6,8 @@ test_cases = []
 np.random.seed(42)
 
 test_cases.append((2, 2, 1,
-    np.array([[1, 2], [3, 4]], dtype=np.float16),
-    np.array([[5, 6], [7, 8]], dtype=np.float16), "2x2x1 manual"))
+    np.array([[1], [3]], dtype=np.float16),
+    np.array([[5, 6]], dtype=np.float16), "2x2x1 manual"))
 
 a = np.random.randn(65).astype(np.float16)
 b = np.random.randn(65).astype(np.float16)
