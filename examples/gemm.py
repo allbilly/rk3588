@@ -300,8 +300,6 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
 
     input_bytes = 1 * m * align_in * 2
     data_bank = max(1, min(11, (input_bytes + 32767) // 32768))
-    if input_bytes > 0 and input_bytes % 32768 == 0 and data_bank < 11:
-        data_bank += 1  # extra bank when data exactly fills integer banks
     data_entries = (1 * align_in + 31) // 32
 
     is_matmul_64 = (m == 64 and k == 64 and n == 64)

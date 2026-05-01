@@ -1,10 +1,11 @@
 # gemm.py — Issues & Debug Method
 
-## Status: 17/18 PASS, 1 WARN (256x256x256 fp16 accumulation imprecision)
+## Status: 17/18 PASS, 1 WARN (256x256x256 — imprecise, root cause unknown)
 
-All 18 test_gemm.py test cases PASS with `np.allclose(atol=0.1)`. The only
-non-ideal result is 256x256x256 (WARN, md~54-64) due to fp16 accumulation
-error inherent in the NPU hardware — not a register/packing bug.
+All 18 test_gemm.py test cases PASS or WARN. All 17 smaller shapes PASS
+with md < 0.1. 256x256x256 shows md=50-70 (WARN in known_imprecise).
+The NPU hardware CAN compute it correctly (ops_reg proves md=5e-5), but
+gemm.py has an unresolved software plumbing issue for this specific shape.
 
 ---
 
@@ -40,25 +41,25 @@ Before fix: md=36.7. After fix: md=0.008.
 
 ---
 
-## Shape 3: 256x256x256 — IMPRECISE (not a bug)
+## Shape 3: 256x256x256 — IMPRECISE (unresolved)
 
 | Implementation | Result |
 |---------------|--------|
-| gemm.c | not tested |
-| ops_rknn | PASS (max error = 5.34e-5) |
-| **gemm.py** | **WARN (md=54-64)** |
+| ops_reg (gemm.c) | PASS (max error = 5.3e-5) |
+| ops_rknn | PASS (max error = 5.3e-5) |
+| **gemm.py** | **WARN (md=50-70)** |
 
-This is NOT a register or packing bug — the NPU's fp16 accumulation pipeline
-has limited precision for large dot products. The 256×256 inner dimension
-accumulates 256 fp16 products per output element, losing precision to ~3-4
-significant figures. This matches the pre-existing ops_reg result of md=40+.
+All 45 registers are 100% identical between gemm.py and ops_reg. Input
+packing (C2=8 NC1HWC2), weight packing (tile_16x32), and output decode
+(C2=4) all match. Task structure (op_idx, enable_mask, int_mask) also
+match. Yet gemm.py produces md=50+ while ops_reg produces md=5e-5.
 
-The register config is correct: `is_matmul_256` sets `no_group_line_off=True`,
-notch is zeroed by `is_kn_256`, DST_SURF_STRIDE=256, CNSize aligns with
-ops_reg. Output uses C2=4 decode (matching gemm.c).
+**Not a register/packing bug** — the hardware CAN compute 256x256x256
+correctly (ops_reg proves this). Likely a software plumbing issue:
+kernel driver version, buffer allocation flags, or buffer alignment
+that differs between gemm.py and ops_reg's `createRegCmd` path.
 
-Test_gemm.py tracks it in `known_imprecise` — the WARN is suppressed to
-avoid false failures.
+Tracked in `known_imprecise` set in test_gemm.py.
 
 ---
 
