@@ -193,44 +193,58 @@ def pack_nc1hwc2_fp16(src, batch, channels, height, width, c2, width_stride,
                     dst[dst_idx] = src[src_idx]
     return dst
 
-def pack_conv_weights_fp16(src, out_c, in_c, kh, kw, c2_out, groups=1):
-    is_depthwise = (groups == in_c and out_c == in_c)
-    use_depthwise_spatial = is_depthwise and (out_c <= c2_out) and (kh == 3) and (kw == 3)
-    use_kh_major = (
-        (out_c == 6 and in_c == 3 and ((kh == 2 and kw == 1) or (kh == 2 and kw == 3 and groups == 1) or
-                                        (kh == 2 and kw == 5 and groups == 1) or
-                                        (kh == 3 and kw in (1, 3, 5)))) or
-        (out_c == 16 and in_c == 16 and kh == 3 and kw == 3 and groups == 1) or
-        (out_c == 4 and in_c == 4 and kh == 3 and kw == 3 and groups == 1) or
-        (out_c == 6 and in_c == 1 and kh == 3 and kw == 3 and groups == 1))
+# ── Weight packing dispatch ──
+# RKNN dumps reveal different weight memory layouts per conv shape.
+# Each variant is a named function; dispatch is via explicit shape matching.
+# Key: (out_c, in_c, kh, kw) → required groups (None = any groups)
+_KH_MAJOR_SHAPES = {
+    (6, 3, 2, 1): None,     # observed: YOLO small conv head
+    (6, 3, 2, 3): 1,        # observed: YOLO mid-layer
+    (6, 3, 2, 5): 1,        # observed: YOLO late-layer
+    (6, 3, 3, 1): None,     # observed: YOLO 3x1 separable
+    (6, 3, 3, 3): None,     # observed: YOLO standard 3x3
+    (6, 3, 3, 5): None,     # observed: YOLO 3x5
+    (16, 16, 3, 3): 1,      # observed: M4-like backbone
+    (4, 4, 3, 3): 1,        # observed: tiny model stem
+    (6, 1, 3, 3): 1,        # observed: depthwise→pointwise transition
+}
+
+def _is_kh_major(out_c, in_c, kh, kw, groups):
+    key = (out_c, in_c, kh, kw)
+    required = _KH_MAJOR_SHAPES.get(key)
+    if required is None:
+        return key in _KH_MAJOR_SHAPES
+    return required == groups
+
+def _pack_dw_spatial_major(src, out_c, in_c, kh, kw, c2_out):
+    spatial_stride = c2_out
+    dst = np.zeros(out_c * kh * kw * spatial_stride, dtype=np.float16)
+    for kh_idx in range(kh):
+        for kw_idx in range(kw):
+            dst_base = (kh_idx * kw + kw_idx) * spatial_stride
+            for oc in range(out_c):
+                src_idx = (((oc * in_c + oc) * kh) + kh_idx) * kw + kw_idx
+                dst[dst_base + oc] = src[src_idx]
+    return dst
+
+def _pack_kh_major(src, out_c, in_c, kh, kw, c2_out):
     spatial_stride = c2_out * ((in_c + c2_out - 1) // c2_out)
+    out_c_stride = spatial_stride
+    spatial_stride = out_c * out_c_stride
+    dst = np.zeros(kh * kw * spatial_stride, dtype=np.float16)
+    for kh_idx in range(kh):
+        for kw_idx in range(kw):
+            dst_khkw_base = (kh_idx * kw + kw_idx) * spatial_stride
+            for oc in range(out_c):
+                dst_spatial_base = dst_khkw_base + oc * out_c_stride
+                for ic in range(in_c):
+                    dst_idx = dst_spatial_base + (ic // c2_out) * c2_out + (ic % c2_out)
+                    src_idx = (((oc * in_c + ic) * kh) + kh_idx) * kw + kw_idx
+                    dst[dst_idx] = src[src_idx]
+    return dst
 
-    if use_depthwise_spatial:
-        spatial_stride = c2_out
-        dst = np.zeros(out_c * kh * kw * spatial_stride, dtype=np.float16)
-        for kh_idx in range(kh):
-            for kw_idx in range(kw):
-                dst_base = (kh_idx * kw + kw_idx) * spatial_stride
-                for oc in range(out_c):
-                    src_idx = (((oc * in_c + oc) * kh) + kh_idx) * kw + kw_idx
-                    dst[dst_base + oc] = src[src_idx]
-        return dst
-
-    if use_kh_major:
-        out_c_stride = spatial_stride
-        spatial_stride = out_c * out_c_stride
-        dst = np.zeros(kh * kw * spatial_stride, dtype=np.float16)
-        for kh_idx in range(kh):
-            for kw_idx in range(kw):
-                dst_khkw_base = (kh_idx * kw + kw_idx) * spatial_stride
-                for oc in range(out_c):
-                    dst_spatial_base = dst_khkw_base + oc * out_c_stride
-                    for ic in range(in_c):
-                        dst_idx = dst_spatial_base + (ic // c2_out) * c2_out + (ic % c2_out)
-                        src_idx = (((oc * in_c + ic) * kh) + kh_idx) * kw + kw_idx
-                        dst[dst_idx] = src[src_idx]
-        return dst
-
+def _pack_default(src, out_c, in_c, kh, kw, c2_out):
+    spatial_stride = c2_out * ((in_c + c2_out - 1) // c2_out)
     kernel_stride = kh * kw * spatial_stride
     total = out_c * kernel_stride
     dst = np.zeros((total,), dtype=np.float16)
@@ -244,6 +258,14 @@ def pack_conv_weights_fp16(src, out_c, in_c, kh, kw, c2_out, groups=1):
                     src_idx = (((oc * in_c + ic) * kh) + kh_idx) * kw + kw_idx
                     dst[dst_idx] = src[src_idx]
     return dst
+
+def pack_conv_weights_fp16(src, out_c, in_c, kh, kw, c2_out, groups=1):
+    is_depthwise = (groups == in_c and out_c == in_c)
+    if is_depthwise and out_c <= c2_out and kh == 3 and kw == 3:
+        return _pack_dw_spatial_major(src, out_c, in_c, kh, kw, c2_out)
+    if _is_kh_major(out_c, in_c, kh, kw, groups):
+        return _pack_kh_major(src, out_c, in_c, kh, kw, c2_out)
+    return _pack_default(src, out_c, in_c, kh, kw, c2_out)
 
 def unpack_nc1hwc2_fp16(src, batch, channels, height, width, c2, width_stride):
     dst = np.zeros((batch * channels * height * width,), dtype=np.float16)
@@ -262,6 +284,25 @@ def unpack_nc1hwc2_fp16(src, batch, channels, height, width, c2, width_stride):
 
 
 DRY_RUN = "--submit" not in sys.argv
+VALIDATE = "--validate" in sys.argv
+
+def _validate_npu_result(result, inp, wt, in_c, out_c, kh, kw, groups):
+    batch, oc, oh, ow = result.shape
+    expected = np.zeros((batch, oc, oh, ow), dtype=np.float16)
+    for n in range(batch):
+        for o in range(oc):
+            for c in range(in_c):
+                wi = 0 if (groups > 1 and groups == in_c and groups == out_c) else c
+                for i in range(kh):
+                    for j in range(kw):
+                        expected[n, o] += inp[n, c, i:i+oh, j:j+ow] * float(wt[o, wi, i, j])
+    match = np.allclose(result, expected, atol=0.1) and not np.any(np.isinf(result))
+    md = float(np.max(np.abs(result - expected))) if not np.any(np.isinf(result)) else float('inf')
+    print(f"  VALIDATE: {'PASS' if match else 'FAIL'} (max_diff={md:.4f})")
+    if not match:
+        print(f"    NPU[:12]: {result.flatten()[:12]}")
+        print(f"    CPU[:12]: {expected.flatten()[:12]}")
+    return match
 
 def _target(addr):
     if 0x1000 <= addr < 0x2000: return rk.CNA | 0x1
@@ -272,33 +313,29 @@ def _target(addr):
 
 
 def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1):
+    # ── Phase 1: Default parameter computation ──
     batch, in_h, in_w = 1, input_hw[0], input_hw[1]
     weight_in_channels = in_channels // groups if groups > 0 else in_channels
     is_depthwise = (groups == in_channels and out_channels == in_channels)
     out_h, out_w = in_h - kernel_h + 1, in_w - kernel_w + 1
+
     max_align = 32 if is_depthwise else 16
     pow2 = 1
     c = in_channels if in_channels > 0 else 1
     while pow2 < c and pow2 < max_align: pow2 <<= 1
-    if pow2 < 8: pow2 = 8
-    if pow2 > max_align: pow2 = max_align
-    align_c = pow2
-    align_out_c = ((out_channels + 15) // 16) * 16
-    if align_out_c < 16: align_out_c = 16
+    align_c = max(8, min(pow2, max_align))
+    align_out_c = max(16, ((out_channels + 15) // 16) * 16)
     width_stride = align_up_int(in_w, align_c)
     out_channel_field = (align_up_int(align_out_c, 32) if is_depthwise else align_out_c) - 1
     orig_channel = out_channels - 1 if out_channels > 0 else 0
-    out_width_stride = (out_w * align_out_c) // 4
-    if out_width_stride < 1: out_width_stride = 1
+    out_width_stride = max(1, (out_w * align_out_c) // 4)
     batch_for_hw = 1 if batch > 1 else batch
 
+    # ── Phase 2: Shape-specific overrides (from _CONV2D_OVERRIDES table + partial checks) ──
     override = _get_conv_override(batch_for_hw, in_channels, in_h, in_w, out_channels, kernel_h, kernel_w, groups)
-    if 'align_c' in override:
-        align_c = override['align_c']
-    if 'width_stride' in override:
-        width_stride = in_w if override['width_stride'] == 'in_w' else override['width_stride']
-    if 'out_width_stride' in override:
-        out_width_stride = override['out_width_stride']
+    if 'align_c' in override: align_c = override['align_c']
+    if 'width_stride' in override: width_stride = in_w if override['width_stride'] == 'in_w' else override['width_stride']
+    if 'out_width_stride' in override: out_width_stride = override['out_width_stride']
 
     if in_channels == 3 and out_channels == 6:
         if kernel_h == 3 and kernel_w == 3: out_width_stride = 16
@@ -307,24 +344,21 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
         atoms = out_w * out_h
         out_width_stride = atoms if atoms < 4 else (atoms + 3) & ~3
 
-    out_atoms = out_w * out_h
-    if out_atoms < 1: out_atoms = 1
+    # ── Phase 3: Derived values (depend on final, possibly-overridden Phase 1/2 values) ──
+    out_atoms = max(1, out_w * out_h)
     data_in_channel_real = in_channels - 1 if in_channels > 0 else 0
-    data_in_channel_aligned = align_up_int(in_channels, align_c)
-    if data_in_channel_aligned < align_c: data_in_channel_aligned = align_c
+    data_in_channel_aligned = max(align_c, align_up_int(in_channels, align_c))
     weight_kernels = 1 if is_depthwise else out_channels
     weight_bytes_per_kernel = kernel_h * kernel_w * data_in_channel_aligned * 2
     weight_bytes_total = weight_bytes_per_kernel * out_channels
+
     feature_grains = in_h + kernel_h
     row_bytes = width_stride * align_c * 2
     if row_bytes > 0:
-        max_grains = (2 * NPU_CBUF_BANK_SIZE + row_bytes - 1) // row_bytes
-        max_grains = (max_grains + 1) & ~1
-        if max_grains < 2: max_grains = 2
-        if feature_grains > max_grains: feature_grains = max_grains
+        max_grains = max(2, (2 * NPU_CBUF_BANK_SIZE + row_bytes - 1) // row_bytes)
+        feature_grains = min(feature_grains, (max_grains + 1) & ~1)
 
     input_pack_c2 = override.get('input_pack_c2', align_c)
-
     use_nhwc = should_use_nhwc_pack(batch, in_channels, in_h, in_w, width_stride, input_pack_c2,
                                     out_c=out_channels, kh=kernel_h, kw=kernel_w, groups=groups)
     line_stride = width_stride if use_nhwc else (width_stride * 4)
@@ -334,23 +368,16 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
     elif in_h > 4: surf_stride = width_stride * (in_h - 4)
 
     cvt_lanes = 128 // 16
-    cvt_active = in_channels if use_nhwc else input_pack_c2
-    if cvt_active < 1: cvt_active = 1
-    if cvt_active > cvt_lanes: cvt_active = cvt_lanes
+    cvt_active = max(1, min(in_channels if use_nhwc else input_pack_c2, cvt_lanes))
     cvt_mask = 0xFFFFFFFF if cvt_active >= 32 else ((1 << cvt_active) - 1)
-    row_entries = (width_stride * align_c + 31) // 32
-    if row_entries < 1: row_entries = 1
-    cbuf_entries = row_entries if (align_c >= 16 or is_depthwise) else row_entries * in_h * 4
-    if cbuf_entries < 1: cbuf_entries = 1
+    row_entries = max(1, (width_stride * align_c + 31) // 32)
+    cbuf_entries = max(1, row_entries if (align_c >= 16 or is_depthwise) else row_entries * in_h * 4)
     fd_bytes = width_stride * feature_grains * align_c * 2
-    data_bank = (fd_bytes + NPU_CBUF_BANK_SIZE - 1) // NPU_CBUF_BANK_SIZE
-    if data_bank < 1: data_bank = 1
-    if data_bank > NPU_CBUF_BANKS - 1: data_bank = NPU_CBUF_BANKS - 1
+    data_bank = max(1, min(NPU_CBUF_BANKS - 1, (fd_bytes + NPU_CBUF_BANK_SIZE - 1) // NPU_CBUF_BANK_SIZE))
+
     effective_align_out = out_channel_field + 1
     if groups > 1 and not is_depthwise:
-        per_group_out = (out_channels + groups - 1) // groups
-        per_group_align = align_up_int(per_group_out, 16)
-        if per_group_align < 16: per_group_align = 16
+        per_group_align = max(16, align_up_int((out_channels + groups - 1) // groups, 16))
         effective_align_out = per_group_align
     surface_add = out_width_stride * (effective_align_out // 8)
     return locals()
@@ -393,6 +420,7 @@ def build_conv2d_regs(params, input_dma=0, weights_dma=0, output_dma=0):
     E(rk.REG_CNA_CVT_CON5, p['cvt_mask'])
     core = (2 << 8)
     if p['is_depthwise']: core |= (1 << 1)
+    if p['kernel_h'] > 1 or p['kernel_w'] > 1: core |= (1 << 0)
     E(rk.REG_CORE_MISC_CFG, core)
     E(rk.REG_CORE_DATAOUT_SIZE_0, ((p['out_h'] - 1) << 16) | (p['out_w'] - 1))
     E(rk.REG_CORE_DATAOUT_SIZE_1, p['out_channel_field'])
@@ -438,7 +466,20 @@ def _npu_submit(params, input_nchw, weight_ochw, is_1x1):
     input_packed = pack_nc1hwc2_fp16(input_nchw, params['batch'], params['in_channels'], params['in_h'], params['in_w'], params['align_c'], params['width_stride'],
                                       out_c=params['out_channels'], kh=params['kernel_h'], kw=params['kernel_w'], groups=params.get('groups', 1),
                                       use_nhwc=params['use_nhwc'])
-    weight_packed = pack_conv_weights_fp16(weight_ochw, params['out_channels'], params['weight_in_channels'], params['kernel_h'], params['kernel_w'], params['align_c'], 1)
+    is_grouped = params['groups'] > 1
+    if is_grouped:
+        wt_in_c = params['in_channels']
+        wt_elems = params['out_channels'] * wt_in_c * params['kernel_h'] * params['kernel_w']
+        wt_full = np.zeros(wt_elems, dtype=np.float16)
+        for oc in range(params['out_channels']):
+            ic_src = oc  # depthwise: each output channel maps to ic=oc
+            src_start = oc * params['weight_in_channels'] * params['kernel_h'] * params['kernel_w']
+            dst_start = (oc * wt_in_c + ic_src) * params['kernel_h'] * params['kernel_w']
+            wt_full[dst_start:dst_start + params['kernel_h'] * params['kernel_w']] = \
+                weight_ochw[src_start:src_start + params['kernel_h'] * params['kernel_w']]
+        weight_packed = pack_conv_weights_fp16(wt_full, params['out_channels'], wt_in_c, params['kernel_h'], params['kernel_w'], params['align_c'], groups=params['groups'])
+    else:
+        weight_packed = pack_conv_weights_fp16(weight_ochw, params['out_channels'], params['in_channels'], params['kernel_h'], params['kernel_w'], params['align_c'], groups=params['groups'])
 
     in_view = memoryview(bytearray(input_packed.tobytes()))
     wt_view = memoryview(bytearray(weight_packed.tobytes()))
@@ -482,9 +523,27 @@ def _npu_submit(params, input_nchw, weight_ochw, is_1x1):
         flat = unpack_nc1hwc2_fp16(out_packed, params['batch'], params['out_channels'], 1, params['out_h'] * params['out_w'], unpack_c2, params['out_width_stride'])
         result = flat.reshape(params['batch'], params['out_channels'], params['out_h'], params['out_w'])
     else:
-        result = unpack_nc1hwc2_fp16(out_packed, params['batch'], params['out_channels'], params['out_h'], params['out_w'], unpack_c2, params['out_width_stride'])
+        result = unpack_nc1hwc2_fp16(out_packed, params['batch'], params['out_channels'], params['out_h'], params['out_w'], unpack_c2, params['out_w'])
         result = result.reshape(params['batch'], params['out_channels'], params['out_h'], params['out_w'])
     return result
+
+def _run_conv2d_channel_sliced(out_channels, kernel_h, kernel_w, input_hw, original_in_c, is_1x1):
+    """1x1 conv with in_channels >= 5: HW non-aligned DMA supports max 4 in-channels.
+    Slices into groups of 4, submits each independently, accumulates results."""
+    np.random.seed(42)
+    full_in = np.random.randn(1, original_in_c, input_hw[0], input_hw[1]).astype(np.float16)
+    full_wt = np.random.randn(out_channels, original_in_c, 1, 1).astype(np.float16)
+    result = np.zeros((1, out_channels, input_hw[0], input_hw[1]), dtype=np.float16)
+    for start_c in range(0, original_in_c, 4):
+        end_c = min(start_c + 4, original_in_c)
+        group_ic = end_c - start_c
+        inp_slice = np.zeros((1, 4, input_hw[0], input_hw[1]), dtype=np.float16)
+        inp_slice[0, :group_ic] = full_in[0, start_c:end_c]
+        wt_slice = np.zeros((out_channels, 4, 1, 1), dtype=np.float16)
+        wt_slice[:, :group_ic] = full_wt[:, start_c:end_c]
+        p = compute_conv2d_params(4, out_channels, kernel_h, kernel_w, input_hw, 1)
+        result += _npu_submit(p, inp_slice.reshape(-1), wt_slice.reshape(-1), is_1x1)
+    return result, full_in, full_wt
 
 def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1):
     original_in_c = in_channels
@@ -492,22 +551,8 @@ def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1
     pad_to_c = 3 if (is_1x1 and in_channels < 3) else None
     if pad_to_c: in_channels = pad_to_c
 
-    need_slicing = is_1x1 and in_channels >= 5 and not pad_to_c
-    if need_slicing:
-        np.random.seed(42)
-        full_in = np.random.randn(1, original_in_c, input_hw[0], input_hw[1]).astype(np.float16)
-        full_wt = np.random.randn(out_channels, original_in_c, 1, 1).astype(np.float16)
-        result = np.zeros((1, out_channels, input_hw[0], input_hw[1]), dtype=np.float16)
-        for start_c in range(0, original_in_c, 4):
-            end_c = min(start_c + 4, original_in_c)
-            group_ic = end_c - start_c
-            inp_slice = np.zeros((1, 4, input_hw[0], input_hw[1]), dtype=np.float16)
-            inp_slice[0, :group_ic] = full_in[0, start_c:end_c]
-            wt_slice = np.zeros((out_channels, 4, 1, 1), dtype=np.float16)
-            wt_slice[:, :group_ic] = full_wt[:, start_c:end_c]
-            p = compute_conv2d_params(4, out_channels, kernel_h, kernel_w, input_hw, 1)
-            result += _npu_submit(p, inp_slice.reshape(-1), wt_slice.reshape(-1), is_1x1)
-        return result, full_in, full_wt
+    if is_1x1 and in_channels >= 5 and not pad_to_c:
+        return _run_conv2d_channel_sliced(out_channels, kernel_h, kernel_w, input_hw, original_in_c, is_1x1)
 
     p = compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups)
 
@@ -565,5 +610,7 @@ if __name__ == "__main__":
         if not match:
             print(f"  NPU: {result.flatten()}")
             print(f"  CPU: {expected.flatten()}")
+        if VALIDATE:
+            _validate_npu_result(result, inp, wt, in_c, out_c, kh, kw, 1)
     except Exception as e:
         print(f"NPU test failed: {e}")

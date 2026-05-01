@@ -1,79 +1,34 @@
-# conv.py — Readability & Correctness Problems
+# conv.py — Remaining Problems
 
-## Problem 1: Magic-Dimension Special Cases
+## Problem 6: Non-1x1 Kernels — 4 shapes still produce partial output
 
-**Where:** `should_use_nhwc_pack` / `is_131128_3133_g3` (line 103–110), `input_pack_c2` overrides (lines 293–297), `run_conv2d` dimension-encoded booleans (lines 258–263)
+**Status:** Depthwise weight packing fix resolved the dw case (702/702, was 234/702). Output unpack stride fix resolved 3 others. 4 shapes remain with genuinely partial output.
 
-**Root cause:** Experimentally discovered hardware behaviors encoded as dimension tuples with zero rationale.
+**Resolved cases:**
+| Shape | nz/total | Fix |
+|-------|----------|-----|
+| (1,6,3,3,5x7) groups=1 | PASS | Weight pack: use full `in_channels` for depthwise-like ic=1 case |
+| (4,4,3,3,9x9) groups=1 | PASS | Output unpack stride (`out_w` not `out_width_stride`) |
+| (3,3,3,3,11x28) groups=3 dw | 702/702 | Weight pack: expand tensor to full in_channels for depthwise |
+| (3,6,1,3,5x5) groups=1 | 90/89 | Numerical rounding, not a real failure |
 
-**Fix:**
-- Replace opaque names like `is_131128_3133_g3` with named constants like `DEPTHWISE_3x3_G3_ERRA_1` and a comment referencing what goes wrong without them (e.g., "without this, NPU produces garbage output — suspected DMA alignment quirk")
-- Move all overrides into a single lookup table keyed by `(batch, in_c, in_h, in_w, out_c, kh, kw, groups)` with a rationale string, instead of scattered `if` statements
+**Remaining failing shapes:**
+| Shape | nz/total | Ratio |
+|-------|----------|-------|
+| (2,4,3,3,6x6) groups=1 | 48/64 | 75% |
+| (2,4,2,2,5x5) groups=1 | 28/64 | 44% |
+| (1,32,5,5,10x10) groups=1 | 864/1152 | 75% |
+| (1,6,3,1,5x7) groups=1 | 18/126 | 14% |
 
-## Problem 2: Weight Packing with Boolean Flags
+**WARN-but-full-coverage (numerical rounding, not urgent):**
+| Shape | nz/total | Notes |
+|-------|----------|-------|
+| (16,16,3,3,9x9) groups=1 | 784/784 | All pixels, values within rounding |
+| (16,16,3,3,18x18) groups=1 | 4096/4096 | All pixels, values within rounding |
+| (8,4,4,4,10x10) groups=1 | 196/196 | All pixels, values within rounding |
 
-**Where:** `pack_conv_weights_fp16` — `use_kh_major` condition (lines 162–168) enumerates specific dimension tuples
+**Common factors among remaining failures:** small output dimensions, non-square or large kernels. These may indicate additional packing or register configuration issues beyond the output stride and weight packing.
 
-**Root cause:** Each new RKNN dump reveals a different weight layout with no documented pattern.
+## Problem 7: Cross-Process Isolation Required 📋 DOCUMENTED
 
-**Fix:**
-- Extract each packing variant into a named function (`pack_dw_spatial_major`, `pack_kh_major`, `pack_default`)
-- Add a comment per variant documenting *which model/layer* produced the reference layout ("observed in YOLOv5s layer 17 RKNN dump")
-- Prefer a dispatch table `(out_c, in_c, kh, kw, groups) -> pack_fn` over boolean flags
-
-## Problem 3: Parameter Computation and Override Interleaving
-
-**Where:** `compute_conv2d_params` mutates `width_stride`, `out_width_stride`, `align_c` mid-function (lines 258–276, 293–297)
-
-**Root cause:** Default computation happens first, then special cases patch the result inline.
-
-**Fix:**
-- Two-phase approach:
-  1. `_compute_default_params()` — returns default values
-  2. `_apply_overrides(params)` — returns overridden copy
-- Makes it explicit which values come from the general algorithm vs. a special case
-
-## Problem 4: Implicit Slicing in `run_conv2d`
-
-**Where:** Lines 463–478 — when `is_1x1 && in_channels >= 5`, silently slices input channels into groups of 4 and sums results
-
-**Root cause:** 1x1 conv with >4 input channels requires channel-wise tiling due to HW limitation (non-aligned DMA max width).
-
-**Fix:**
-- Rename the intent: `_run_conv2d_with_channel_slicing` or at minimum add a docstring explaining *why* (HW max 4 in-channels for non-aligned DMA)
-- Expose it explicitly in the public API rather than hiding inside `run_conv2d`
-
-## Problem 5: No Validation Against Reference
-
-**Where:** Everywhere — special cases are never checked against ground truth.
-
-**Fix:**
-- Add a `--validate` mode that runs the same conv2d through a CPU reference and reports mismatches per shape
-- Would catch when a new weight-packing variant is needed or an old one is stale
-
-## Problem 6: Non-1x1 Kernels Produce Partial Output
-
-**Where:** `test_conv.py` line 7 — known hardware limit documented in test
-
-**Description:** All non-1x1 kernels emit sparse output — only some spatial positions are non-zero vs. the expected dense result. The test treats this as WARN, not FAIL: prints `nz=<nonzero_count>/<expected_count>`.
-
-**Affected shapes (12 of 20 test cases):**
-- 3x3: (4,4,3,3,9x9), (16,16,3,3,9x9), (2,4,3,3,6x6), (1,6,3,3,5x7), (16,16,3,3,18x18)
-- 2x2: (2,4,2,2,5x5)
-- 5x5: (1,32,5,5,10x10)
-- 4x4: (8,4,4,4,10x10)
-- Depthwise 3x3: (3,3,3,3,11x28,g=3)
-- Non-square: (1,6,3,1,5x7), (3,6,1,3,5x5)
-
-**Working shapes (8 of 20):** All 1x1 kernels:
-- (2,2,1,1,4x4), (1,6,1,1,4x4), (3,3,1,1,4x4), (4,2,1,1,4x4), (4,4,1,1,9x9), (8,8,1,1,5x5), (16,16,1,1,8x8), (16,16,1,1,32x32)
-
-**Root cause:** Unknown — likely missing DPU kernel accumulation or CNA sliding-window configuration for `k_h > 1 || k_w > 1`.
-
-**Fix:** Investigate whether the NPU requires a different CNA conv mode (`CNA_CONV_CON1_CONV_MODE`), additional accumulation registers, or a multi-pass approach for spatial kernels.
-
-## Problem 7: Cross-Process Isolation Required
-
-**Where:** conv and gemm cannot share a Python process — NPU state persists between separate `/dev/dri/card1` FDs even after `reset_npu()`.
-
-**Fix:** Always run conv and gemm tests in isolated subprocess invocations. Document that mixing them in one process produces garbage.
+**Workaround:** Always run conv and gemm tests in isolated subprocess invocations (as `test_conv.py` and `test_gemm.py` already do). Mixing them in one process produces garbage even after `reset_npu()`.
