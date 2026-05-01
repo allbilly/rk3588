@@ -52,7 +52,6 @@ known_imprecise = set()
 
 all_pass = True
 for m, n, k, a, b, desc in test_cases:
-    gemm.reopen_device()
     sys.stdout.write(f"  {desc}: ")
     sys.stdout.flush()
     try:

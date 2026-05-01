@@ -183,25 +183,6 @@ output_map, output_mem_create = mem_allocate(fd, size=4*1024*1024, flags=RKNPU_M
 tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
 regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
 
-_bufs = [task_map, regcmd_map, input_map, weight_map, output_map]
-
-def reopen_device():
-    global fd, task_map, tasks_mem_create, regcmd_map, regcmd_mem_create
-    global input_map, input_mem_create, weight_map, weight_mem_create
-    global output_map, output_mem_create, tasks, regcmd, _bufs
-    for buf in _bufs:
-        buf.close()
-    os.close(fd)
-    fd = os.open("/dev/dri/card1", os.O_RDWR)
-    task_map, tasks_mem_create = mem_allocate(fd, size=1024, flags=RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
-    regcmd_map, regcmd_mem_create = mem_allocate(fd, size=8192, flags=RKNPU_MEM_NON_CACHEABLE)
-    input_map, input_mem_create = mem_allocate(fd, size=4*1024*1024, flags=RKNPU_MEM_NON_CACHEABLE)
-    weight_map, weight_mem_create = mem_allocate(fd, size=4*1024*1024, flags=RKNPU_MEM_NON_CACHEABLE)
-    output_map, output_mem_create = mem_allocate(fd, size=4*1024*1024, flags=RKNPU_MEM_NON_CACHEABLE)
-    tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
-    regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
-    _bufs = [task_map, regcmd_map, input_map, weight_map, output_map]
-
 # ---------------------------------------------------------------------------
 # Packing dispatch: table of (m,n,k) -> (pack_input, pack_weight, decode_output)
 # ---------------------------------------------------------------------------
@@ -218,10 +199,7 @@ def pack_input_c2_8(m, n, k, a_matrix, in_pack, align_in):
 def pack_weight_tile_16x32(m, n, k, b_matrix, wt_pack, align_in, align_out):
     wt = np.zeros((align_out, align_in), dtype=np.float16)
     wt[:n, :k] = b_matrix.T[:n, :k]
-    wt_pack[:] = wt.reshape(align_out // 16, 16, align_in // 32, 32
-        ).transpose(0, 2, 1, 3).ravel()
-
-
+    wt_pack[:] = wt.reshape(align_out // 16, 16, align_in // 32, 32).transpose(0, 2, 1, 3).ravel()
 
 def decode_output_linear(m, n, k, raw, align_out):
     row_start = np.arange(m) * align_out
@@ -238,8 +216,7 @@ def _uses_c2_input(m, n, k):
     return (m, n, k) in ((64, 64, 64), (256, 256, 256))
 
 def get_input_packer(m, n, k, align_in):
-    if _uses_c2_input(m, n, k):
-        return pack_input_c2_8
+    if _uses_c2_input(m, n, k): return pack_input_c2_8
     return pack_input_row_major
 
 def get_weight_packer(m, n, k, align_in):
@@ -257,10 +234,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     align_out = max(32, ((n + 31) // 32) * 32)
     if align_in < align_out:
         align_in = align_out  # pad K to match N alignment; CBUF readback issue at specific align_in values
-
-    eff_k = k
-    if align_in > max(32, ((k + 31) // 32) * 32):  # only when padding was actually applied
-        eff_k = align_in  # use padded K for line_stride/surf_stride/notch calculations
+    eff_k = align_in if align_in > max(32, ((k + 31) // 32) * 32) else k  # use padded K if padding applied
 
     # GROUP_LINE_OFF = 0 when K==N (square matmul, CSC line offset would alias); else 1
     no_group_line_off = (k == n) and (align_in >= 64)
