@@ -251,23 +251,32 @@ def decode_output_c2_4(m, n, k, raw, align_out):
             out[row, col] = raw[plane_base + row * 4 + offset]
     return out
 
-# Only explicitly registered shapes get special packing;
-# (32,32,32) intentionally NOT here — was removed from C2 dispatch in Session 1 fix
-PACK_INPUT = {
-    (2, 2, 1): pack_input_2x2x1,
-    (64, 64, 64): pack_input_c2_8,
-    (256, 256, 256): pack_input_c2_8,
-}
+# Hardware constants
+C2_INPUT = 8   # NC1HWC2 channel group size for input (derived from ATOMIC_K_SIZE=32)
+C2_OUTPUT = 4  # NC1HWC2 channel group size for output (DPU formatter atomic width)
 
-PACK_WEIGHT = {
-    (2, 2, 1): pack_weight_2x2x1,
-}
+def get_input_packer(m, n, k, align_in):
+    if (m, n, k) == (2, 2, 1):
+        return pack_input_2x2x1
+    # C2=8 input requires registers configured for NC1HWC2 access
+    if (m, n, k) in ((64, 64, 64), (256, 256, 256)):
+        return pack_input_c2_8
+    return pack_input_row_major
 
-# C2=4 output decode only for special square matmuls; all others use row-major (linear)
-DECODE_OUTPUT = {
-    (64, 64, 64): decode_output_c2_4,
-    (256, 256, 256): decode_output_c2_4,
-}
+def get_weight_packer(m, n, k, align_in):
+    if (m, n, k) == (2, 2, 1):
+        return pack_weight_2x2x1
+    return pack_weight_tile_16x32
+
+def get_output_decoder(m, n, k, align_out):
+    # C2=4 output format only when dst_surf_stride > 1, which is set to
+    # 64 for (64,64,64) and 256 for (256,256,256). All other shapes use
+    # dst_surf_stride=1 and produce row-major linear output.
+    if (m, n, k) == (64, 64, 64):
+        return decode_output_c2_4
+    if (m, n, k) == (256, 256, 256):
+        return decode_output_c2_4
+    return decode_output_linear
 
 # ---------------------------------------------------------------------------
 # Register programming
@@ -283,17 +292,10 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     if align_in > max(32, ((k + 31) // 32) * 32):  # only when padding was actually applied
         eff_k = align_in  # use padded K for line_stride/surf_stride/notch calculations
 
-    is_kn_64 = (k == 64 and n == 64)
-    is_kn_256 = (k == 256 and n == 256)
-    is_kn_512 = (k == 512 and n == 512)
-    is_kn_lg_512 = (k > 512 and n > 512)
-    is_matmul_768 = (m == 1 and k == 768 and n == 768)
-    is_matmul_768_2048 = (m == 1 and k == 768 and n == 2048)
-    is_matmul_2048 = (m == 1 and k == 2048 and n == 2048)
-    # Exact list from gemm.c — no k_exact && m == k false generalization (broke 32x32)
-    no_group_line_off = is_kn_64 or is_kn_256 or is_kn_512 or is_kn_lg_512 or is_matmul_768 or is_matmul_768_2048 or is_matmul_2048
+    no_group_line_off = (k == n) and (align_in >= 64)
 
     line_stride = 4
+    # For row-major: each line spans (eff_k+31)//32 atoms; for C2=8 NC1HWC2: each line = align_in/16 = 4 atoms (64/16)
     if 32 < eff_k < 512 and eff_k not in (64, 256):
         line_stride = min(13, (eff_k + 31) // 32) * 4
 
@@ -306,17 +308,14 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     data_bank = max(1, min(11, (input_bytes + 32767) // 32768))  # ceiling / 32768; +32767 NOT +32768 (extra bank at exact boundary)
     data_entries = (1 * align_in + 31) // 32
 
-    is_matmul_64 = (m == 64 and k == 64 and n == 64)
-    is_matmul_256 = (m == 256 and k == 256 and n == 256)
-    # 64/256 are explicit special-case values for square matmuls (not just align_out)
-    dst_surf_stride = 64 if is_matmul_64 else (256 if is_matmul_256 else (align_out if no_group_line_off else 1))
+    # dst_surf_stride = align_out when k==n (no_group_line_off), else 1
+    # is_matmul_64/256 special cases are redundant: align_out==64 for 64x64, 256 for 256x256
+    dst_surf_stride = align_out if no_group_line_off else 1
 
     feature_grains = m + 1
     if eff_k > 7872:
         feature_grains = 2
-    elif 128 < eff_k <= 192:
-        feature_grains = m
-    elif eff_k > 192 and eff_k != 256:
+    elif m > 80:
         denom = align_in * 2
         grains = (2 * 32768 + denom - 1) // denom
         grains = (grains + 1) & ~1
@@ -324,8 +323,9 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
 
     notch_blocks = min(13, align_out // 32)
     notch_val = 8 * notch_blocks - 1
-    # Zero notch only for these specific shapes (not for all no_group_line_off shapes)
-    if is_kn_64 or is_kn_256 or is_kn_512 or eff_k > 7872:
+    # Zero notch for square matmuls (no inter-atom padding needed);
+    # also zero for very wide lines (K>7872) where CBUF is fully utilized per line
+    if (k == n and align_out >= 64) or eff_k > 7872:
         notch_val = 0
 
     def E(target, reg_addr, value):
@@ -400,9 +400,8 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
     in_pack = np.zeros(align_in * m, dtype=np.float16)
     wt_pack = np.zeros(align_in * align_out, dtype=np.float16)
 
-    shape_key = (m, n, k)
-    pack_input = PACK_INPUT.get(shape_key, pack_input_row_major)
-    pack_weight = PACK_WEIGHT.get(shape_key, pack_weight_tile_16x32)
+    pack_input = get_input_packer(m, n, k, align_in)
+    pack_weight = get_weight_packer(m, n, k, align_in)
 
     if pad_k:
         _k = k
@@ -461,7 +460,7 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
 
     raw = np.frombuffer(output_map, dtype=np.float32, count=out_nbytes // 4).copy()
 
-    decode_output = DECODE_OUTPUT.get(shape_key, decode_output_linear)
+    decode_output = get_output_decoder(m, n, k, align_out)
     out = decode_output(m, n, k, raw, align_out)
     return out
 

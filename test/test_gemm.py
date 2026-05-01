@@ -21,7 +21,7 @@ a = np.random.randn(45, 65).astype(np.float16)
 b = np.random.randn(65).astype(np.float16)
 test_cases.append((45, 1, 65, a, b.reshape(65, 1), "mat@vec 45x1"))
 
-for (m, n, k) in [(45, 100, 65), (64, 99, 64)]:
+for (m, n, k) in [(45, 100, 65), (64, 99, 64), (1, 4, 4), (1, 99, 64)]:
     a = np.random.randn(m, k).astype(np.float16)
     b = np.random.randn(k, n).astype(np.float16)
     test_cases.append((m, n, k, a, b, f"matmul {m}x{n}"))
@@ -43,11 +43,12 @@ b = np.random.randn(1, 32).astype(np.float16)
 test_cases.append((32, 32, 1, a, b, "32x32x1 (outer)"))
 
 proven = {(2,2,1), (4,4,4), (8,8,8), (9,9,9),
-          (32,32,32), (64,64,64), (64,99,64),
+          (32,32,32), (64,64,64), (256,256,256), (64,99,64),
           (4,8,16), (16,4,8), (8,32,4), (32,32,1),
           (1,1,65), (1,45,65), (45,1,65), (45,100,65),
+          (1,4,4), (1,99,64),
           (50,10,20), (12,34,56)}
-known_imprecise = {(256, 256, 256)}
+known_imprecise = set()
 
 all_pass = True
 for m, n, k, a, b, desc in test_cases:
