@@ -494,14 +494,10 @@ def _npu_submit(params, input_nchw, weight_ochw, is_1x1):
             packed_weight_size = params['out_channels'] * params['kernel_h'] * params['kernel_w'] * ((params['weight_in_channels'] + params['align_c'] - 1) // params['align_c']) * params['align_c'] * 2
             weight_packed = pack_conv_weights_fp16(wt_full, params['out_channels'], in_c, kh, kw, params['align_c'], groups=1)
         else:
-            wt_in_c = params['in_channels']
-            wt_elems = params['out_channels'] * wt_in_c * kh * kw
-            wt_full = np.zeros(wt_elems, dtype=np.float16)
-            for oc in range(params['out_channels']):
-                src_start = oc * params['weight_in_channels'] * kh * kw
-                dst_start = (oc * wt_in_c + oc) * kh * kw
-                wt_full[dst_start:dst_start + kh * kw] = weight_ochw[src_start:src_start + kh * kw]
-            weight_packed = pack_conv_weights_fp16(wt_full, params['out_channels'], wt_in_c, kh, kw, params['align_c'], groups=params['groups'])
+            # Depthwise: keep original weights (out_c, in_c//groups, kh, kw) = (out_c, 1, kh, kw).
+            # Do NOT expand — pack_conv_weights_fp16 with groups=params['groups'] handles the
+            # depthwise weight layout correctly.
+            weight_packed = pack_conv_weights_fp16(weight_ochw, params['out_channels'], params['weight_in_channels'], kh, kw, params['align_c'], groups=params['groups'])
     else:
         weight_packed = pack_conv_weights_fp16(weight_ochw, params['out_channels'], params['in_channels'], params['kernel_h'], params['kernel_w'], params['align_c'], groups=params['groups'])
 
