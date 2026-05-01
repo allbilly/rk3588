@@ -150,7 +150,7 @@ def mem_allocate(fd, size, flags=0):
 
 def submit(task_obj_addr):
     submit_struct = rknpu_submit(
-        flags=0x1 | 0x2 | 0x4,
+        flags=0x1,  # PC | BLOCK (NOT NONBLOCK: ioctl would return before NPU finishes)
         timeout=6000,
         task_start=0,
         task_number=1,
@@ -251,6 +251,8 @@ def decode_output_c2_4(m, n, k, raw, align_out):
             out[row, col] = raw[plane_base + row * 4 + offset]
     return out
 
+# Only explicitly registered shapes get special packing;
+# (32,32,32) intentionally NOT here — was removed from C2 dispatch in Session 1 fix
 PACK_INPUT = {
     (2, 2, 1): pack_input_2x2x1,
     (64, 64, 64): pack_input_c2_8,
@@ -261,6 +263,7 @@ PACK_WEIGHT = {
     (2, 2, 1): pack_weight_2x2x1,
 }
 
+# C2=4 output decode only for special square matmuls; all others use row-major (linear)
 DECODE_OUTPUT = {
     (64, 64, 64): decode_output_c2_4,
     (256, 256, 256): decode_output_c2_4,
@@ -274,11 +277,11 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     align_in = max(32, ((k + 31) // 32) * 32)
     align_out = max(32, ((n + 31) // 32) * 32)
     if align_in < align_out:
-        align_in = align_out
+        align_in = align_out  # pad K to match N alignment; CBUF readback issue at specific align_in values
 
     eff_k = k
-    if align_in > max(32, ((k + 31) // 32) * 32):
-        eff_k = align_in
+    if align_in > max(32, ((k + 31) // 32) * 32):  # only when padding was actually applied
+        eff_k = align_in  # use padded K for line_stride/surf_stride/notch calculations
 
     is_kn_64 = (k == 64 and n == 64)
     is_kn_256 = (k == 256 and n == 256)
@@ -287,6 +290,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     is_matmul_768 = (m == 1 and k == 768 and n == 768)
     is_matmul_768_2048 = (m == 1 and k == 768 and n == 2048)
     is_matmul_2048 = (m == 1 and k == 2048 and n == 2048)
+    # Exact list from gemm.c — no k_exact && m == k false generalization (broke 32x32)
     no_group_line_off = is_kn_64 or is_kn_256 or is_kn_512 or is_kn_lg_512 or is_matmul_768 or is_matmul_768_2048 or is_matmul_2048
 
     line_stride = 4
@@ -299,11 +303,12 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
         surf_stride = 0
 
     input_bytes = 1 * m * align_in * 2
-    data_bank = max(1, min(11, (input_bytes + 32767) // 32768))
+    data_bank = max(1, min(11, (input_bytes + 32767) // 32768))  # ceiling / 32768; +32767 NOT +32768 (extra bank at exact boundary)
     data_entries = (1 * align_in + 31) // 32
 
     is_matmul_64 = (m == 64 and k == 64 and n == 64)
     is_matmul_256 = (m == 256 and k == 256 and n == 256)
+    # 64/256 are explicit special-case values for square matmuls (not just align_out)
     dst_surf_stride = 64 if is_matmul_64 else (256 if is_matmul_256 else (align_out if no_group_line_off else 1))
 
     feature_grains = m + 1
@@ -319,6 +324,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
 
     notch_blocks = min(13, align_out // 32)
     notch_val = 8 * notch_blocks - 1
+    # Zero notch only for these specific shapes (not for all no_group_line_off shapes)
     if is_kn_64 or is_kn_256 or is_kn_512 or eff_k > 7872:
         notch_val = 0
 
@@ -354,6 +360,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
         E(reg.TARGET_CNA,  reg.CNA_DMA_CON2,     surf_stride),
         E(reg.TARGET_CNA,  reg.CNA_FC_DATA_SIZE0, (1 << 16) | m),
         E(reg.TARGET_CNA,  reg.CNA_FC_DATA_SIZE1, align_in),
+        # No REGCMD_RESERVED offset — regcmds in separate buffer, weights start at offset 0
         E(reg.TARGET_CNA,  reg.CNA_DCOMP_ADDR0,  wt_dma & 0xFFFFFFFF),
         E(reg.TARGET_CORE, reg.CORE_MISC_CFG,       (2 << 8) | 1),
         E(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_0, ((m - 1) << 16) | 0),
@@ -365,6 +372,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
         E(reg.TARGET_DPU,  reg.DST_SURF_STRIDE,   dst_surf_stride << 4),
         E(reg.TARGET_DPU,  reg.DATA_CUBE_WIDTH,   0),
         E(reg.TARGET_DPU,  reg.DATA_CUBE_HEIGHT,  m - 1),
+        # Both halves of NOTCH and CHANNEL use same value (hi=lo) for matmul
         E(reg.TARGET_DPU,  reg.DATA_CUBE_NOTCH,   (notch_val << 16) | notch_val),
         E(reg.TARGET_DPU,  reg.DATA_CUBE_CHANNEL, ((align_out - 1) << 16) | (align_out - 1)),
         E(reg.TARGET_DPU,  reg.BS_CFG,            0x00000053),
@@ -401,6 +409,7 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
         def _pack_input(m, n, k, a, buf, ai):
             buf.reshape(m, ai)[:, :k] = a[:, :k]
         pack_input = _pack_input
+        # bound to original k (not align_in), so zero-padding beyond K is harmless
         def _pack_weight(m, n, k, b, buf, ai, ao):
             for nn in range(n):
                 for kk in range(k):
@@ -438,8 +447,8 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
         regcmd[i] = 0
 
     tasks[0].flags  = 0;
-    tasks[0].op_idx = 4;
-    tasks[0].enable_mask = 0x18;
+    tasks[0].op_idx = 4;        # GEMM pipeline — NOT conv pipeline (op_idx=1, enable_mask=0xd)
+    tasks[0].enable_mask = 0x18;# CSC | CMAC_A — enable mask for matmul sub-blocks
     tasks[0].int_mask = 0x300;
     tasks[0].int_clear = 0x1ffff;
     tasks[0].int_status = 0;

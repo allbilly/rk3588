@@ -1,130 +1,294 @@
-# gemm.py — Issues & Debug Method
+# gemm.py Problems & Improvement Plan
 
-## Status: 17/18 PASS, 1 WARN (256x256x256 — imprecise, root cause unknown)
+## Summary
 
-All 18 test_gemm.py test cases PASS or WARN. All 17 smaller shapes PASS
-with md < 0.1. 256x256x256 shows md=50-70 (WARN in known_imprecise).
-The NPU hardware CAN compute it correctly (ops_reg proves md=5e-5), but
-gemm.py has an unresolved software plumbing issue for this specific shape.
+`gemm.py` works for a few hardcoded shapes (2×2×1, 64×64×64, 256×256×256) but is suboptimal for general GEMM on RK3588 NPU. The issues stem from using shape whitelists instead of deriving parameters from hardware config (`atomicKSize`), and from known bugs documented in AGENTS.md.
 
----
-
-## Shape 1: 32x32x32 — FIXED
-
-**Root cause (old):** `k_exact && m == k` rule incorrectly disabled GROUP_LINE_OFF.
-
-| Register | gemm.c (correct) | gemm.py (before fix) |
-|----------|-----------------|---------------------|
-| GROUP_LINE_OFF (CONV_CON1 bit 29) | `1` (enabled) | `0` (disabled) |
-| NOTCH (DATA_CUBE_NOTCH) | `7` | `0` |
-| DST_SURF_STRIDE | `1` | `32` |
-| SURFACE_ADD | `4` | `0x800` |
-| OUTPUT DECODE | C2=32 (row-major) | C2=4 (wrong) |
-
-**Fix:** Removed `k_exact && m == k` override. Notch zeroing now matches gemm.c
-(only for `is_KN_64/256/512 || K>7872`). Output decode uses linear (C2=align_out).
+**Key reference repos to cross-check via deepwiki:**
+- `nvdla/hw` — C-model (cmod/) for hardware behavior, register definitions
+- `nvdla/sw` — UMD compiler for `make_matmul_params()`, `atomicKSize`, C2 derivation
 
 ---
 
-## Shape 2: 64x99x64 — FIXED
+## Problem 1: Shape Whitelists Instead of Hardware-Derived Parameters
 
-**Root cause:** `align_in=64 < align_out=128`. The NPU hardware has a CBUF
-readback issue when the input cube alignment is smaller than the output
-cube alignment at specific align_in values (particularly 64).
+### Current Behavior
 
-**Fix:** When `align_in < align_out`, pad `align_in` up to `align_out`.
-Input data is zero-padded for the extra channels; weight values beyond
-original K are zero and multiply harmlessly. `eff_k = align_in` (post-padding)
-is used for line_stride, surf_stride, feature_grains, notch calculations.
+`gemm.py` uses hardcoded shape lists for C2=8 input packing and C2=4 output decoding:
 
-Before fix: md=36.7. After fix: md=0.008.
-
----
-
-## Shape 3: 256x256x256 — IMPRECISE (unresolved)
-
-| Implementation | Result |
-|---------------|--------|
-| ops_reg (gemm.c) | PASS (max error = 5.3e-5) |
-| ops_rknn | PASS (max error = 5.3e-5) |
-| **gemm.py** | **WARN (md=50-70)** |
-
-All 45 registers are 100% identical between gemm.py and ops_reg. Input
-packing (C2=8 NC1HWC2), weight packing (tile_16x32), and output decode
-(C2=4) all match. Task structure (op_idx, enable_mask, int_mask) also
-match. Yet gemm.py produces md=50+ while ops_reg produces md=5e-5.
-
-**Not a register/packing bug** — the hardware CAN compute 256x256x256
-correctly (ops_reg proves this). Likely a software plumbing issue:
-kernel driver version, buffer allocation flags, or buffer alignment
-that differs between gemm.py and ops_reg's `createRegCmd` path.
-
-Tracked in `known_imprecise` set in test_gemm.py.
-
----
-
-## Shape 4: 45x100x65 — FIXED
-
-**Details:** `k=65`, `align_in=96`, `align_out=128`. This shape had no explicit
-bug — it worked before and still works after all fixes (md=0.008).
-
----
-
-## Shape 5: 256x256x256 CBUF fix (earlier attempt)
-
-Previously suspected CBUF bank issues — extra data_bank at exact 32768-byte
-boundary (`data_bank += 1` on exact multiple). This was already in the code
-and is not harmful but didn't fix the imprecision (which is fp16 accumulation,
-not CBUF).
-
----
-
-## All Fixes Summary
-
-| Fix | Shapes affected | Date |
-|-----|----------------|------|
-| Removed `k_exact && m == k` GROUP_LINE_OFF override | 32x32x32, 64x99x64 | Session 1 |
-| Notch zeroing matches gemm.c (is_KN_64/256/512 only) | 32x32x32 | Session 1 |
-| Remove (32,32,32) from C2 dispatch tables | 32x32x32 | Session 1 |
-| Output decode uses linear for non-special shapes | 32x32x32, 64x99x64 | Session 1 |
-| `reopen_device()` between test cases for NPU state isolation | All | Session 1 |
-| Pad align_in to align_out when align_in < align_out | 64x99x64, 256x256x256 | Session 2 |
-| `eff_k = align_in` used for line_stride/surf_stride/feat_grains/notch | 64x99x64 | Session 2 |
-| Weight packing bounds use min(n,align_out), min(k,align_in) | 64x99x64 | Session 2 |
-| Output decode zero-pads when n > align_out | 64x99x64 | Session 2 |
-
----
-
-## Code References
-
-- `experimental/gemm.c` — Canonical matmul register config (174 lines)
-- `experimental/rknnops.h` — `make_matmul_params` (line 164), `pack_matmul_weights_fp16` (line 834), `feature_data` (line 765)
-- `experimental/rknnops.h:1440-1611` — `alu_case_matmul` (duplicate)
-- `examples/gemm.py` — Python implementation
-- `~/npu/ops_rknn/matmul_api.cpp` — Vendor library (ground truth)
-- `~/npu/ops_reg/main.c` — ops_reg C implementation
-
-## Test Commands
-
-```bash
-# Full test suite
-cd /home/orangepi/rk3588 && python test/test_gemm.py
-
-# Single shape quick test
-python -c "
-import sys, numpy as np; sys.path.insert(0, 'examples'); import gemm
-np.random.seed(42)
-m,n,k=64,99,64; a=np.random.randn(m,k).astype(np.float16); b=np.random.randn(k,n).astype(np.float16)
-r=gemm.run_gemm(m,n,k,a,b); e=a@b
-print('PASS' if np.allclose(r,e,atol=0.1) else 'FAIL', 'md=', float(np.max(np.abs(r-e))))
-"
-
-# Dry run register dump
-python -c "
-import sys; sys.path.insert(0, 'examples'); import gemm
-sys.argv.append('--dry')
-gemm.run_gemm(64, 99, 64,
-    np.random.randn(64,64).astype(np.float16),
-    np.random.randn(64,99).astype(np.float16))
-"
+```python
+PACK_INPUT = {
+    (2, 2, 1): pack_input_2x2x1,
+    (64, 64, 64): pack_input_c2_8,
+    (256, 256, 256): pack_input_c2_8,
+}
+DECODE_OUTPUT = {
+    (64, 64, 64): decode_output_c2_4,
+    (256, 256, 256): decode_output_c2_4,
+}
 ```
+
+Similarly, `no_group_line_off` (which controls GROUP_LINE_OFF register bit) is determined by a 7-shape whitelist:
+
+```python
+no_group_line_off = is_kn_64 or is_kn_256 or is_kn_512 or is_kn_lg_512 or is_matmul_768 or is_matmul_768_2048 or is_matmul_2048
+```
+
+### What NVDLA/sw Does (verify via deepwiki)
+
+Use deepwiki to check `nvdla/sw`:
+```
+deepwiki_ask_question("nvdla/sw",
+    "How does make_matmul_params() determine align_in, align_out?
+     What is atomicKSize for RK3588? How does compiler derive C2?")
+```
+
+Findings from deepwiki (see conversation above):
+- `atomicKSize = 32` (from `nvdla_config_large.h`, `NVDLA_MAC_ATOMIC_K_SIZE`)
+- For FP16: `C2 = atomicKSize / 2 = 16`
+- Compiler sets `pixelFormat = FEATURE_X8` when `memAtomSize=8`, `FEATURE_X32` when `memAtomSize=32`
+- `C2 = channelsPerGroup = atomicKSize / 2` (for FP16)
+
+### What NVDLA/hw Confirms (verify via deepwiki)
+
+Use deepwiki to check `nvdla/hw`:
+```
+deepwiki_ask_question("nvdla/hw",
+    "What is PARALLEL_CHANNEL_NUM? How does CSC expect input in NC1HWC2 format?
+     What is MAC_CELL_NUM and how does C2 relate to it?")
+```
+
+Findings from deepwiki (see conversation above):
+- `PARALLEL_CHANNEL_NUM = 64` (MAC array width)
+- `MAC_CELL_NUM = 8` cells
+- C2=8 matches one MAC cell's width
+- Input packing should match `memAtomSize` / `atomicKSize`
+
+### The Issue
+
+`gemm.py` hardcodes C2=8 for only 2 shapes. For RK3588 with `atomicKSize=32` (FP16 C2=16), many more shapes should use C2 packing when `align_in >= 64` (i.e., K ≥ 64 after alignment).
+
+---
+
+## Problem 2: `no_group_line_off` False Generalization
+
+### From AGENTS.md
+
+> `k_exact and m == k` rule (line 291-292): This false generalization disables GROUP_LINE_OFF for shapes like 32x32x32 and 64x99x64. gemm.c only disables GROUP_LINE_OFF for explicit shapes.
+
+### The Real Rule
+
+From `experimental/gemm.c` line 27-28:
+```c
+if (!is_KN_64 && !is_KN_256 && !is_KN_512 && !is_KN_lg_512 && !is_matmul_768 && !is_matmul_768_2048 && !is_matmul_2048)
+    conv_con1 |= CNA_CONV_CON1_GROUP_LINE_OFF(1);
+```
+
+**Verify with deepwiki on `nvdla/hw`:**
+```
+deepwiki_ask_question("nvdla/hw",
+    "What does GROUP_LINE_OFF do in CNA_CONV_CON1 register?
+     When should it be set/cleared for GEMM operations?
+     How does CSC handle line stride vs group mode?")
+```
+
+The correct generalization should be:
+- **Disable GROUP_LINE_OFF when `align_in >= 64`** (C2 packing is active)
+- The whitelist in both `gemm.c` and `gemm.py` is incomplete — verify with deepwiki what the hardware expects
+
+---
+
+## Problem 3: `data_bank` Boundary Bug
+
+### From AGENTS.md
+
+> `data_bank += 1` at exact 32768 boundary (gemm.py line 299): gemm.c does NOT increment data_bank when `input_bytes % 32768 == 0`. This caused 256x256x256 to have CBUF_CON0=0x75 (DATA_BANK=5) instead of 0x84 (DATA_BANK=4), producing md=54 instead of md=5e-5.
+
+### The Bug
+
+`gemm.py` line 302:
+```python
+data_bank = max(1, min(11, (input_bytes + 32767) // 32768))
+```
+
+**Verify CBUF bank calculation with deepwiki on `nvdla/hw`:**
+```
+deepwiki_ask_question("nvdla/hw",
+    "How does CNA_CBUF_CON0 register work?
+     What is NPU_CBUF_BANKS and NPU_CBUF_BANK_SIZE?
+     How should DATA_BANK and WEIGHT_BANK be calculated?")
+```
+
+---
+
+## Problem 4: C2=4 Output But C2=8/16 Input — Asymmetry
+
+### Current State
+
+- Input C2=8 for 64×64×64 and 256×256×256
+- Output C2=4 for the same shapes
+- All other shapes use row-major (C2=effective width)
+
+### Hardware Constraint (verify with deepwiki)
+
+**Check `nvdla/hw` C-model:**
+```
+deepwiki_ask_question("nvdla/hw",
+    "How does DPU output formatter work?
+     What is the C2 value for output in NC1HWC2 format?
+     Why is output C2=4 while input can be C2=8 or C2=16?")
+```
+
+The output formatter uses C2=4 regardless of input C2 because:
+- The output DMA writes 4 channels per cycle (`SURFACE_ADD` stride is based on 4-channel groups)
+- This is a hardware constraint, not derived from `atomicKSize`
+
+---
+
+## Improvement Plan
+
+### Step 1: Derive C2 from `atomicKSize` (like NVDLA/sw)
+
+**Verify with deepwiki before implementing:**
+```
+deepwiki_ask_question(["nvdla/sw", "nvdla/hw"],
+    "For RK3588 NVDLA, what is the correct C2 value for FP16 GEMM?
+     Is C2=8, C2=16, or does it vary by shape?
+     Check nvdla/sw compiler and nvdla/hw C-model for ground truth.")
+```
+
+```python
+# RK3588 NVDLA config (verify via deepwiki)
+ATOMIC_K_SIZE = 32  # from nvdla_config_large.h, verify with deepwiki
+C2_INPUT = ATOMIC_K_SIZE // 2  # = 16 for FP16 (not hardcoded 8)
+C2_OUTPUT = 4  # hardware constraint for output formatter (verify with nvdla/hw)
+```
+
+### Step 2: Generalize Input Packing
+
+Replace the whitelist with a general rule:
+
+```python
+def get_input_packer(align_in):
+    if align_in >= 64:
+        # Use C2_INPUT (16 for RK3588 FP16, per nvdla/sw)
+        return pack_input_c2(C2_INPUT)
+    return pack_input_row_major
+
+def pack_input_c2(c2):
+    """Generalized C2 packing - works for any C2 value (8, 16, etc.)"""
+    def pack(m, n, k, a_matrix, in_pack, align_in):
+        k_planes = k // c2
+        in_pack[:m * k] = a_matrix.reshape(m, k_planes, c2).transpose(1, 0, 2).ravel()
+    return pack
+```
+
+### Step 3: Generalize `no_group_line_off`
+
+```python
+# Disable GROUP_LINE_OFF when C2 packing is active (align_in >= 64)
+# VERIFY with deepwiki on nvdla/hw before finalizing
+no_group_line_off = align_in >= 64
+```
+
+**WARNING**: This is a simplification. The `gemm.c` whitelist suggests certain shapes need GROUP_LINE_OFF disabled even when `align_in < 64`.
+**Verify with deepwiki:**
+```
+deepwiki_ask_question("nvdla/hw",
+    "In NV_NVDLA_csc.cpp, when is GROUP_LINE_OFF used?
+     What shapes require GROUP_LINE_OFF=0?
+     Check SendWeightToMacSequencer for GEMM-specific logic.")
+```
+
+### Step 4: Fix `data_bank` Calculation
+
+```python
+input_bytes = m * align_in * 2
+data_bank = (input_bytes + 32767) // 32768
+# Fix: don't increment at exact boundary (per gemm.c, AGENTS.md)
+if input_bytes % 32768 == 0 and data_bank > 1:
+    data_bank -= 1
+data_bank = max(1, min(11, data_bank))
+```
+
+### Step 5: Generalize Output Decoding
+
+```python
+def get_output_decoder(align_out):
+    if align_out >= 64:
+        return decode_output_c2_4  # C2=4 for output (hardware constraint)
+    return decode_output_linear
+```
+
+### Step 6: Verify with Register Comparison Table
+
+For each new shape, build a register comparison table. Use deepwiki to understand unfamiliar registers:
+
+```
+deepwiki_ask_question("nvdla/hw",
+    "What does CNA_DMA_CON1 LINE_STRIDE control?
+     What does CNA_DMA_CON2 SURF_STRIDE do?
+     How to verify register values against NVDLA C-model?")
+```
+
+| Register | gemm.py | gemm.c | ops_rknn | Verdict |
+|----------|---------|--------|----------|---------|
+| CBUF_CON0 | ? | ? | ? | check |
+| CONV_CON1 | ? | ? | ? | check |
+| DMA_CON1 (line_stride) | ? | ? | ? | check |
+| DATA_CUBE_NOTCH | ? | ? | ? | check |
+
+Use `gdb -x test.gdb ./build/ops_reg` at `submitTask` breakpoint to capture gemm.c registers.
+Use `gdb -x matmul.gdb ./matmul_api` with `python3 dump.py 1` to capture ops_rknn registers.
+
+---
+
+## Deepwiki Verification Checklist
+
+Before implementing, verify these with deepwiki:
+
+- [ ] `nvdla/sw`: What is `atomicKSize` for RK3588? (Answer: 32)
+- [ ] `nvdla/sw`: How does `make_matmul_params()` compute `align_in`?
+- [ ] `nvdla/hw`: What is `PARALLEL_CHANNEL_NUM`? (Answer: 64)
+- [ ] `nvdla/hw`: How does CSC handle C2=8 vs C2=16 input?
+- [ ] `nvdla/hw`: What does GROUP_LINE_OFF actually do?
+- [ ] `nvdla/hw`: How should CBUF_CON0 DATA_BANK be calculated?
+
+Run these deepwiki queries:
+```python
+# Check implementation in nvdla/sw
+deepwiki_ask_question("nvdla/sw",
+    "Show me the make_matmul_params() function.
+     How does the UMD compiler decide C2 value for GEMM?
+     What is the relationship between atomicKSize and C2?")
+
+# Check implementation in nvdla/hw
+deepwiki_ask_question("nvdla/hw",
+    "In NV_NVDLA_csc.cpp, how is input data formatted for GEMM?
+     Show the NC1HWC2 packing logic. What C2 values are supported?
+     How does the C-model handle different C2 values?")
+```
+
+---
+
+## Summary of Changes
+
+| Parameter | Current | Improved | Verify With |
+|-----------|---------|----------|-------------|
+| C2 input | hardcoded C2=8 for 2 shapes | `C2 = atomicKSize/2 = 16` for all `align_in >= 64` | deepwiki `nvdla/sw` + `nvdla/hw` |
+| GROUP_LINE_OFF | whitelist of 7 shapes | `no_group_line_off = align_in >= 64` | deepwiki `nvdla/hw` CSC |
+| Input packing | dispatch table with 2 entries | `pack_input_c2(16)` for all C2 shapes | deepwiki `nvdla/hw` CMAC |
+| Output decode | dispatch table with 2 entries | `decode_output_c2_4` for all `align_out >= 64` | deepwiki `nvdla/hw` DPU |
+| `data_bank` | may increment at exact boundary | fixed: no increment at exact boundary | deepwiki `nvdla/hw` CBUF |
+| `align_in` | always `max(32, ...)` | derive from `atomicKSize` | deepwiki `nvdla/sw` |
+
+---
+
+## Next Steps
+
+1. **Run deepwiki queries** to verify all assumptions against `nvdla/sw` and `nvdla/hw`
+2. Implement the changes in `gemm.py`
+3. Test new shapes: 32×32×32, 64×99×64, 128×128×128, 512×512×512
+4. Build register comparison tables for failing shapes
+5. Cross-reference with `experimental/gemm.c` and `ops_rknn` dumps
+6. Update AGENTS.md with new findings
