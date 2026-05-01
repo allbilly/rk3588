@@ -12,6 +12,7 @@ TODO
 - PR my rk3588 npu knowledge to [mesa](https://gitlab.freedesktop.org/mesa/mesa)
 - NVDLA docker simulation
 - multi op in one submit
+- check nvdla/hw source code or ghidra rknn to find solution to too many magic in conv matmul input packing and too much magic if
 
 
 # For Normal user
