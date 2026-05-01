@@ -273,6 +273,12 @@ DECODE_OUTPUT = {
 def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     align_in = max(32, ((k + 31) // 32) * 32)
     align_out = max(32, ((n + 31) // 32) * 32)
+    if align_in < align_out:
+        align_in = align_out
+
+    eff_k = k
+    if align_in > max(32, ((k + 31) // 32) * 32):
+        eff_k = align_in
 
     is_kn_64 = (k == 64 and n == 64)
     is_kn_256 = (k == 256 and n == 256)
@@ -284,12 +290,12 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     no_group_line_off = is_kn_64 or is_kn_256 or is_kn_512 or is_kn_lg_512 or is_matmul_768 or is_matmul_768_2048 or is_matmul_2048
 
     line_stride = 4
-    if 32 < k < 512 and k not in (64, 256):
-        line_stride = min(13, (k + 31) // 32) * 4
+    if 32 < eff_k < 512 and eff_k not in (64, 256):
+        line_stride = min(13, (eff_k + 31) // 32) * 4
 
     surf_groups = m // 4
     surf_stride = (line_stride * (surf_groups - 1) + int(surf_groups == 0)) * int(align_in >= 64)
-    if (32 < k < 64) or (64 < k <= 128) or (128 < k < 256) or (256 < k < 512):
+    if (32 < eff_k < 64) or (64 < eff_k <= 128) or (128 < eff_k < 256) or (256 < eff_k < 512):
         surf_stride = 0
 
     input_bytes = 1 * m * align_in * 2
@@ -303,11 +309,11 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     dst_surf_stride = 64 if is_matmul_64 else (256 if is_matmul_256 else (align_out if no_group_line_off else 1))
 
     feature_grains = m + 1
-    if k > 7872:
+    if eff_k > 7872:
         feature_grains = 2
-    elif 128 < k <= 192:
+    elif 128 < eff_k <= 192:
         feature_grains = m
-    elif k > 192 and k != 256:
+    elif eff_k > 192 and eff_k != 256:
         denom = align_in * 2
         grains = (2 * 32768 + denom - 1) // denom
         grains = (grains + 1) & ~1
@@ -315,7 +321,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
 
     notch_blocks = min(13, align_out // 32)
     notch_val = 8 * notch_blocks - 1
-    if is_kn_64 or is_kn_256 or is_kn_512 or k > 7872:
+    if is_kn_64 or is_kn_256 or is_kn_512 or eff_k > 7872:
         notch_val = 0
 
     def E(target, reg_addr, value):
@@ -381,6 +387,9 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
 def run_gemm(m, n, k, a_matrix, b_matrix):
     align_in = max(32, ((k + 31) // 32) * 32)
     align_out = max(32, ((n + 31) // 32) * 32)
+    pad_k = align_in < align_out
+    if pad_k:
+        align_in = align_out
 
     in_pack = np.zeros(align_in * m, dtype=np.float16)
     wt_pack = np.zeros(align_in * align_out, dtype=np.float16)
@@ -388,6 +397,21 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
     shape_key = (m, n, k)
     pack_input = PACK_INPUT.get(shape_key, pack_input_row_major)
     pack_weight = PACK_WEIGHT.get(shape_key, pack_weight_tile_16x32)
+
+    if pad_k:
+        _k = k
+        def _pack_input(m, n, k, a, buf, ai):
+            buf.reshape(m, ai)[:, :k] = a[:, :k]
+        pack_input = _pack_input
+        def _pack_weight(m, n, k, b, buf, ai, ao):
+            for nn in range(n):
+                for kk in range(k):
+                    kpg = nn // 16
+                    cpg = kk // 32
+                    tile_off = (cpg * 32 * 16) + (kpg * 16 * ai)
+                    buf[tile_off + (kk % 32) + ((nn % 16) * 32)] = b[kk, nn]
+        pack_weight = _pack_weight
+
     pack_input(m, n, k, a_matrix, in_pack, align_in)
     pack_weight(m, n, k, b_matrix, wt_pack, align_in, align_out)
 
