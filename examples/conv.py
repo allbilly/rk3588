@@ -361,9 +361,11 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
     input_pack_c2 = override.get('input_pack_c2', align_c)
     use_nhwc = should_use_nhwc_pack(batch, in_channels, in_h, in_w, width_stride, input_pack_c2,
                                     out_c=out_channels, kh=kernel_h, kw=kernel_w, groups=groups)
-    use_pixel_mode = use_nhwc or (in_channels in (1, 3, 4) and not is_depthwise)
+    use_pixel_mode = use_nhwc or (in_channels in (1, 3, 4) and not is_depthwise)  # P6-B: pixel mode uses different stride formulas
+    # P1-FIX: initialize surf_stride unconditionally (avoids KeyError when in_h <= 1 in pixel mode)
     if use_pixel_mode:
         line_stride = width_stride
+        surf_stride = 0
         if in_h > 1: surf_stride = width_stride * (in_h - 1)
     else:
         line_stride = width_stride * 4
@@ -393,7 +395,7 @@ def build_conv2d_regs(params, input_dma=0, weights_dma=0, output_dma=0):
 
     E(rk.REG_DPU_S_POINTER, (1 << 3) | (1 << 2) | (1 << 1))
     conv_con1 = (2 << 7) | (2 << 4)
-    if (p['in_channels'] in (1, 3, 4)) and not p['is_depthwise']:
+    if (p['in_channels'] in (1, 3, 4)) and not p['is_depthwise']:  # P6-A: HW rejects ARGB_IN for ic=2
         conv_con1 |= (1 << 30) | (1 << 29) | ((7 + p['in_channels']) << 12)
     if p['is_depthwise']: conv_con1 |= 0x3
     E(rk.REG_CNA_CONV_CON1, conv_con1)
@@ -471,16 +473,35 @@ def _npu_submit(params, input_nchw, weight_ochw, is_1x1):
                                       use_nhwc=params['use_nhwc'])
     is_grouped = params['groups'] > 1
     if is_grouped:
-        wt_in_c = params['in_channels']
-        wt_elems = params['out_channels'] * wt_in_c * params['kernel_h'] * params['kernel_w']
-        wt_full = np.zeros(wt_elems, dtype=np.float16)
-        for oc in range(params['out_channels']):
-            ic_src = oc  # depthwise: each output channel maps to ic=oc
-            src_start = oc * params['weight_in_channels'] * params['kernel_h'] * params['kernel_w']
-            dst_start = (oc * wt_in_c + ic_src) * params['kernel_h'] * params['kernel_w']
-            wt_full[dst_start:dst_start + params['kernel_h'] * params['kernel_w']] = \
-                weight_ochw[src_start:src_start + params['kernel_h'] * params['kernel_w']]
-        weight_packed = pack_conv_weights_fp16(wt_full, params['out_channels'], wt_in_c, params['kernel_h'], params['kernel_w'], params['align_c'], groups=params['groups'])
+        in_c = params['in_channels']
+        ic_per_group = params['weight_in_channels']
+        oc_per_group = params['out_channels'] // params['groups']
+        kh, kw = params['kernel_h'], params['kernel_w']
+        is_dw = params.get('is_depthwise', False)
+        if not is_dw:
+            wt_elems = params['out_channels'] * in_c * kh * kw
+            wt_full = np.zeros(wt_elems, dtype=np.float16)
+            for oc in range(params['out_channels']):
+                group = oc // oc_per_group
+                group_ic_start = group * ic_per_group
+                for ic_local in range(ic_per_group):
+                    src_idx = oc * ic_per_group * kh * kw + ic_local * kh * kw
+                    dst_idx = oc * in_c * kh * kw + (group_ic_start + ic_local) * kh * kw
+                    wt_full[dst_idx:dst_idx + kh * kw] = weight_ochw[src_idx:src_idx + kh * kw]
+            params = dict(params)
+            params['groups'] = 1
+            params['weight_in_channels'] = in_c
+            packed_weight_size = params['out_channels'] * params['kernel_h'] * params['kernel_w'] * ((params['weight_in_channels'] + params['align_c'] - 1) // params['align_c']) * params['align_c'] * 2
+            weight_packed = pack_conv_weights_fp16(wt_full, params['out_channels'], in_c, kh, kw, params['align_c'], groups=1)
+        else:
+            wt_in_c = params['in_channels']
+            wt_elems = params['out_channels'] * wt_in_c * kh * kw
+            wt_full = np.zeros(wt_elems, dtype=np.float16)
+            for oc in range(params['out_channels']):
+                src_start = oc * params['weight_in_channels'] * kh * kw
+                dst_start = (oc * wt_in_c + oc) * kh * kw
+                wt_full[dst_start:dst_start + kh * kw] = weight_ochw[src_start:src_start + kh * kw]
+            weight_packed = pack_conv_weights_fp16(wt_full, params['out_channels'], wt_in_c, kh, kw, params['align_c'], groups=params['groups'])
     else:
         weight_packed = pack_conv_weights_fp16(weight_ochw, params['out_channels'], params['in_channels'], params['kernel_h'], params['kernel_w'], params['align_c'], groups=params['groups'])
 

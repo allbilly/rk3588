@@ -213,19 +213,13 @@ def pack_weight_row_major(m, n, k, b_matrix, wt_pack, align_in, align_out):
     wt_pack.reshape(align_out, align_in)[:n, :k] = b_matrix[:, :n].T
 
 def pack_input_c2_8(m, n, k, a_matrix, in_pack, align_in):
-    for mm in range(m):
-        for kk in range(k):
-            plane = kk // 8
-            offset = kk % 8
-            in_pack[plane * m * 8 + mm * 8 + offset] = a_matrix[mm, kk]
+    in_pack[:] = a_matrix[:, :k].reshape(m, -1, 8).transpose(1, 0, 2).ravel()
 
 def pack_weight_tile_16x32(m, n, k, b_matrix, wt_pack, align_in, align_out):
-    for nn in range(n):
-        for kk in range(k):
-            kpg = nn // 16
-            cpg = kk // 32
-            tile_off = (cpg * 32 * 16) + (kpg * 16 * align_in)
-            wt_pack[tile_off + (kk % 32) + ((nn % 16) * 32)] = b_matrix[kk, nn]
+    wt = np.zeros((align_out, align_in), dtype=np.float16)
+    wt[:n, :k] = b_matrix.T[:n, :k]
+    wt_pack[:] = wt.reshape(align_out // 16, 16, align_in // 32, 32
+        ).transpose(0, 2, 1, 3).ravel()
 
 def pack_input_2x2x1(m, n, k, a_matrix, in_pack, align_in):
     a = a_matrix.reshape(-1)
@@ -236,20 +230,11 @@ def pack_weight_2x2x1(m, n, k, b_matrix, wt_pack, align_in, align_out):
     wt_pack[0], wt_pack[1], wt_pack[32], wt_pack[33] = b[0], b[2], b[1], b[3]
 
 def decode_output_linear(m, n, k, raw, align_out):
-    out = np.empty((m, n), dtype=np.float32)
-    stride = align_out
-    for row in range(m):
-        out[row, :n] = raw[row * stride:row * stride + n]
-    return out
+    row_start = np.arange(m) * align_out
+    return raw[row_start[:, None] + np.arange(n)]
 
 def decode_output_c2_4(m, n, k, raw, align_out):
-    out = np.empty((m, n), dtype=np.float32)
-    for col in range(n):
-        plane, offset = col // 4, col % 4
-        plane_base = plane * m * 4
-        for row in range(m):
-            out[row, col] = raw[plane_base + row * 4 + offset]
-    return out
+    return raw[:n // 4 * m * 4].reshape(n // 4, m, 4).transpose(1, 0, 2).reshape(m, n).copy()
 
 # Hardware constants
 C2_INPUT = 8   # NC1HWC2 channel group size for input (derived from ATOMIC_K_SIZE=32)
@@ -413,19 +398,7 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
     pack_weight = get_weight_packer(m, n, k, align_in)
 
     if pad_k:
-        _k = k
-        def _pack_input(m, n, k, a, buf, ai):
-            buf.reshape(m, ai)[:, :k] = a[:, :k]
-        pack_input = _pack_input
-        # bound to original k (not align_in), so zero-padding beyond K is harmless
-        def _pack_weight(m, n, k, b, buf, ai, ao):
-            for nn in range(n):
-                for kk in range(k):
-                    kpg = nn // 16
-                    cpg = kk // 32
-                    tile_off = (cpg * 32 * 16) + (kpg * 16 * ai)
-                    buf[tile_off + (kk % 32) + ((nn % 16) * 32)] = b[kk, nn]
-        pack_weight = _pack_weight
+        pack_input = pack_input_row_major
 
     pack_input(m, n, k, a_matrix, in_pack, align_in)
     pack_weight(m, n, k, b_matrix, wt_pack, align_in, align_out)
