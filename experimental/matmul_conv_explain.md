@@ -1,0 +1,329 @@
+# Know issues
+
+matmul failed at
+- 424x424x424, fixed in another branch
+
+conv2d failed at
+- i:1,3,2041,2041 w:6,3,1,1
+
+# What works
+matmul 
+- 33x1x33 works
+- 65x1x33 works
+- 1x1x1 to 414x414x414 works
+- 1x1x1 to 1x8192x8192 works
+- 1x8192x8192 to 1x8192x15000 works
+- 1x8192x8192 to 1x18605x8192 works
+
+conv2d
+- i(1,3,1,1) w:(6,3,1,1) to i:(1,3,2040,2040) w:(6,3,1,1) works
+
+# How to do matmul in RK3588
+## Input and output dimension 
+
+In matmul, we have C(M,N) = A(M,K) * B(K,N)
+c[m][n] = Σₖ A[m][k] · B[k][n]
+                                                <----------- N columns ----------->
+                                          ^   ┌────────────────────────────────────────┐
+                                          |   │ b[0][0] b[0][1] ... b[0][N-1]          │
+                                          |   │ b[1][0] b[1][1] ... b[1][N-1]          │
+                                   K rows |   │ b[2][0] b[2][1] ... b[2][N-1]          │
+                                          |   │     .        .        .                │
+                                          |   │ b[K-1][0] b[K-1][1] ... b[K-1][N-1]    │
+                                          V   └────────────────────────────────────────┘
+        <----------- K columns ----------->
+^      ┌────────────────────────────────────┐ ┌────────────────────────────────────────┐      
+|      │ a[0][0] a[0][1] ... a[0][K-1]      │ │ c[0][0] c[0][1] ... c[0][N-1]          │
+|      │ a[1][0] a[1][1] ... a[1][K-1]      │ │ c[1][0] c[1][1] ... c[1][N-1]          │
+M rows │ a[2][0] a[2][1] ... a[2][K-1]      │ │ c[2][0] c[2][1] ... c[2][N-1]          │
+|      │     .        .        .            │ │     .        .        .                │
+|      │ a[M-1][0] a[M-1][1] ... a[M-1][K-1]│ | c[M-1][0] c[M-1][1] ... c[M-1][N-1]    │
+V      └────────────────────────────────────┘ └────────────────────────────────────────┘
+
+As RK3588 is a NVDLA-based NPU which designed for convulution, we can use a special convulution config to do matmul.
+For normal 2d conv, 
+
+        Feature Data (H,W=1)   Kernel(R=1,S=1)
+        ┌────────────┐         ┌─────┐
+        │ a[0][0]    │         │  k  │
+        │ a[2][0]    │         └─────┘
+        │   ...      │
+        │ a[H-1][0]  │
+        └────────────┘
+
+We need 3d conv to do matmul, and N kernels
+                                                                       Kernel (N=N, R=1, S=1, C=K)
+        Feature Map A  (H=M, W=1, C=K)                                  kernel 0
+                  +───────── front-face channels C ─────────────+.         +───────── front-face channels C ──────+
+        W=1      /                                             /|     S=1 /                                      /|                    
+                +─────────────────────────────────────────────+ |        +──────────────────────────────────────+ |
+        ^       | a[0][0][0]   a[0][0][1]   ... a[0][0][N-1]  | |   R=1  | b[0][0][0]   b[0][1]   ... b[0][K-1] | |
+        |       | a[1][0][0]   a[1][0][1]   ... a[1][0][N-1]  | |        +──────────────────────────────────────+/
+        |       | a[2][0][0]   a[2][0][1]   ... a[2][0][N-1]  | |       kernel 1
+        H rows  |        .        .           .               | |          +───────── front-face channels C ──────+
+        |       | a[H-1][0][0] a[H-1][1] ... a[H-1][0][N-1]   | /     S=1 /                                      /|
+        V       +─────────────────────────────────────────────+/        +──────────────────────────────────────+ |
+                                                                    R=1 | b[0][0][0]   b[0][1]   ... b[0][K-1] | |
+                                                                        +──────────────────────────────────────+/
+                                                                        .
+                                                                        .
+
+                                                                        kernel N-1
+                                                                          +───────── front-face channels C ──────+
+                                                                     S=1 /                                      /|
+                                                                        +──────────────────────────────────────+ |
+                                                                    R=1 | b[0][0][0]   b[0][1]   ... b[0][K-1] | |
+                                                                        +──────────────────────────────────────+/
+
+Input vector:  A[h, :]
+Kernel n:      B[:, n]
+out[h][n] = Σ_k A[h][k] * B[k][n]
+
+        Output Feature Map C  (H=M, W=1, C=N)                                  
+                  +───────── front-face channels C=N ───────────+.  
+        W=1      /                                             /|                
+                +─────────────────────────────────────────────+ |    
+        ^       | a[0][0][0]   a[0][0][1]   ... a[0][0][N-1]  | |  
+        |       | a[1][0][0]   a[1][0][1]   ... a[1][0][N-1]  | |   
+        |       | a[2][0][0]   a[2][0][1]   ... a[2][0][N-1]  | |     
+        M rows  |        .        .           .               | |   
+        |       | a[M-1][0][0] a[M-1][1] ... a[M-1][0][N-1]   | /    
+        V       +─────────────────────────────────────────────+/     
+
+## CNA registers - diemsion
+
+Feature Map A  (H=M, W=1, C=K) 
+```
+datain_height = M
+datain_width = 1
+datain_channel = K
+```
+
+Kernel (N=N, R=1, S=1, C=K)
+```
+weight_width = 1
+weight_height = 1
+weight_kernels = N
+```
+
+Stride value in x and y direction
+```
+conv_x_stride = 1
+conv_y_stride = 1
+```
+
+Output Feature Map C  (H=M, W=1, C=N)
+```
+dataout_height = M
+dataout_width = 1
+```
+
+for CONV should use formula but our MATMUL case just need H=M, W=1, C=N
+H_out = floor((H + pad_top + pad_bottom - k_h) / stride_y) + 1
+W_out = floor((W + pad_left + pad_right - k_w) / stride_x) + 1
+
+dma_width = datain_width
+dma_height = cna_desc.datain_height
+dma_channel = cna_desc.datain_channel
+RKNN: dma_channel = align_in
+
+## CNA registers - non-diemsion
+
+Dataout Atomics 
+TRM: Data atomics after convolution which is data out total pixels number.
+I think its like CUDA atomicAdd for each output pixel 
+```
+dataout_atomics = dataout_width * dataout_height
+```
+
+Feature Grains
+TRM: Feature data rows needs to be buffered before convolution start. Its suggested to set this field as y_stride+weight_height+1.
+In matmul mode this over-buffers rows so the whole MxK block fits, which is why M+1 is used instead of the TRM minimum.
+```
+feature_grains = M + 1
+```
+
+weight_bytes_per_kernel
+Jasbir: weight_bytes_per_kernel = weight_width * weight_height * datain_channel * sizeof(__fp16);
+RKNN:   weight_bytes_per_kernel = align_in * sizeof(__fp16);
+
+weight_bytes_total
+Jasbir: weight_bytes = weight_bytes_per_kernel * cna_desc.weight_kernels;
+RKNN:   weight_bytes_total = weight_bytes_per_kernel * align_out;
+
+CBUF Weight Bank and Data Bank
+CBUF is Multi-bank SRAM, shared for feature and weight
+```
+fd_bytes = M × K × sizeof(type)
+fd_banks = ceil(fd_bytes / CBUF_BANK_SIZE)
+weight_bytes_total = K x N x sizeof(type)
+weight_bank = ceil(weight_bytes_total / NPU_CBUF_BANK_SIZE)
+```
+
+Data Entries
+TRM: How many banks space needed to store one feature map row.
+
+in matmul, datain_width=dataout_width=1
+```
+data_entries = ceil((datain_width * datain_channel) / 32);
+RKNN: 
+int cbuf_entries = ((dataout_width * align_in) + 31) / 32;
+if (cbuf_entries <= 0) cbuf_entries = 1;
+```
+
+weight_burst_len and data_burst_len
+AXI burst length for weight/feature data DMA.
+```
+weight_burst_len = 15
+data_burst_len = 15
+```
+
+line_stride
+line_stride = datain_width * 4
+
+// TODO fully fix RKNN hardcode
+surf_stride
+
+Maths:
+lane_span_bytes = rows_per_lane * line_stride
+surf_stride = lane_span_bytes - line_stride
+           = (rows_per_lane - 1) * line_stride
+           = (H/4 - 1) * line_stride
+
+```
+surf_stride = (line_stride * ((datain_height / 4) - 1));
+```
+
+RKNN: hardcoded 
+surf_stride = 268435453 if is_matmul_768 || is_matmul_768_2048 || is_matmul_2048
+
+
+NVDLA SW CONV: treats a surface as the full plane
+lineStride = W * channelsPerGroup * bytesPerElement
+surf_stride = lineStride * H
+
+ONNC CONV: 
+lineStride = align(W * FEATURE_ATOM_CUBE_SIZE, 32)
+stride_surface = lineStride * H
+
+GROUP_LINE_OFF
+TRM: Group line fetch, 0: enable, 1:disable. This setting only influence line fetch efficiency.
+But it does affect result correctness
+
+RKNN: CNA_CONV_CON1_GROUP_LINE_OFF(1) if (!is_matmul_64 && !is_matmul_256 && !is_matmul_768 && !is_matmul_768_2048 && !is_matmul_2048)
+
+DATA_CUBE_NOTCH_ADDR
+notch_val
+TRM: notch_addr_1, How many pixels from the end of width to the end of the shape line end.
+TRM: notch_addr_0, How many pixels from the end of width to the end of the shape line end.
+
+surface_add
+TRM: How many surfaces in a row.
+```
+surface_add = dst_surf_stride * (align_out / 8u);
+surface_add = dst_surf_stride * 4u if (is_matmul_64 || is_matmul_256 || is_matmul_768 || is_matmul_768_2048 || is_matmul_2048) 
+```
+
+
+# other config registers
+
+qd_en
+TRM: Quantify feature data calculate enable
+```
+qd_en=1
+```
+
+data_sign
+Feature data is signed or not.  0:unsigned
+```
+data_sign = 1
+```
+
+cvt_type
+Cal type of the input convert. 0: Multiply first then add,  1: revesr
+```
+cvt_type = 1
+```
+
+cvt_bypass
+Bypass input convert.
+```
+cvt_bypass = 1 
+```
+
+cvt_scale0123
+Multiplier operand for 1st/2nd/3rd/4th channel.
+```
+cvt_scale0=1
+```
+
+feature_base_addr
+```
+feature_base_addr = input_dma
+```
+
+decompress_addr0
+```
+decompress_addr0 = params->weights_dma
+
+
+```
+we have input in fp16 and process in fp16
+```
+cna_desc.in_precision = precision_float16;
+cna_desc.proc_precision = precision_float16;
+``
+
+```
+EMIT(REG_DPU_S_POINTER, DPU_S_POINTER_POINTER_PP_MODE(1) | DPU_S_POINTER_EXECUTER_PP_EN(1) | DPU_S_POINTER_POINTER_PP_EN(1));
+
+```
+
+# CONV 
+
+## CONV weight bank
+
+static int compute_bank_allocation_fp16(uint32_t fd_bytes, uint32_t weight_bytes_per_kernel, unsigned int *fd_banks_out, unsigned int *weight_banks_out) {
+  unsigned int fd_banks = (fd_bytes / NPU_CBUF_BANK_SIZE);
+  fd_banks = ((fd_bytes % NPU_CBUF_BANK_SIZE) == 0) ? fd_banks : fd_banks + 1;
+  if (fd_banks > NPU_CBUF_BANKS - 1) {
+    return -1;
+  }
+  if (weight_bytes_per_kernel > NPU_CBUF_BANK_SIZE) {
+    return -2;
+  }
+  *fd_banks_out = fd_banks;
+  *weight_banks_out = NPU_CBUF_BANKS - fd_banks;
+  return 0;
+}
+
+# FAQ 
+What if the mamtul size is too large
+- When mamtul size > 1x8192x8192, it splited by N, such that C[:, j] = A × B[:, j]
+- C[:, :8144] = A × B[:, :8144]
+- C[:, 8144:8144+48] = A × B[:, 8144:8144+48]
+
+
+How to convert onnx to rknn
+- python3 -m rknn.api.rknn_convert -t rk3588 -i /home/orangepi/npu/models/8_add.onnx -o /home/orangepi/npu/models/
+
+How to build matmul / alu
+- cd ops_reg/matmul/ && gcc -o matmul matmul.c -I ../../include -ldrm && ./matmul 32 32 32
+
+failed to allocate handle, ret: -1, errno: 14, errstr: Bad address and need reboot after 32 times mem_create and destroy for 8165x8165
+- 100 times on rknn no problem
+- mem_destroy was called with input_dma instead of the required input_obj, so the input buffer never got destroyed.
+- munmap was given non‑page‑aligned sizes (e.g., 133,350,848 bytes), which typically fails silently and leaves VMAs mapped; over many loops this leaks address space/resources. mem_create/mmap also used unaligned sizes.
+
+
+# How to do conv2d in RK3588
+cna_cvt_con5
+TRM: per_channel_cvt_en convert enable. Per channel enable CVT function. Int 4 has 32 channels in total for 128 bits. Int 8 16 channel...
+
+
+
+# Reference
+https://github.com/nvdla/sw
+https://github.com/ONNC/onnc
+https://github.com/mtx512/rk3588-npu
+https://github.com/liej6799/rk3588

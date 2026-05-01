@@ -1,0 +1,30 @@
+When analyzing RK3588 NPU behavior — especially when `conv.py`, `gemm.py`, or `test_conv.py` produce unexpected results or when register configuration logic seems incorrect or guessy — check the upstream NVDLA source code for ground truth.
+
+review info in experimental/* and nvdla/* when face and problem, and ask deepwiki
+
+Use `deepwiki_ask_question` on these repos:
+
+- `nvdla/hw` — For C-model behavior (cmod/), register definitions, convolution pipeline details, weight/activation data flow. This is the **canonical hardware reference**. Key files:
+  - `cmod/csc/NV_NVDLA_csc.cpp` — Convolution stream controller (data sequencing, Winograd)
+  - `cmod/cmac/NV_NVDLA_cmac.cpp` — MAC array (weight loading, calculation)
+  - `cmod/cacc/NV_NVDLA_cacc.cpp` — Accumulator
+  - `cmod/cdma/*` — DMA data fetching and CBUF management
+  - `cmod/*/*_reg_model.cpp` — Register field definitions
+  - `vmod/nvdla/NV_NVDLA_*_regfile.v` — Verilog register implementation
+  - `verif/traces/traceplayer/conv_8x8_fc_int16/input.txn` — Real register write sequences
+
+- `torvalds/linux` (drivers/accel/rocket/) — The **upstream Linux kernel** "rocket" driver for Rockchip NPU. Contains the canonical register definitions in `rocket_registers.h` (auto-generated from Mesa). When `rockchip.py` or `conv.py` register values seem wrong, check this file for ground-truth bitfield masks/shifts.
+
+- `nvdla/sw` — For compiler loadable format, UMD/KMD driver logic, how the software stack partitions and programs layers. Key files:
+  - `prebuilt/` — Prebuilt kernel images and drivers for VP
+  - `umd/` — User mode driver (loadable parsing, inference submission)
+  - `kmd/` — Kernel mode driver (register programming, interrupt handling)
+
+- `mesa/mesa` — For the Mesa Gallium driver (`src/gallium/drivers/rocket/`), which includes the `registers.xml` that generates `rocket_registers.h`. Useful for understanding how convolution is compiled for RK3588.
+- `ONNC/onnc` — Open Neural Network Compiler, includes NVDLA backend support. Useful for understanding compiler-level convolution partitioning.
+- `allbilly/npu` — Community NPU reverse-engineering efforts, may contain RK3588-specific insights.
+
+When investigating:
+1. First try deepwiki on `nvdla/hw` for hardware-level answers (data format, register bitfields, pipeline timing)
+2. Then try deepwiki on `nvdla/sw` for software-level answers (compiler decisions, driver submission flow)
+3. Cross-reference with the local `nvdla/` docs (ARCHITECTURE.md, REGISTER_MAP.md, NC1HWC2_FORMAT.md, WEIGHT_PACKING.md)

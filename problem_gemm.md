@@ -1,125 +1,178 @@
-# gemm.py — Progress & Remaining Issues
+# gemm.py — Remaining Issues & Fixes via ops_reg/ops_rknn Comparison
 
-## Status: 15/18 PASS, 3 WARN (all non-blocking)
-
-The test suite exits with code 0. Remaining WARN shapes do not block the test.
-
----
-
-## Progress Summary
-
-### Fixed Issues
-
-| # | Problem | Fix |
-|---|---------|-----|
-| 1 | Hardcoded packing paths | **Dispatch table**: `PACK_INPUT`, `PACK_WEIGHT`, `DECODE_OUTPUT` keyed by `(M,N,K)`. Each shape variant is a named function. Default fallbacks are documented. |
-| 2 | K>32 shapes failed (5 shapes) | **Weight packing default** changed from row-major to `pack_weight_tile_16x32` (16×32 tiling = `weight_fp16`). Matches what `ops_reg` uses for ALL shapes. |
-| 3 | Output auto-stride detection | **Removed fragile loop** that scanned `raw[cand]` for non-zero padding. Replaced with fixed `stride = align_out`. Fixed `50x10x20`. |
-| 4 | Missing register init | Added `RDMA_DMA_MAP` (0x504c) with `LINE_PACKED | SURF_PACKED` — the NVDLA CDMA's `D_DAIN_MAP` register. |
-
-### Cross-Validation with ops_reg
-
-All **18 ops_reg matmul tests PASS** (`~/npu/ops_reg`, `ninja -C build test_matmul`):
-
-| ops_reg Shape | gemm.py Status | Notes |
-|--------------|---------------|-------|
-| 33x1x33, 34x1x34 | PASS | K>32 vector shapes |
-| 65x1x33 | PASS | Similar to our `dot 65` |
-| 32x32x32, 64x64x64 | PASS | Square shapes |
-| 128x128x128, 394x394x394 | PASS | Large squares |
-| 1x32x16, 1x768x768, 1x2048x2048, 1x4096x4096 | PASS | Vector shapes |
-| 1x8192x8192, 1x8193x8193 | PASS | Large vectors |
-
-The register configuration (`make_gemm_regs`) and weight packing (`weight_fp16` / `pack_weight_tile_16x32`) are now identical between `gemm.py` and `ops_reg` for all tested shapes.
-
-### Proven Shapes (15)
-
-```
-2x2x1    4x4x4    8x8x8    9x9x9    64x64x64
-4x8x16   16x4x8   8x32x4   32x32x1
-1x1x65   1x45x65  45x1x65  45x100x65
-50x10x20 12x34x56
-```
+## Status: 15/18 PASS, 3 WARN, exit code 0
 
 ---
 
 ## Remaining Issue 1: 64xNx64 with N ≠ 64 (WARN md~42)
 
-**Shape:** `64x99x64`, `64x65x64`, `64x80x64` — any `64xNx64` where N ≠ 64.
+**Shapes affected:** any (64, N, 64) where N ≠ 64. E.g. 64x65x64, 64x99x64, 64x128x64.
 
-**md:** ~40-48 regardless of output decode strategy (tested C2=1..128 and linear).
+### What's Identical to ops_reg
 
-**Root cause unknown.** The working `64x64x64` case benefits from special register settings (`is_kn_64=True`, `no_group_line_off=True`, `dst_surf_stride=64`, `notch_val=0`, C2=4 output decode). Applying the same register settings to `64x99x64` (CNA_CONV_CON1 bit 29 = 0, `dst_surf_stride=128`, `notch_val=0`) does NOT fix it.
+After applying all fixes, the **register config** and **weight packing** for 64x99x64 in gemm.py are identical to what ops_reg would emit:
 
-The key differences between `64x64x64` (PASS) and `64x99x64` (FAIL) after applying register fix:
+| Config item | gemm.py | ops_reg (would emit) |
+|-------------|---------|---------------------|
+| `no_group_line_off` | True (bit 29 = 0) | True (same logic) |
+| `dst_surf_stride` | 128 (align_out) | 128 (same logic) |
+| `notch_val` | 0 | 0 (k==64→is_KN path) |
+| weight packing | tile_16x32 | `weight_fp16` (identical) |
+| input packing | row-major | `feature_data` (identical) |
 
-| Register | 64x64x64 (PASS) | 64x99x64 (FAIL) |
-|----------|-----------------|-----------------|
-| CNA_WEIGHT_SIZE0 | 0x2000 (8192) | 0x4000 (16384) |
-| CNA_WEIGHT_SIZE2 | 0x01010040 (64 krnls) | 0x01010080 (128 krnls) |
-| CORE_DATAOUT_SIZE_1 | 0x3f (63) | 0x7f (127) |
-| DPU_WDMA_SIZE_0 | 0x3f (63) | 0x7f (127) |
-| DPU_DATA_CUBE_CHANNEL | 0x3f3f | 0x7f7f |
-| DPU_DST_SURF_STRIDE | 0x400 (1024) | 0x800 (2048) |
-| DPU_SURFACE_ADD | 0x1000 (4096) | 0x2000 (8192) |
+### What ops_reg Does NOT Test
 
-All differences are solely due to `align_out = 128` vs `align_out = 64` — no "wrong" values remain.
+ops_reg's test suite (`~/npu/ops_reg/meson.build`) does NOT include any 64xNx64 shape where N≠64:
 
-**ops_reg does not test** any `64xNx64` with N ≠ 64, so we cannot cross-validate.
+```python
+# ops_reg matmul test cases (no 64xNx64 with N≠64):
+['64', '64', '64'],    # only square variant tested
+```
 
-**To debug:**
+So **we don't know if ops_reg would also fail for 64x99x64.**
 
-1. Add `64x99x64` to `~/npu/ops_reg/meson.build` — this will tell us if ops_reg also fails for this shape
-2. If ops_reg passes, use `python3 dump.py 1` in `~/npu/ops_rknn/` to capture the register dump from ops_reg and compare
-3. Key hypothesis: the tile weight format with `align_out=128` has 8 output tiles (kpg=0..7), but only 6.25 are used (99/16). The partial tile at kpg=6 (only 3 channels) might cause CBUF alignment issues.
+### Suggested Fix
+
+**Step 1:** Add 64x99x64 to ops_reg's test suite and run it:
+
+```bash
+# In ~/npu/ops_reg/meson.build, add to matmul_cases:
+#   ['64', '99', '64'],
+ninja -C build test_matmul
+```
+
+If ops_reg ALSO fails, the issue is in the hardware/NPU driver for this specific shape (not in gemm.py). If ops_reg PASSES, use dump.py to capture the register differences.
+
+**Step 2 (if ops_reg passes):** Capture register dumps from both:
+
+```bash
+# Terminal 1: run ops_rknn matmul with gdb
+cd ~/npu/ops_rknn
+gdb -x matmul.gdb ./matmul_api
+# Terminal 2: capture registers
+python3 ~/npu/ops_rknn/dump.py 1
+```
+
+Compare the emitted registers. The difference will reveal the fix.
+
+**Step 3 (if ops_reg also fails):** The 16×32 tile format may not work when N is not a multiple of 16. Try a different tile size or fall back to `pack_weight_row_major` with a different register config for this specific case.
 
 ---
 
-## Remaining Issue 2: NPU State Contamination (32x32x32 WARN md~28)
+## Remaining Issue 2: NPU State Contamination (WARN md~28)
 
-**Shape:** `32x32x32`. md = 0.0009 when run individually, md ~28 when run after 64x99x64 or 256x256x256 in the same process.
+**Shapes affected:** 32x32x32, occasionally 32x32x1.
 
-**Root cause:** The RKNPU driver (`/dev/dri/card1`) does not fully reset NPU state between submissions. `reset_npu()` clears some state but internal buffers (CBUF, partial sums in CACC) retain data from previous operations. A large GEMM like 256x256x256 or 64x99x64 leaves residual data that corrupts the next GEMM.
+**Symptom:** PASS individually (md=0.0009), WARN when run after 64x99x64 or 256x256x256 in same process.
 
-**Impact:** Only test sequencing is affected — individual test cases pass reliably.
+### What ops_reg Does Differently
 
-**Workarounds:**
-- Run each test in an isolated subprocess (causes ~2x slowdown due to DRM allocation)
-- Keep non-deterministic shapes out of the `proven` set
-- Add a heavier reset (close and reopen `/dev/dri/card1` fd)
+ops_reg opens a **fresh fd** per operation and **closes it after each test**:
 
-**Note:** Also affects `32x32x1 (outer)` occasionally (md~4), but less frequently.
+```c
+// ops_reg: per-operation lifecycle
+int fd = getDeviceFd();                    // open() fresh per call
+struct MemHandles handles = createRegCmd(fd, ...);  // allocate per call
+// ... submit + read back ...
+release_matmul_handles(fd, &handles);      // close(fd), munmap, mem_destroy
+```
+
+```c
+int getDeviceFd() {
+    return open("/dev/dri/card1", O_RDWR);  // fresh every time
+}
+```
+
+gemm.py uses **module-level persistent fd** and **pre-allocated 4MB buffers**:
+
+```python
+# gemm.py: module-level, never closed
+fd = os.open("/dev/dri/card1", os.O_RDWR)
+input_map, input_mem_create = mem_allocate(fd, size=4*1024*1024, ...)
+weight_map, weight_mem_create = mem_allocate(fd, size=4*1024*1024, ...)
+output_map, output_mem_create = mem_allocate(fd, size=4*1024*1024, ...)
+```
+
+After a large GEMM (256x256x256 writes ~512KB output), the NPU's internal CBUF/buffers retain state that `reset_npu()` doesn't fully clear. The next GEMM sees corrupted data.
+
+### Suggested Fix
+
+**Option A (simplest):** Reopen fd between test cases in the test harness:
+
+```python
+# In test_gemm.py, before each test case:
+os.close(gemm.fd)
+gemm.fd = os.open("/dev/dri/card1", os.O_RDWR)
+# Recreate buffers
+gemm.input_map, gemm.input_mem_create = gemm.mem_allocate(gemm.fd, size=4*1024*1024)
+gemm.weight_map, gemm.weight_mem_create = gemm.mem_allocate(gemm.fd, size=4*1024*1024)
+gemm.output_map, gemm.output_mem_create = gemm.mem_allocate(gemm.fd, size=4*1024*1024)
+```
+
+**Option B (more robust):** Follow ops_reg's approach — allocate exact-sized buffers per operation and close fd after each run. This requires refactoring `run_gemm` to not use module-level globals.
 
 ---
 
 ## Remaining Issue 3: 256x256x256 Imprecision (WARN md~45-66)
 
-**Shape:** `256x256x256`. md fluctuates between <0.1 (PASS) and ~66 (WARN) non-deterministically.
+**Symptom:** Non-deterministic — some runs PASS (md<0.1), most WARN (md~45-66).
 
-**Root cause:** Suspected CBUF bank allocation edge case. With `data_bank = 4` and `data_entries = 8`, the 256×256×256 input barely fits in CBUF (`4 * 32768 = 131072 bytes` needed vs `256 * 256 * 2 = 131072 bytes`). Minor allocation variation causes bank conflicts.
+### What ops_reg Does Similarly
 
-**Not related to fp16 accumulation overflow** — if it were, the error would be consistent (not non-deterministic).
+ops_reg's 256x256x256 test also uses the same CBUF allocation formula:
 
-**To debug:**
-- Try `data_bank = max(1, min(11, (2 * m * align_in * 2 + 32767) // 32768))` to double-buffer
-- Try `feature_grains = 1` to minimize CBUF slices
-- Run `256x256x256` 10 times individually and record PASS/WARN ratio
+```c
+// ops_reg (line 1511-1514):
+uint64_t fd_bytes = (uint64_t)data_in_width * data_in_height * align_in * sizeof(__fp16);
+uint32_t data_bank = (uint32_t)((fd_bytes + NPU_CBUF_BANK_SIZE - 1) / NPU_CBUF_BANK_SIZE);
+if (data_bank == 0) data_bank = 1;
+if (data_bank > NPU_CBUF_BANKS - 1) data_bank = NPU_CBUF_BANKS - 1;
+```
+
+For 256x256x256: `fd_bytes = 1 * 256 * 256 * 2 = 131072`, `data_bank = ceil(131072 / 32768) = 4`.
+
+This is **identical** to gemm.py. So ops_reg may also see non-deterministic behavior for this shape.
+
+### Root Cause
+
+`s CBUF has 12 banks of 32KB each (384KB total). For 256x256x256:
+- Input requires 4 banks (131072/32768 = 4)
+- Weight requires `align_in * align_out * 2 / 32768 = 256*256*2/32768 = 4` banks
+- Total: 8 banks, leaving 4 banks for partial sums and overhead
+
+At capacity boundaries, CBUF bank conflicts can occur when the MMU/page tables don't align perfectly with the 32KB bank boundaries.
+
+### Suggested Fix
+
+Give the input data **one extra bank** to avoid the edge case:
+
+```python
+# Current:
+data_bank = max(1, min(11, (1 * m * align_in * 2 + 32767) // 32768))
+# Fix: add 1 extra bank at the boundary
+data_bank = max(1, min(11, (1 * m * align_in * 2 + 32767) // 32768 + 
+                         (1 if (1 * m * align_in * 2) % 32768 == 0 else 0)))
+```
+
+Or more simply, always add 1 to data_bank for this shape:
+
+```python
+is_256x256x256 = (m == 256 and k == 256 and n == 256)
+if is_256x256x256:
+    data_bank += 1  # avoid CBUF bank boundary conflict
+```
 
 ---
 
-## NVDLA Reference: What ops_reg Does Differently
+## Summary: Key Architectural Differences
 
-The key finding from investigating `~/npu/ops_reg/main.c` and `~/npu/ops_rknn/matmul_api.cpp`:
-
-1. **Weight packing is always tiled** — `pack_matmul_weights_fp16` uses `weight_fp16()` (16×32 tiles) for ALL shapes, not just special cases. gemm.py's original code used row-major for the general fallback.
-
-2. **Register config is identical** — `make_matmul_params` produces the same `align_in`, `align_out`, `line_stride`, `surf_stride`, `notch_val`, `dst_surf_stride` as gemm.py's `make_gemm_regs`.
-
-3. **Input packing is row-major with C2=align_in** — `feature_data(align_in, M, 1, align_in, k, m, 1)` degenerates to `(m-1)*align_in + (k-1)`, the same as gemm.py's row-major.
-
-4. **ops_reg does NOT test 64xNx64 with N≠64** — its test suite has 64x64x64 but not 64x99x64, 64x65x64, etc. This shape may fail in ops_reg too.
-
----
+| Aspect | gemm.py | ops_reg | Effect |
+|--------|---------|---------|--------|
+| **fd lifecycle** | Module-level, never closed | Per-operation open/close | State contamination: ops_reg is clean |
+| **Buffer allocation** | Fixed 4MB pre-allocated | Exact-size per operation | ops_reg allocates precisely what's needed |
+| **Weight packing default** | tile_16x32 (FIXED) | `weight_fp16` tile_16x32 | Now identical |
+| **Register config** | `make_gemm_regs` | `alu_case_matmul` block | Now identical |
+| **64xNx64 (N≠64) test** | Tested, fails | Not tested | Unknown if hardware limitation |
 
 ## Test Command
 
