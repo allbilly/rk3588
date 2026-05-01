@@ -1,8 +1,6 @@
 ⚠️ Documentations still WIP. 
 - For now u can read the code at examples/elementwise.py or [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/allbilly/rk3588) (it has up to 1 week delay)
 
-✅ Tested on Official Ubuntu image Orange Pi 1.2.2 Jammy with Linux 6.1.99-rockchip-rk3588 OrangePi 5
-http://www.orangepi.org/html/hardWare/computerAndMicrocontrollers/service-and-support/Orange-pi-5.html
 
 # RK3588 
 
@@ -16,11 +14,10 @@ TODO
 - multi op in one submit
 
 
-
-
-
-
 # For Normal user
+
+✅ Tested on Official Ubuntu image Orange Pi 1.2.2 Jammy with Linux 6.1.99-rockchip-rk3588 OrangePi 5
+http://www.orangepi.org/html/hardWare/computerAndMicrocontrollers/service-and-support/Orange-pi-5.html
 
 ## What is rk3588
 
@@ -34,6 +31,35 @@ python examples/conv.py
 ```
 
 # For Developer
+
+## Adapting This Codebase: rknpu (vendor) → rocket (upstream mainline)
+
+The upstream [`rocket` driver](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/drivers/accel/rocket) (`drivers/accel/rocket/`, merged in **v6.10-rc1**) already supports RK3588 via `compatible = "rockchip,rk3588-rknn-core"`. It is authored by Tomeu Vizoso (Collabora) and uses the proper DRM accel framework.
+
+### What changes
+
+| Aspect | rknpu (vendor) | rocket (upstream) | Effort |
+|--------|----------------|-------------------|--------|
+| IOCTL prefix | `DRM_IOCTL_RKNPU_*` | `DRM_IOCTL_ROCKET_*` | High |
+| Memory alloc | `RKNPU_MEM_CREATE` → DMA addr + GEM handle | `ROCKET_CREATE_BO` → GEM handle + offset | Medium |
+| Submit model | 64-bit packed register entries in DMA task buffer (user builds `task_obj_addr`) | `drm_rocket_submit` with job arrays, structured job descriptors | High |
+| Cache sync | `RKNPU_MEM_SYNC` ioctl | `ROCKET_PREP_BO` / `ROCKET_FINI_BO` | Medium |
+| Fence | `fence_fd = -1` (none) | `dma_fence` + `sync_file` | Low (ignore) |
+| Multi-core | Core mask in submit struct | `drm_sched` per-core entities | Low (same capability) |
+
+### What stays the same
+
+The **register-level hardware programming** — NC1HWC2 format, weight packing, conv/gemm register setup, ALU ops, DPU config — is purely hardware-defined and **identical** across both drivers. All the reverse-engineering work in `rknnops.h`, `rockchip.py`, `conv.c`, `gemm.c` transfers unchanged.
+
+### Recommended approach
+
+**Option A** (pragmatic): Stick with the vendor rknpu driver (already in your kernel). Focus on math/format correctness. The driver works fine for research.
+
+**Option B** (shim): Add an abstraction layer in `rknnops.h` over the IOCTL calls. Implement two backends — `DRM_IOCTL_RKNPU_*` and `DRM_IOCTL_ROCKET_*` — with compile-time or runtime selection.
+
+**Option C** (full port): Rewrite the IOCTL layer for the `rocket` API. Hardware math stays; kernel communication changes. Estimated ~500-800 lines in `rknnops.h` need updating (all `rknpu_mem_*` and `rknpu_submit` calls).
+
+
 
 ## Driver Comparison: rknpu (0.9.8) vs rocket (Linux 6.18)
 
