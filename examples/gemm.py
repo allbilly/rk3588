@@ -246,14 +246,7 @@ def get_weight_packer(m, n, k, align_in):
     return pack_weight_tile_16x32
 
 def get_output_decoder(m, n, k, align_out):
-    # C2=4 output format only when dst_surf_stride > 1, which is set to
-    # 64 for (64,64,64) and 256 for (256,256,256). All other shapes use
-    # dst_surf_stride=1 and produce row-major linear output.
-    if (m, n, k) == (64, 64, 64):
-        return decode_output_c2_4
-    if (m, n, k) == (256, 256, 256):
-        return decode_output_c2_4
-    return decode_output_linear
+    return decode_output_c2_4 if _uses_c2_input(m, n, k) else decode_output_linear
 
 # ---------------------------------------------------------------------------
 # Register programming

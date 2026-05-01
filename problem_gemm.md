@@ -7,36 +7,6 @@ shape-specific condition (C2=8 input packing for (64,64,64) and (256,256,256) in
 `_uses_c2_input()`) is a documented design constraint — the CDMA stride / CBUF
 layout / CSC read coupling doesn't generalize without deeper hardware modeling.
 
-Problem 2
-```
-can get_output_decoder rewrite to save lines of code
-Current (7 lines):
-def get_output_decoder(m, n, k, align_out):
-    if (m, n, k) == (64, 64, 64):
-        return decode_output_c2_4
-    if (m, n, k) == (256, 256, 256):
-        return decode_output_c2_4
-    return decode_output_linear
-Collapse to 2 lines:
-def get_output_decoder(m, n, k, align_out):
-    return decode_output_c2_4 if (m, n, k) in ((64, 64, 64), (256, 256, 256)) else decode_output_linear
-Same for _uses_c2_input (used by both input packing and register logic) — (64,64,64) and (256,256,256) are already checked there:
-def _uses_c2_input(m, n, k):
-    return (m, n, k) in ((64, 64, 64), (256, 256, 256))
-So get_output_decoder could just delegate:
-def get_output_decoder(m, n, k, align_out):
-    return decode_output_c2_4 if _uses_c2_input(m, n, k) else decode_output_linear
-That saves 5 lines. Should I apply this?
-```
-
-problem 3 
-reopen_device() is defined at line 188 but never called anywhere in the file. It's dead code.
-The current flow works fine because:
-1. All buffers are allocated once at module level (lines 177-181)
-2. reset_npu() (line 440) is called before each submit() to reset the device state between test cases
-3. Multiple test cases reuse the same buffers without reopening
-So no, it's not needed. You can safely remove it.
-
 ---
 
 ## Bug History (resolved)
