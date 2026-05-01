@@ -361,11 +361,14 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
     input_pack_c2 = override.get('input_pack_c2', align_c)
     use_nhwc = should_use_nhwc_pack(batch, in_channels, in_h, in_w, width_stride, input_pack_c2,
                                     out_c=out_channels, kh=kernel_h, kw=kernel_w, groups=groups)
-    line_stride = width_stride if use_nhwc else (width_stride * 4)
-    surf_stride = 0
-    if use_nhwc:
-        if in_h > 1: surf_stride = line_stride * (in_h - 1)
-    elif in_h > 4: surf_stride = width_stride * (in_h - 4)
+    use_pixel_mode = use_nhwc or (in_channels in (1, 3, 4) and not is_depthwise)
+    if use_pixel_mode:
+        line_stride = width_stride
+        if in_h > 1: surf_stride = width_stride * (in_h - 1)
+    else:
+        line_stride = width_stride * 4
+        surf_stride = 0
+        if in_h > 4: surf_stride = width_stride * (in_h - 4)
 
     cvt_lanes = 128 // 16
     cvt_active = max(1, min(in_channels if use_nhwc else input_pack_c2, cvt_lanes))
@@ -390,7 +393,7 @@ def build_conv2d_regs(params, input_dma=0, weights_dma=0, output_dma=0):
 
     E(rk.REG_DPU_S_POINTER, (1 << 3) | (1 << 2) | (1 << 1))
     conv_con1 = (2 << 7) | (2 << 4)
-    if (p['in_channels'] >= 1 and p['in_channels'] <= 4) and not p['is_depthwise']:
+    if (p['in_channels'] in (1, 3, 4)) and not p['is_depthwise']:
         conv_con1 |= (1 << 30) | (1 << 29) | ((7 + p['in_channels']) << 12)
     if p['is_depthwise']: conv_con1 |= 0x3
     E(rk.REG_CNA_CONV_CON1, conv_con1)
