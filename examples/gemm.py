@@ -183,6 +183,25 @@ output_map, output_mem_create = mem_allocate(fd, size=4*1024*1024, flags=RKNPU_M
 tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
 regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
 
+_bufs = [task_map, regcmd_map, input_map, weight_map, output_map]
+
+def reopen_device():
+    global fd, task_map, tasks_mem_create, regcmd_map, regcmd_mem_create
+    global input_map, input_mem_create, weight_map, weight_mem_create
+    global output_map, output_mem_create, tasks, regcmd, _bufs
+    for buf in _bufs:
+        buf.close()
+    os.close(fd)
+    fd = os.open("/dev/dri/card1", os.O_RDWR)
+    task_map, tasks_mem_create = mem_allocate(fd, size=1024, flags=RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
+    regcmd_map, regcmd_mem_create = mem_allocate(fd, size=8192, flags=RKNPU_MEM_NON_CACHEABLE)
+    input_map, input_mem_create = mem_allocate(fd, size=4*1024*1024, flags=RKNPU_MEM_NON_CACHEABLE)
+    weight_map, weight_mem_create = mem_allocate(fd, size=4*1024*1024, flags=RKNPU_MEM_NON_CACHEABLE)
+    output_map, output_mem_create = mem_allocate(fd, size=4*1024*1024, flags=RKNPU_MEM_NON_CACHEABLE)
+    tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
+    regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
+    _bufs = [task_map, regcmd_map, input_map, weight_map, output_map]
+
 # ---------------------------------------------------------------------------
 # Packing dispatch: table of (m,n,k) -> (pack_input, pack_weight, decode_output)
 # ---------------------------------------------------------------------------
@@ -263,11 +282,6 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     is_matmul_768_2048 = (m == 1 and k == 768 and n == 2048)
     is_matmul_2048 = (m == 1 and k == 2048 and n == 2048)
     no_group_line_off = is_kn_64 or is_kn_256 or is_kn_512 or is_kn_lg_512 or is_matmul_768 or is_matmul_768_2048 or is_matmul_2048
-    # When K is exactly aligned (no padding), use the same register settings
-    # as the special-case shapes: no group line offset, aligned notch.
-    k_exact = (k == align_in)
-    if k_exact and m == k:
-        no_group_line_off = True
 
     line_stride = 4
     if 32 < k < 512 and k not in (64, 256):
@@ -278,7 +292,10 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     if (32 < k < 64) or (64 < k <= 128) or (128 < k < 256) or (256 < k < 512):
         surf_stride = 0
 
-    data_bank = max(1, min(11, (1 * m * align_in * 2 + 32767) // 32768))
+    input_bytes = 1 * m * align_in * 2
+    data_bank = max(1, min(11, (input_bytes + 32767) // 32768))
+    if input_bytes > 0 and input_bytes % 32768 == 0 and data_bank < 11:
+        data_bank += 1  # extra bank when data exactly fills integer banks
     data_entries = (1 * align_in + 31) // 32
 
     is_matmul_64 = (m == 64 and k == 64 and n == 64)
@@ -298,7 +315,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
 
     notch_blocks = min(13, align_out // 32)
     notch_val = 8 * notch_blocks - 1
-    if is_kn_64 or is_kn_256 or is_kn_512 or is_kn_lg_512 or k > 7872 or no_group_line_off:
+    if is_kn_64 or is_kn_256 or is_kn_512 or k > 7872:
         notch_val = 0
 
     def E(target, reg_addr, value):
