@@ -103,72 +103,20 @@ def emit(target, value, addr):
 def align_up_int(x, align):
     return ((x + align - 1) // align) * align
 
-# ── Shape-specific NPU workaround database ──
-# Each entry: key=(batch, in_c, in_h, in_w, out_c, kh, kw, groups) → {overrides}
-# Use "in_w" to mean "set width_stride = in_w" (bypass computed stride alignment).
-_CONV2D_OVERRIDES = {
-    (1, 16, 18, 18, 16, 3, 3, 1): {
-        "reason": "conv 16x18x18→16x16, k3: align_c rounds to 32 but HW needs 16 for non-depthwise; strides from RKNN dump",
-        "align_c": 16,
-        "width_stride": "in_w",
-        "out_width_stride": 256,
-        "input_pack_c2": 8,
-    },
-    (1, 15, 5, 5, 35, 3, 3, 5): {
-        "reason": "group conv 15→35, g=5, 3x3 on 5x5: strides from RKNN dump",
-        "width_stride": "in_w",
-        "out_width_stride": 12,
-    },
-    (1, 3, 11, 28, 3, 3, 3, 3): {
-        "reason": "depthwise 3x3, g=3, 11x28: c_ratio=2 triggers NHWC pack but produces garbage; use NC1HWC2. width_stride=in_w",
-        "nhwc_pack": False,
-        "width_stride": "in_w",
-    },
-    (1, 1, 5, 7, 6, 3, 3, 1): {
-        "reason": "conv 1→6, 3x3, 5x7: input_pack_c2=2 from RKNN dump",
-        "input_pack_c2": 2,
-    },
-    (1, 1, 5, 7, 6, 2, 1, 1): {
-        "reason": "conv 1→6, 2x1, 5x7: non-square ic=1 needs NHWC input pack",
-        "input_pack_c2": 2,
-    },
-    (1, 1, 5, 7, 6, 2, 3, 1): {
-        "reason": "conv 1→6, 2x3, 5x7: non-square ic=1 needs NHWC input pack",
-        "input_pack_c2": 2,
-    },
-    (1, 1, 5, 7, 6, 3, 1, 1): {
-        "reason": "conv 1→6, 3x1, 5x7: non-square ic=1 needs NHWC input pack",
-        "input_pack_c2": 2,
-    },
-    (1, 1, 5, 7, 6, 3, 5, 1): {
-        "reason": "conv 1→6, 3x5, 5x7: non-square ic=1 needs NHWC input pack",
-        "input_pack_c2": 2,
-    },
-    (1, 1, 5, 7, 6, 1, 3, 1): {
-        "reason": "conv 1→6, 1x3, 5x7: non-square ic=1 needs NHWC input pack",
-        "input_pack_c2": 2,
-    },
-    (1, 1, 5, 7, 6, 1, 5, 1): {
-        "reason": "conv 1→6, 1x5, 5x7: non-square ic=1 needs NHWC input pack",
-        "input_pack_c2": 2,
-    },
-}
-
-def _conv_override_key(batch, in_c, in_h, in_w, out_c, kh, kw, groups):
-    return (batch, in_c, in_h, in_w, out_c, kh, kw, groups)
-
-def _get_conv_override(batch, in_c, in_h, in_w, out_c, kh, kw, groups):
-    return _CONV2D_OVERRIDES.get(_conv_override_key(batch, in_c, in_h, in_w, out_c, kh, kw, groups), {})
-
 def should_use_nhwc_pack(batch, channels, height, width, width_stride, c2,
                          out_c=None, kh=None, kw=None, groups=None):
+    is_depthwise = groups == channels and out_c == channels if groups is not None and out_c is not None else False
+    if is_depthwise:
+        return False
     c_ratio = c2 // channels if channels > 0 else 0
-    use_nhwc = (c_ratio == 2) and (width_stride >= width)
-    if use_nhwc and all(x is not None for x in (out_c, kh, kw, groups)):
-        override = _get_conv_override(batch, channels, height, width, out_c, kh, kw, groups)
-        if 'nhwc_pack' in override:
-            use_nhwc = override['nhwc_pack']
-    return use_nhwc
+    return (c_ratio == 2) and (width_stride >= width)
+
+def _input_pack_c2(in_channels, out_channels, kernel_h, kernel_w, groups, align_c):
+    is_spatial = kernel_h != 1 or kernel_w != 1
+    is_depthwise = groups == in_channels and out_channels == in_channels
+    if in_channels == 1 and groups == 1 and is_spatial and not is_depthwise:
+        return 2
+    return min(align_c, 8)
 
 if not DRY_RUN:
     fd = os.open("/dev/dri/card1", os.O_RDWR)
@@ -201,7 +149,8 @@ def pack_nc1hwc2_fp16(src, batch, channels, height, width, c2, width_stride,
                     for c in range(channels):
                         val = np.float16(0)
                         if w < width:
-                            src_idx = ((((n * channels + c) * height) + h) * width + w)
+                            src_row_base = ((n * channels + c) * height + h) * width
+                            src_idx = src_row_base + w
                             val = src[src_idx]
                         dst[w_base + c] = val
         return dst
@@ -223,9 +172,8 @@ def pack_nc1hwc2_fp16(src, batch, channels, height, width, c2, width_stride,
     return dst
 
 # ── Weight packing dispatch ──
-# RKNN dumps reveal different weight memory layouts per conv shape.
-# Each variant is a named function; dispatch is via explicit shape matching.
-# Key: (out_c, in_c, kh, kw) → required groups (None = any groups)
+# Keep the packing rules generic and only special-case layouts that are
+# structurally different in hardware (depthwise or kh-major observed layouts).
 _KH_MAJOR_SHAPES = {
     (6, 3, 2, 1): None,     # observed: YOLO small conv head
     (6, 3, 2, 3): 1,        # observed: YOLO mid-layer
@@ -372,21 +320,16 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
     max_align = 32 if is_depthwise else 16
     pow2 = 1
     c = in_channels if in_channels > 0 else 1
-    while pow2 < c and pow2 < max_align: pow2 <<= 1
+    while pow2 < c and pow2 < max_align:
+        pow2 <<= 1
     align_c = max(8, min(pow2, max_align))
     align_out_c = max(16, ((out_channels + 15) // 16) * 16)
-    width_stride = align_up_int(in_w, align_c)
+    width_align = max(1, (16 + align_c - 1) // align_c)
+    width_stride = align_up_int(in_w, width_align)
     out_channel_field = (align_up_int(align_out_c, 32) if is_depthwise else align_out_c) - 1
     orig_channel = out_channels - 1 if out_channels > 0 else 0
     out_width_stride = max(1, (out_w * align_out_c) // 4)
-    batch_for_hw = 1 if batch > 1 else batch
-
-    # ── Phase 2: Shape-specific overrides (from _CONV2D_OVERRIDES table + partial checks) ──
-    override = _get_conv_override(batch_for_hw, in_channels, in_h, in_w, out_channels, kernel_h, kernel_w, groups)
-    if 'align_c' in override: align_c = override['align_c']
-    if 'width_stride' in override: width_stride = in_w if override['width_stride'] == 'in_w' else override['width_stride']
-    if 'out_width_stride' in override: out_width_stride = override['out_width_stride']
-
+    # Phase 2: no per-shape overrides; derive everything from generic HW rules.
     if in_channels == 3 and out_channels == 6:
         if kernel_h == 3 and kernel_w == 3: out_width_stride = 16
         if groups == 1 and kernel_h == 3 and kernel_w == 1: out_width_stride = 24
@@ -408,7 +351,7 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
         max_grains = max(2, (2 * NPU_CBUF_BANK_SIZE + row_bytes - 1) // row_bytes)
         feature_grains = min(feature_grains, (max_grains + 1) & ~1)
 
-    input_pack_c2 = override.get('input_pack_c2', align_c)
+    input_pack_c2 = _input_pack_c2(in_channels, out_channels, kernel_h, kernel_w, groups, align_c)
     use_nhwc = should_use_nhwc_pack(batch, in_channels, in_h, in_w, width_stride, input_pack_c2,
                                     out_c=out_channels, kh=kernel_h, kw=kernel_w, groups=groups)
     use_pixel_mode = use_nhwc or (in_channels in (1, 3, 4) and not is_depthwise)  # P6-B: pixel mode uses different stride formulas
@@ -686,8 +629,10 @@ def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1
     is_1x1 = (kernel_h == 1 and kernel_w == 1)
     pad_to_c = 3 if (is_1x1 and in_channels < 3) else None
     if pad_to_c: in_channels = pad_to_c
-
+    needs_1x1_channel_slicing = is_1x1 and in_channels >= 5 and not pad_to_c and groups == 1
     p = compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups)
+    needs_depthwise_slicing = p['is_depthwise'] and in_channels > 8
+    needs_spatial_decomposition = not is_1x1
 
     if DRY_RUN:
         regs = build_conv2d_regs(p, 0, 0, 0)
@@ -701,13 +646,13 @@ def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1
             print(f"  [{i:3d}] {target_names.get(t, f'0x{t:04x}')}[0x{a:04x}] = 0x{v:08x}")
         return None, None, None
 
-    if is_1x1 and in_channels >= 5 and not pad_to_c and groups == 1:
+    if needs_1x1_channel_slicing:
         return _run_conv2d_channel_sliced(out_channels, kernel_h, kernel_w, input_hw, original_in_c, is_1x1)
 
-    if p['is_depthwise'] and in_channels > 8:
+    if needs_depthwise_slicing:
         return _run_depthwise_channel_sliced(in_channels, kernel_h, kernel_w, input_hw, is_1x1)
 
-    if not is_1x1:
+    if needs_spatial_decomposition:
         return _run_conv2d_spatial_decomposed(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups)
 
     reset_npu(fd)
