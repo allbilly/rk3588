@@ -310,6 +310,65 @@ def _output_unpack_c2(params):
     return 8 if params['align_out_c'] >= 8 else params['align_out_c']
 
 
+def _packed_sizes(params):
+    packed_input_size = ((params['in_channels'] + params['align_c'] - 1) // params['align_c']) * params['in_h'] * params['width_stride'] * params['align_c'] * 2
+    packed_weight_size = params['out_channels'] * params['kernel_h'] * params['kernel_w'] * ((params['weight_in_channels'] + params['align_c'] - 1) // params['align_c']) * params['align_c'] * 2
+    packed_output_size = ((params['out_channels'] + params['align_out_c'] - 1) // params['align_out_c']) * params['out_h'] * params['out_width_stride'] * params['align_out_c'] * 2
+    return packed_input_size, packed_weight_size, packed_output_size
+
+
+def _pack_weights_for_submit(params, weight_ochw, packed_weight_size):
+    if params['groups'] <= 1:
+        weight_packed = pack_conv_weights_fp16(
+            weight_ochw, params['out_channels'], params['in_channels'],
+            params['kernel_h'], params['kernel_w'], params['align_c'], groups=params['groups'])
+        return params, weight_packed, packed_weight_size
+
+    in_c = params['in_channels']
+    ic_per_group = params['weight_in_channels']
+    oc_per_group = params['out_channels'] // params['groups']
+    kh, kw = params['kernel_h'], params['kernel_w']
+    if params.get('is_depthwise', False):
+        weight_packed = _pack_depthwise_expanded_weights_fp16(
+            weight_ochw, params['out_channels'], ic_per_group, kh, kw, packed_weight_size)
+        return params, weight_packed, packed_weight_size
+
+    wt_full = _expand_grouped_weights_fp16(
+        weight_ochw, params['out_channels'], in_c, ic_per_group, oc_per_group, kh, kw)
+    submit_params = dict(params)
+    submit_params['groups'] = 1
+    submit_params['weight_in_channels'] = in_c
+    _, packed_weight_size, _ = _packed_sizes(submit_params)
+    weight_packed = pack_conv_weights_fp16(
+        wt_full, submit_params['out_channels'], in_c, kh, kw, submit_params['align_c'], groups=1)
+    return submit_params, weight_packed, packed_weight_size
+
+
+def _unpack_output(params, out_packed, is_1x1):
+    unpack_c2 = _output_unpack_c2(params)
+    if is_1x1:
+        flat = unpack_nc1hwc2_fp16(
+            out_packed, params['batch'], params['out_channels'], 1,
+            params['out_h'] * params['out_w'], unpack_c2, params['out_width_stride'])
+    else:
+        flat = unpack_nc1hwc2_fp16(
+            out_packed, params['batch'], params['out_channels'],
+            params['out_h'], params['out_w'], unpack_c2, params['out_w'])
+    return flat.reshape(params['batch'], params['out_channels'], params['out_h'], params['out_w'])
+
+
+def _write_task_descriptor(regs_list):
+    tasks[0].flags = 0
+    tasks[0].op_idx = 1
+    tasks[0].enable_mask = 0xd
+    tasks[0].int_mask = 0x300
+    tasks[0].int_clear = 0x1ffff
+    tasks[0].int_status = 0
+    tasks[0].regcfg_amount = len(regs_list)
+    tasks[0].regcfg_offset = 0
+    tasks[0].regcmd_addr = cmd_mc.dma_addr
+
+
 def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1):
     # ── Phase 1: Default parameter computation ──
     batch, in_h, in_w = 1, input_hw[0], input_hw[1]
@@ -435,35 +494,14 @@ def _verify_config(regs_list):
 
 
 def _npu_submit(params, input_nchw, weight_ochw, is_1x1, log_submit=True):
-    packed_input_size = ((params['in_channels'] + params['align_c'] - 1) // params['align_c']) * params['in_h'] * params['width_stride'] * params['align_c'] * 2
-    packed_weight_size = params['out_channels'] * params['kernel_h'] * params['kernel_w'] * ((params['weight_in_channels'] + params['align_c'] - 1) // params['align_c']) * params['align_c'] * 2
-    packed_output_size = ((params['out_channels'] + params['align_out_c'] - 1) // params['align_out_c']) * params['out_h'] * params['out_width_stride'] * params['align_out_c'] * 2
+    packed_input_size, packed_weight_size, packed_output_size = _packed_sizes(params)
 
     reset_npu(fd)
 
     input_packed = pack_nc1hwc2_fp16(input_nchw, params['batch'], params['in_channels'], params['in_h'], params['in_w'], params['align_c'], params['width_stride'],
                                       out_c=params['out_channels'], kh=params['kernel_h'], kw=params['kernel_w'], groups=params.get('groups', 1),
                                       use_nhwc=params['use_nhwc'])
-    is_grouped = params['groups'] > 1
-    if is_grouped:
-        in_c = params['in_channels']
-        ic_per_group = params['weight_in_channels']
-        oc_per_group = params['out_channels'] // params['groups']
-        kh, kw = params['kernel_h'], params['kernel_w']
-        is_dw = params.get('is_depthwise', False)
-        if not is_dw:
-            wt_full = _expand_grouped_weights_fp16(
-                weight_ochw, params['out_channels'], in_c, ic_per_group, oc_per_group, kh, kw)
-            params = dict(params)
-            params['groups'] = 1
-            params['weight_in_channels'] = in_c
-            packed_weight_size = params['out_channels'] * params['kernel_h'] * params['kernel_w'] * ((params['weight_in_channels'] + params['align_c'] - 1) // params['align_c']) * params['align_c'] * 2
-            weight_packed = pack_conv_weights_fp16(wt_full, params['out_channels'], in_c, kh, kw, params['align_c'], groups=1)
-        else:
-            weight_packed = _pack_depthwise_expanded_weights_fp16(
-                weight_ochw, params['out_channels'], ic_per_group, kh, kw, packed_weight_size)
-    else:
-        weight_packed = pack_conv_weights_fp16(weight_ochw, params['out_channels'], params['in_channels'], params['kernel_h'], params['kernel_w'], params['align_c'], groups=params['groups'])
+    params, weight_packed, packed_weight_size = _pack_weights_for_submit(params, weight_ochw, packed_weight_size)
 
     in_view = memoryview(bytearray(input_packed.tobytes()))
     wt_view = memoryview(bytearray(weight_packed.tobytes()))
@@ -474,13 +512,7 @@ def _npu_submit(params, input_nchw, weight_ochw, is_1x1, log_submit=True):
     regs_list = build_conv2d_regs(params, in_mc.dma_addr, wt_mc.dma_addr, out_mc.dma_addr)
     _verify_config(regs_list)
     for i, (t, v, a) in enumerate(regs_list): regs_ptr[i] = emit(t, v, a)
-
-    tasks[0].flags = 0; tasks[0].op_idx = 1
-    tasks[0].enable_mask = 0xd; tasks[0].int_mask = 0x300
-    tasks[0].int_clear = 0x1ffff; tasks[0].int_status = 0
-    tasks[0].regcfg_amount = len(regs_list)
-    tasks[0].regcfg_offset = 0
-    tasks[0].regcmd_addr = cmd_mc.dma_addr
+    _write_task_descriptor(regs_list)
 
     mem_sync(fd, wt_mc.obj_addr, 0, wt_alloc, RKNPU_MEM_SYNC_TO_DEVICE)
     mem_sync(fd, in_mc.obj_addr, 0, packed_input_size, RKNPU_MEM_SYNC_TO_DEVICE)
@@ -503,14 +535,7 @@ def _npu_submit(params, input_nchw, weight_ochw, is_1x1, log_submit=True):
 
     out_packed = np.frombuffer(out_map, dtype=np.float16, count=packed_output_size // 2).copy()
 
-    unpack_c2 = _output_unpack_c2(params)
-    if is_1x1:
-        flat = unpack_nc1hwc2_fp16(out_packed, params['batch'], params['out_channels'], 1, params['out_h'] * params['out_w'], unpack_c2, params['out_width_stride'])
-        result = flat.reshape(params['batch'], params['out_channels'], params['out_h'], params['out_w'])
-    else:
-        result = unpack_nc1hwc2_fp16(out_packed, params['batch'], params['out_channels'], params['out_h'], params['out_w'], unpack_c2, params['out_w'])
-        result = result.reshape(params['batch'], params['out_channels'], params['out_h'], params['out_w'])
-    return result
+    return _unpack_output(params, out_packed, is_1x1)
 
 def _run_conv2d_channel_sliced(out_channels, kernel_h, kernel_w, input_hw, original_in_c, is_1x1):
     """1x1 conv with in_channels >= 5: HW non-aligned DMA supports max 4 in-channels.
