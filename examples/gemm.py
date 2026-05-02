@@ -205,11 +205,15 @@ def pack_weight_row_major(m, n, k, b_matrix, wt_pack, align_in, align_out):
     wt_pack.reshape(align_out, align_in)[:n, :k] = b_matrix[:, :n].T
 
 def pack_input_c2_8(m, n, k, a_matrix, in_pack, align_in):
+    # NC1HWC2 with C2=8 stores each 8-FP16 group as 16B; two adjacent C2
+    # groups make one 32B CDMA atom, matching NVDLA ATOM_CUBE_SIZE.
     in_pack[:] = a_matrix[:, :k].reshape(m, -1, 8).transpose(1, 0, 2).ravel()
 
 def pack_weight_tile_16x32(m, n, k, b_matrix, wt_pack, align_in, align_out):
     wt = np.zeros((align_out, align_in), dtype=np.float16)
     wt[:n, :k] = b_matrix.T[:n, :k]
+    # FP16 weights are consumed in 16-kernel groups and 32-input-channel atoms:
+    # NVDLA uses KERNEL_PER_GROUP_FP16=16 and ATOM_CUBE_SIZE=32B=16 FP16.
     wt_pack[:] = wt.reshape(align_out // 16, 16, align_in // 32, 32).transpose(0, 2, 1, 3).ravel()
 
 
@@ -219,15 +223,41 @@ def decode_output_linear(m, n, k, raw, align_out):
     return raw[row_start[:, None] + np.arange(n)]
 
 def decode_output_c2_4(m, n, k, raw, align_out):
+    # Not an upstream NVDLA C-model constant: local CACC delivers FP16/INT16
+    # results to SDP in 16-element payloads. C2=4 is the RK DPU output layout
+    # observed for these square C2-input matmul schedules in vendor dumps/tests.
     return raw[:n // 4 * m * 4].reshape(n // 4, m, 4).transpose(1, 0, 2).reshape(m, n).copy()
 
 # Hardware constants
-C2_INPUT = 8   # NC1HWC2 channel group size for input (derived from ATOMIC_K_SIZE=32)
-C2_OUTPUT = 4  # NC1HWC2 channel group size for output (DPU formatter atomic width)
-CBUF_BANK_SIZE = 32768  # 2^15 bytes per CBUF bank (CBUF has 2 banks = 65536 total)
+C2_INPUT = 8   # 8 FP16 = 16B; two C2 groups form one 32B CDMA/CSC atom.
+C2_OUTPUT = 4  # RK-only output decode group; not an NVDLA CACC/SDP constant.
+CBUF_BANK_SIZE = 32768  # NVDLA bank size: 256 CBUF entries * 128B per entry.
 
 def _uses_c2_input(m, n, k):
-    return (m, n, k) in ((64, 64, 64), (256, 256, 256))
+    square = m == n == k
+    # CSC/CMAC process 64 input channels per direct-conv super-channel
+    # (PARALLEL_CHANNEL_NUM=64), so C2 input is only used for 64-aligned K.
+    cbuf_aligned = k % 64 == 0
+    # C2=8 maps FP16 K onto CDMA/CSC 32B atoms and 64B half-entry super-surfaces.
+    # In the NVDLA C-model, FP16 has 16 elements per 32B atom, CDMA groups two
+    # atoms per super-surface, and CSC waits for full input residency:
+    #   required_entries = M * ceil(ceil(K / 16) / 4)
+    # For square GEMM this is 1024 entries at K=256, but 4096 entries at K=512.
+    # 4096 is the whole 16-bank NVDLA CBUF before weights; this script reserves
+    # banks for weights, so CDMA/CSC modulo CBUF addressing aliases at 512.
+    cbuf_friendly = 64 <= k <= 256
+    return square and cbuf_aligned and cbuf_friendly
+
+def _gemm_layout(m, n, k):
+    # CDMA/CSC direct-conv data is atom-addressed: FP16 atom = 32B = 16 values.
+    # Weight packing also groups two atoms (32 input channels), so align K/N to
+    # 32 and keep at least one full 32-channel tile for tiny matmuls.
+    aligned_k = max(32, ((k + 31) // 32) * 32)
+    align_out = max(32, ((n + 31) // 32) * 32)
+    align_in = max(aligned_k, align_out)
+    pad_k = align_in != aligned_k
+    eff_k = align_in if pad_k else k
+    return align_in, align_out, eff_k, pad_k
 
 def get_input_packer(m, n, k, align_in):
     if _uses_c2_input(m, n, k): return pack_input_c2_8
@@ -239,40 +269,68 @@ def get_weight_packer(m, n, k, align_in):
 def get_output_decoder(m, n, k, align_out):
     return decode_output_c2_4 if _uses_c2_input(m, n, k) else decode_output_linear
 
+def _write_task_descriptor(reg_count):
+    tasks[0].flags = 0
+    tasks[0].op_idx = 4        # GEMM pipeline, not conv pipeline (op_idx=1, enable_mask=0xd)
+    tasks[0].enable_mask = 0x18 # CSC | CMAC_A for matmul sub-blocks
+    tasks[0].int_mask = 0x300
+    tasks[0].int_clear = 0x1ffff
+    tasks[0].int_status = 0
+    tasks[0].regcfg_amount = reg_count
+    tasks[0].regcfg_offset = 0
+    tasks[0].regcmd_addr = regcmd_mem_create.dma_addr
+
 # ---------------------------------------------------------------------------
 # Register programming
 # ---------------------------------------------------------------------------
 
 def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
-    align_in = max(32, ((k + 31) // 32) * 32)
-    align_out = max(32, ((n + 31) // 32) * 32)
-    if align_in < align_out:
-        align_in = align_out  # pad K to match N alignment; CBUF readback issue at specific align_in values
-    eff_k = align_in if align_in > max(32, ((k + 31) // 32) * 32) else k  # use padded K if padding applied
+    align_in, align_out, eff_k, _ = _gemm_layout(m, n, k)
 
-    # GROUP_LINE_OFF = 0 when K==N (square matmul, CSC line offset would alias); else 1
+    # GROUP_LINE_OFF is disabled for aligned K==N schedules. The vendor matmul
+    # reference disables it for KN-wide cases; broadening beyond this caused CSC
+    # line/group addressing to alias on shapes like 32x32 and 64x99x64.
     no_group_line_off = (k == n) and (align_in >= 64)
 
-    # CDMA line_stride register (CNA_DMA_CON1): byte_stride = register << 5 (× ATOM_CUBE_SIZE=32).
-    # 4 = is_line_packed (single atom, 32B). Non-packed: ceil(eff_k/32) atoms × 4, capped at 13.
+    # CDMA line_stride register (CNA_DMA_CON1): local NVDLA C-model converts the
+    # field with <<5 because memory moves in 32B atoms, and checks packed lines
+    # with line_stride == ATOM_CUBE_SIZE * width. The 4-unit tiny/KN schedule and
+    # 13-group clamp are RK vendor matmul rules; they are not NVDLA constants.
     line_stride = 4 if (eff_k <= 32 or eff_k >= 512 or _uses_c2_input(m, n, k)) else min(13, (eff_k + 31) // 32) * 4
 
-    # surf_stride: non-zero only for C2=8 NC1HWC2 shapes, where surface groups
-    # span multiple C1 planes in CBUF. For all other shapes: 0 (contiguous).
+    # CDMA surface_stride is also encoded in 32B units and is added per
+    # super-surface in DirectConvDataRequestSequencerCommon. Only C2=8 NC1HWC2
+    # square schedules need non-zero surface spacing between 4-row groups.
     surf_groups = m // 4
     surf_stride = 0
     if align_in >= 64 and _uses_c2_input(m, n, k):
         surf_stride = line_stride * (surf_groups - 1) + int(surf_groups == 0)
 
-    input_bytes = m * align_in * 2  # M planes × align_in elements × 2 bytes (fp16)
-    data_bank = max(1, min(11, (input_bytes + CBUF_BANK_SIZE - 1) // CBUF_BANK_SIZE))  # ceil div; +BOFSIZE-1 avoids extra bank at exact boundary
+    input_bytes = m * align_in * 2  # M planes * align_in elements * 2 bytes (FP16).
+    # Local NVDLA encodes bank counts as field+1 and uses 256*128B=32768B per
+    # bank. NVDLA has 16 CBUF banks, but RK matmul register dumps use a 12-bank
+    # data+weight budget here; keep at least one weight bank in that RK budget.
+    # The -1 in ceil-div is important: exact 32768B boundaries do not consume an
+    # extra data bank (confirmed against gemm.c/vendor register dumps).
+    data_bank = max(1, min(11, (input_bytes + CBUF_BANK_SIZE - 1) // CBUF_BANK_SIZE))
+    # RK CBUF_CON1 follows the vendor matmul register dump here: count 64B
+    # half-entry groups, i.e. 32 FP16 values per unit. Vanilla NVDLA C-model
+    # collapses four 32B atoms into one 128B CBUF entry, but RK's CNA field for
+    # this path is programmed as ceil(align_in / 32).
     data_entries = (1 * align_in + 31) // 32
 
-    # dst_surf_stride = align_out when k==n (no_group_line_off), else 1
-    # is_matmul_64/256 special cases are redundant: align_out==64 for 64x64, 256 for 256x256
+    # Output surface stride is RK DPU-side programming, not present in local
+    # NVDLA CACC/SDP source. Empirically, aligned K==N schedules need align_out
+    # groups; other tested shapes decode as contiguous one-group surfaces.
     dst_surf_stride = align_out if no_group_line_off else 1
 
-    # feature_grains = CBUF capacity / bytes_per_line, derived from 2 banks (2×CBUF_BANK_SIZE) / (align_in × 2 bytes/fp16)
+    # CNA_CONV_CON2 programs CDMA fetch_slice_grain: local NVDLA C-model uses
+    # cdma_grains + 1 as the number of lines planned per CBUF fetch and requires
+    # grain=1 for unpacked lines. RK's matmul path uses a packed/specialized
+    # schedule and sizes grains from about two CBUF banks of input rows.
+    # 80 and 7872 are vendor matmul thresholds, not NVDLA defines: 80 is the
+    # minimum proven grain for wide rows, and K>7872 switches to a two-line grain
+    # to avoid over-planning CBUF residency for very wide FP16 rows.
     feature_grains = m + 1
     if eff_k > 7872:
         feature_grains = 2
@@ -282,10 +340,11 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
         grains = (grains + 1) & ~1
         feature_grains = max(80, grains)
 
+    # DPU notch is RK output-side programming and is not in local NVDLA CACC/SDP
+    # source. The 8-value sub-block formula, 13-group clamp, KN-wide zeroing,
+    # and K>7872 zeroing are preserved from vendor matmul register schedules.
     notch_blocks = min(13, align_out // 32)
     notch_val = 8 * notch_blocks - 1
-    # Zero notch for square matmuls (no inter-atom padding needed);
-    # also zero for very wide lines (K>7872) where CBUF is fully utilized per line
     if (k == n and align_out >= 64) or eff_k > 7872:
         notch_val = 0
 
@@ -352,11 +411,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
 # ---------------------------------------------------------------------------
 
 def run_gemm(m, n, k, a_matrix, b_matrix):
-    align_in = max(32, ((k + 31) // 32) * 32)
-    align_out = max(32, ((n + 31) // 32) * 32)
-    pad_k = align_in < align_out
-    if pad_k:
-        align_in = align_out
+    align_in, align_out, _, pad_k = _gemm_layout(m, n, k)
 
     in_pack = np.zeros(align_in * m, dtype=np.float16)
     wt_pack = np.zeros(align_in * align_out, dtype=np.float16)
@@ -375,6 +430,8 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
     ct_inputs[:] = in_pack.view(np.uint16).tolist()
     ct_weights[:] = wt_pack.view(np.uint16).tolist()
 
+    # Keep at least one 256B cache/DMA-sized read window for tiny outputs, then
+    # size the FP32 buffer by the last decoded row and real N columns.
     out_nbytes = max(256, (m - 1) * align_out * 4 + n * 4)
     npu_regs = make_gemm_regs(m, n, k,
         input_mem_create.dma_addr, weight_mem_create.dma_addr, output_mem_create.dma_addr)
@@ -394,15 +451,7 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
     for i in range(len(npu_regs), 64):
         regcmd[i] = 0
 
-    tasks[0].flags  = 0;
-    tasks[0].op_idx = 4;        # GEMM pipeline — NOT conv pipeline (op_idx=1, enable_mask=0xd)
-    tasks[0].enable_mask = 0x18;# CSC | CMAC_A — enable mask for matmul sub-blocks
-    tasks[0].int_mask = 0x300;
-    tasks[0].int_clear = 0x1ffff;
-    tasks[0].int_status = 0;
-    tasks[0].regcfg_amount = len(npu_regs)
-    tasks[0].regcfg_offset = 0;
-    tasks[0].regcmd_addr = regcmd_mem_create.dma_addr
+    _write_task_descriptor(len(npu_regs))
 
     reset_npu(fd)
     ret = submit(tasks_mem_create.obj_addr)
@@ -420,8 +469,9 @@ if __name__ == "__main__":
         np.array([[5, 6], [7, 8]], dtype=np.float16)),
     ]
     np.random.seed(42)
-    for mnk in [(8, 8, 8), (9, 9, 9), (64, 64, 64), (256, 256, 256)]:
-        m, n, k = mnk
+    square_sizes = (8, 9) + tuple(1 << exp for exp in (6, 8))
+    for size in square_sizes:
+        m = n = k = size
         a = np.random.randn(m, k).astype(np.float16)
         b = np.random.randn(k, n).astype(np.float16)
         test_cases.append((m, n, k, a, b))
