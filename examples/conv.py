@@ -181,40 +181,16 @@ def pack_nc1hwc2_fp16(src, batch, channels, height, width, c2, width_stride,
     if use_nhwc is None:
         use_nhwc = should_use_nhwc_pack(batch, channels, height, width, width_stride, c2,
                                         out_c=out_c, kh=kh, kw=kw, groups=groups)
+    nchw = src.reshape(batch, channels, height, width)
     if use_nhwc:
-        row_stride = width_stride * channels
-        plane_stride = height * row_stride
-        dst = np.zeros((batch * plane_stride,), dtype=np.float16)
-        for n in range(batch):
-            n_base = n * plane_stride
-            for h in range(height):
-                h_base = n_base + h * row_stride
-                for w in range(width_stride):
-                    w_base = h_base + w * channels
-                    for c in range(channels):
-                        val = np.float16(0)
-                        if w < width:
-                            src_row_base = ((n * channels + c) * height + h) * width
-                            src_idx = src_row_base + w
-                            val = src[src_idx]
-                        dst[w_base + c] = val
-        return dst
+        packed = np.zeros((batch, height, width_stride, channels), dtype=np.float16)
+        packed[:, :, :width, :] = nchw.transpose(0, 2, 3, 1)
+        return packed.reshape(-1)
+
     c1 = (channels + c2 - 1) // c2
-    plane_stride = height * width_stride * c2
-    dst = np.zeros((batch * c1 * plane_stride,), dtype=np.float16)
-    for n in range(batch):
-        for c in range(channels):
-            plane = c // c2
-            offset = c % c2
-            dst_plane_base = (n * c1 + plane) * plane_stride
-            for h in range(height):
-                dst_row_base = dst_plane_base + h * width_stride * c2
-                src_row_base = ((((n * channels + c) * height) + h) * width)
-                for w in range(width):
-                    dst_idx = dst_row_base + w * c2 + offset
-                    src_idx = src_row_base + w
-                    dst[dst_idx] = src[src_idx]
-    return dst
+    padded = np.zeros((batch, c1 * c2, height, width_stride), dtype=np.float16)
+    padded[:, :channels, :, :width] = nchw
+    return padded.reshape(batch, c1, c2, height, width_stride).transpose(0, 1, 3, 4, 2).reshape(-1)
 
 # ── Weight packing dispatch ──
 # Keep the packing rules generic and only special-case layouts that are
@@ -245,47 +221,22 @@ def _is_kh_major(out_c, in_c, kh, kw, groups):
     return required == groups
 
 def _pack_dw_spatial_major(src, out_c, in_c, kh, kw, c2_out):
-    spatial_stride = c2_out
-    dst = np.zeros(out_c * kh * kw * spatial_stride, dtype=np.float16)
-    for kh_idx in range(kh):
-        for kw_idx in range(kw):
-            dst_base = (kh_idx * kw + kw_idx) * spatial_stride
-            for oc in range(out_c):
-                src_idx = (((oc * in_c + oc) * kh) + kh_idx) * kw + kw_idx
-                dst[dst_base + oc] = src[src_idx]
-    return dst
+    weights = src.reshape(out_c, in_c, kh, kw)
+    spatial = np.zeros((kh, kw, c2_out), dtype=np.float16)
+    spatial[:, :, :out_c] = weights[np.arange(out_c), np.arange(out_c)].transpose(1, 2, 0)
+    return spatial.reshape(-1)
 
 def _pack_kh_major(src, out_c, in_c, kh, kw, c2_out):
-    spatial_stride = c2_out * ((in_c + c2_out - 1) // c2_out)
-    out_c_stride = spatial_stride
-    spatial_stride = out_c * out_c_stride
-    dst = np.zeros(kh * kw * spatial_stride, dtype=np.float16)
-    for kh_idx in range(kh):
-        for kw_idx in range(kw):
-            dst_khkw_base = (kh_idx * kw + kw_idx) * spatial_stride
-            for oc in range(out_c):
-                dst_spatial_base = dst_khkw_base + oc * out_c_stride
-                for ic in range(in_c):
-                    dst_idx = dst_spatial_base + (ic // c2_out) * c2_out + (ic % c2_out)
-                    src_idx = (((oc * in_c + ic) * kh) + kh_idx) * kw + kw_idx
-                    dst[dst_idx] = src[src_idx]
-    return dst
+    aligned_in = align_up_int(in_c, c2_out)
+    padded = np.zeros((out_c, aligned_in, kh, kw), dtype=np.float16)
+    padded[:, :in_c] = src.reshape(out_c, in_c, kh, kw)
+    return padded.transpose(2, 3, 0, 1).reshape(-1)
 
 def _pack_default(src, out_c, in_c, kh, kw, c2_out):
-    spatial_stride = c2_out * ((in_c + c2_out - 1) // c2_out)
-    kernel_stride = kh * kw * spatial_stride
-    total = out_c * kernel_stride
-    dst = np.zeros((total,), dtype=np.float16)
-    for oc in range(out_c):
-        dst_kernel_base = oc * kernel_stride
-        for kh_idx in range(kh):
-            for kw_idx in range(kw):
-                dst_spatial_base = dst_kernel_base + (kh_idx * kw + kw_idx) * spatial_stride
-                for ic in range(in_c):
-                    dst_idx = dst_spatial_base + (ic // c2_out) * c2_out + (ic % c2_out)
-                    src_idx = (((oc * in_c + ic) * kh) + kh_idx) * kw + kw_idx
-                    dst[dst_idx] = src[src_idx]
-    return dst
+    aligned_in = align_up_int(in_c, c2_out)
+    padded = np.zeros((out_c, aligned_in, kh, kw), dtype=np.float16)
+    padded[:, :in_c] = src.reshape(out_c, in_c, kh, kw)
+    return padded.transpose(0, 2, 3, 1).reshape(-1)
 
 def pack_conv_weights_fp16(src, out_c, in_c, kh, kw, c2_out, groups=1):
     is_depthwise = (groups == in_c and out_c == in_c)
@@ -296,19 +247,11 @@ def pack_conv_weights_fp16(src, out_c, in_c, kh, kw, c2_out, groups=1):
     return _pack_default(src, out_c, in_c, kh, kw, c2_out)
 
 def unpack_nc1hwc2_fp16(src, batch, channels, height, width, c2, width_stride):
-    dst = np.zeros((batch * channels * height * width,), dtype=np.float16)
     c1 = (channels + c2 - 1) // c2
-    plane_stride = height * width_stride * c2
-    for n in range(batch):
-        for c in range(channels):
-            plane = c // c2
-            offset = c % c2
-            for h in range(height):
-                for w in range(width):
-                    src_idx = ((n * c1 + plane) * plane_stride) + (h * width_stride * c2) + (w * c2) + offset
-                    dst_idx = (((n * channels + c) * height) + h) * width + w
-                    dst[dst_idx] = src[src_idx]
-    return dst
+    logical_size = batch * c1 * height * width_stride * c2
+    packed = src[:logical_size].reshape(batch, c1, height, width_stride, c2)
+    nchw = packed.transpose(0, 1, 4, 2, 3).reshape(batch, c1 * c2, height, width_stride)
+    return nchw[:, :channels, :, :width].reshape(-1)
 
 
 def _validate_npu_result(result, inp, wt, in_c, out_c, kh, kw, groups):
