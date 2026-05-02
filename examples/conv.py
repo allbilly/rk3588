@@ -15,6 +15,11 @@ RKNPU_ACT_RESET = 1
 REGCMD_RESERVED = 16384
 NPU_CBUF_BANK_SIZE = 32768
 NPU_CBUF_BANKS = 12
+MAX_PIXEL_DMA_CHANNELS = 4
+POINTWISE_PIXEL_CHANNELS = 3
+DEPTHWISE_SLICE_CHANNELS = 8
+OUTPUT_CHANNEL_CHUNK = 16
+PIXEL_DMA_CHANNELS = (1, 3, 4)
 
 DRY_RUN = "--submit" not in sys.argv
 VALIDATE = "--validate" in sys.argv
@@ -103,9 +108,15 @@ def emit(target, value, addr):
 def align_up_int(x, align):
     return ((x + align - 1) // align) * align
 
+def _is_depthwise(in_channels, out_channels, groups):
+    return groups == in_channels and out_channels == in_channels
+
+def _is_pixel_dma_input(in_channels, is_depthwise):
+    return in_channels in PIXEL_DMA_CHANNELS and not is_depthwise
+
 def should_use_nhwc_pack(batch, channels, height, width, width_stride, c2,
                          out_c=None, kh=None, kw=None, groups=None):
-    is_depthwise = groups == channels and out_c == channels if groups is not None and out_c is not None else False
+    is_depthwise = _is_depthwise(channels, out_c, groups) if groups is not None and out_c is not None else False
     if is_depthwise:
         return False
     c_ratio = c2 // channels if channels > 0 else 0
@@ -113,10 +124,44 @@ def should_use_nhwc_pack(batch, channels, height, width, width_stride, c2,
 
 def _input_pack_c2(in_channels, out_channels, kernel_h, kernel_w, groups, align_c):
     is_spatial = kernel_h != 1 or kernel_w != 1
-    is_depthwise = groups == in_channels and out_channels == in_channels
+    is_depthwise = _is_depthwise(in_channels, out_channels, groups)
     if in_channels == 1 and groups == 1 and is_spatial and not is_depthwise:
         return 2
     return min(align_c, 8)
+
+def _output_width_stride(in_channels, out_channels, kernel_h, kernel_w, groups, out_h, out_w, align_out_c):
+    out_atoms = out_w * out_h
+    if kernel_h == 1 and kernel_w == 1:
+        return out_atoms if out_atoms < 4 else align_up_int(out_atoms, 4)
+    if in_channels == 3 and out_channels == 6:
+        if kernel_h == 3 and kernel_w == 3:
+            return 16
+        if groups == 1 and kernel_h == 3 and kernel_w == 1:
+            return 24
+    return max(1, (out_w * align_out_c) // 4)
+
+def _feature_grains(in_h, kernel_h, width_stride, align_c):
+    grains = in_h + kernel_h
+    row_bytes = width_stride * align_c * 2
+    if row_bytes <= 0:
+        return grains
+    max_grains = max(2, (2 * NPU_CBUF_BANK_SIZE + row_bytes - 1) // row_bytes)
+    return min(grains, (max_grains + 1) & ~1)
+
+def _dma_strides(in_h, width_stride, use_pixel_mode):
+    if use_pixel_mode:
+        return width_stride, width_stride * (in_h - 1) if in_h > 1 else 0
+    return width_stride * 4, width_stride * (in_h - 4) if in_h > 4 else 0
+
+def _cbuf_entries(width_stride, align_c, in_h, is_depthwise):
+    row_entries = max(1, (width_stride * align_c + 31) // 32)
+    if align_c >= 16 or is_depthwise:
+        return row_entries
+    return max(1, row_entries * in_h * 4)
+
+def _data_bank(width_stride, feature_grains, align_c):
+    fd_bytes = width_stride * feature_grains * align_c * 2
+    return max(1, min(NPU_CBUF_BANKS - 1, (fd_bytes + NPU_CBUF_BANK_SIZE - 1) // NPU_CBUF_BANK_SIZE))
 
 if not DRY_RUN:
     fd = os.open("/dev/dri/card1", os.O_RDWR)
@@ -304,6 +349,18 @@ def _pack_depthwise_expanded_weights_fp16(weight_ochw, out_channels, ic_per_grou
     return wt_full
 
 
+def _expand_grouped_weights_fp16(weight_ochw, out_channels, in_channels, ic_per_group, oc_per_group, kh, kw):
+    wt_full = np.zeros(out_channels * in_channels * kh * kw, dtype=np.float16)
+    for oc in range(out_channels):
+        group = oc // oc_per_group
+        group_ic_start = group * ic_per_group
+        for ic_local in range(ic_per_group):
+            src_idx = oc * ic_per_group * kh * kw + ic_local * kh * kw
+            dst_idx = oc * in_channels * kh * kw + (group_ic_start + ic_local) * kh * kw
+            wt_full[dst_idx:dst_idx + kh * kw] = weight_ochw[src_idx:src_idx + kh * kw]
+    return wt_full
+
+
 def _output_unpack_c2(params):
     if params.get('is_depthwise', False):
         return params['align_c']
@@ -314,7 +371,7 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
     # ── Phase 1: Default parameter computation ──
     batch, in_h, in_w = 1, input_hw[0], input_hw[1]
     weight_in_channels = in_channels // groups if groups > 0 else in_channels
-    is_depthwise = (groups == in_channels and out_channels == in_channels)
+    is_depthwise = _is_depthwise(in_channels, out_channels, groups)
     out_h, out_w = in_h - kernel_h + 1, in_w - kernel_w + 1
 
     max_align = 32 if is_depthwise else 16
@@ -328,14 +385,8 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
     width_stride = align_up_int(in_w, width_align)
     out_channel_field = (align_up_int(align_out_c, 32) if is_depthwise else align_out_c) - 1
     orig_channel = out_channels - 1 if out_channels > 0 else 0
-    out_width_stride = max(1, (out_w * align_out_c) // 4)
-    # Phase 2: no per-shape overrides; derive everything from generic HW rules.
-    if in_channels == 3 and out_channels == 6:
-        if kernel_h == 3 and kernel_w == 3: out_width_stride = 16
-        if groups == 1 and kernel_h == 3 and kernel_w == 1: out_width_stride = 24
-    if kernel_h == 1 and kernel_w == 1:
-        atoms = out_w * out_h
-        out_width_stride = atoms if atoms < 4 else (atoms + 3) & ~3
+    out_width_stride = _output_width_stride(
+        in_channels, out_channels, kernel_h, kernel_w, groups, out_h, out_w, align_out_c)
 
     # ── Phase 3: Derived values (depend on final, possibly-overridden Phase 1/2 values) ──
     out_atoms = max(1, out_w * out_h)
@@ -345,33 +396,19 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
     weight_bytes_per_kernel = kernel_h * kernel_w * data_in_channel_aligned * 2
     weight_bytes_total = weight_bytes_per_kernel * out_channels
 
-    feature_grains = in_h + kernel_h
-    row_bytes = width_stride * align_c * 2
-    if row_bytes > 0:
-        max_grains = max(2, (2 * NPU_CBUF_BANK_SIZE + row_bytes - 1) // row_bytes)
-        feature_grains = min(feature_grains, (max_grains + 1) & ~1)
+    feature_grains = _feature_grains(in_h, kernel_h, width_stride, align_c)
 
     input_pack_c2 = _input_pack_c2(in_channels, out_channels, kernel_h, kernel_w, groups, align_c)
     use_nhwc = should_use_nhwc_pack(batch, in_channels, in_h, in_w, width_stride, input_pack_c2,
                                     out_c=out_channels, kh=kernel_h, kw=kernel_w, groups=groups)
-    use_pixel_mode = use_nhwc or (in_channels in (1, 3, 4) and not is_depthwise)  # P6-B: pixel mode uses different stride formulas
-    # P1-FIX: initialize surf_stride unconditionally (avoids KeyError when in_h <= 1 in pixel mode)
-    if use_pixel_mode:
-        line_stride = width_stride
-        surf_stride = 0
-        if in_h > 1: surf_stride = width_stride * (in_h - 1)
-    else:
-        line_stride = width_stride * 4
-        surf_stride = 0
-        if in_h > 4: surf_stride = width_stride * (in_h - 4)
+    use_pixel_mode = use_nhwc or _is_pixel_dma_input(in_channels, is_depthwise)
+    line_stride, surf_stride = _dma_strides(in_h, width_stride, use_pixel_mode)
 
     cvt_lanes = 128 // 16
     cvt_active = max(1, min(in_channels if use_nhwc else input_pack_c2, cvt_lanes))
     cvt_mask = 0xFFFFFFFF if cvt_active >= 32 else ((1 << cvt_active) - 1)
-    row_entries = max(1, (width_stride * align_c + 31) // 32)
-    cbuf_entries = max(1, row_entries if (align_c >= 16 or is_depthwise) else row_entries * in_h * 4)
-    fd_bytes = width_stride * feature_grains * align_c * 2
-    data_bank = max(1, min(NPU_CBUF_BANKS - 1, (fd_bytes + NPU_CBUF_BANK_SIZE - 1) // NPU_CBUF_BANK_SIZE))
+    cbuf_entries = _cbuf_entries(width_stride, align_c, in_h, is_depthwise)
+    data_bank = _data_bank(width_stride, feature_grains, align_c)
 
     effective_align_out = out_channel_field + 1
     if groups > 1 and not is_depthwise:
@@ -388,7 +425,7 @@ def build_conv2d_regs(params, input_dma=0, weights_dma=0, output_dma=0):
 
     E(rk.REG_DPU_S_POINTER, (1 << 3) | (1 << 2) | (1 << 1))
     conv_con1 = (2 << 7) | (2 << 4)
-    if (p['in_channels'] in (1, 3, 4)) and not p['is_depthwise']:  # P6-A: HW rejects ARGB_IN for ic=2
+    if _is_pixel_dma_input(p['in_channels'], p['is_depthwise']):
         conv_con1 |= (1 << 30) | (1 << 29) | ((7 + p['in_channels']) << 12)
     if p['is_depthwise']: conv_con1 |= 0x3
     E(rk.REG_CNA_CONV_CON1, conv_con1)
@@ -472,15 +509,8 @@ def _npu_submit(params, input_nchw, weight_ochw, is_1x1, log_submit=True):
         kh, kw = params['kernel_h'], params['kernel_w']
         is_dw = params.get('is_depthwise', False)
         if not is_dw:
-            wt_elems = params['out_channels'] * in_c * kh * kw
-            wt_full = np.zeros(wt_elems, dtype=np.float16)
-            for oc in range(params['out_channels']):
-                group = oc // oc_per_group
-                group_ic_start = group * ic_per_group
-                for ic_local in range(ic_per_group):
-                    src_idx = oc * ic_per_group * kh * kw + ic_local * kh * kw
-                    dst_idx = oc * in_c * kh * kw + (group_ic_start + ic_local) * kh * kw
-                    wt_full[dst_idx:dst_idx + kh * kw] = weight_ochw[src_idx:src_idx + kh * kw]
+            wt_full = _expand_grouped_weights_fp16(
+                weight_ochw, params['out_channels'], in_c, ic_per_group, oc_per_group, kh, kw)
             params = dict(params)
             params['groups'] = 1
             params['weight_in_channels'] = in_c
@@ -546,14 +576,14 @@ def _run_conv2d_channel_sliced(out_channels, kernel_h, kernel_w, input_hw, origi
     full_in = np.random.randn(1, original_in_c, input_hw[0], input_hw[1]).astype(np.float16)
     full_wt = np.random.randn(out_channels, original_in_c, 1, 1).astype(np.float16)
     result = np.zeros((1, out_channels, input_hw[0], input_hw[1]), dtype=np.float16)
-    for start_c in range(0, original_in_c, 4):
-        end_c = min(start_c + 4, original_in_c)
+    for start_c in range(0, original_in_c, MAX_PIXEL_DMA_CHANNELS):
+        end_c = min(start_c + MAX_PIXEL_DMA_CHANNELS, original_in_c)
         group_ic = end_c - start_c
-        inp_slice = np.zeros((1, 4, input_hw[0], input_hw[1]), dtype=np.float16)
+        inp_slice = np.zeros((1, MAX_PIXEL_DMA_CHANNELS, input_hw[0], input_hw[1]), dtype=np.float16)
         inp_slice[0, :group_ic] = full_in[0, start_c:end_c]
-        wt_slice = np.zeros((out_channels, 4, 1, 1), dtype=np.float16)
+        wt_slice = np.zeros((out_channels, MAX_PIXEL_DMA_CHANNELS, 1, 1), dtype=np.float16)
         wt_slice[:, :group_ic] = full_wt[:, start_c:end_c]
-        p = compute_conv2d_params(4, out_channels, kernel_h, kernel_w, input_hw, 1)
+        p = compute_conv2d_params(MAX_PIXEL_DMA_CHANNELS, out_channels, kernel_h, kernel_w, input_hw, 1)
         result += _npu_submit(p, inp_slice.reshape(-1), wt_slice.reshape(-1), is_1x1)
     return result, full_in, full_wt
 
@@ -567,8 +597,8 @@ def _run_depthwise_channel_sliced(channels, kernel_h, kernel_w, input_hw, is_1x1
     out_h = input_hw[0] - kernel_h + 1
     out_w = input_hw[1] - kernel_w + 1
     result = np.zeros((1, channels, out_h, out_w), dtype=np.float16)
-    for start_c in range(0, channels, 8):
-        end_c = min(start_c + 8, channels)
+    for start_c in range(0, channels, DEPTHWISE_SLICE_CHANNELS):
+        end_c = min(start_c + DEPTHWISE_SLICE_CHANNELS, channels)
         group_c = end_c - start_c
         p = compute_conv2d_params(group_c, group_c, kernel_h, kernel_w, input_hw, group_c)
         result[:, start_c:end_c] = _npu_submit(
@@ -583,14 +613,14 @@ def _npu_submit_single_input_pointwise(input_1c, weight_ochw):
     batch, _, height, width = input_1c.shape
     out_channels = weight_ochw.shape[0]
     result = np.zeros((batch, out_channels, height, width), dtype=np.float16)
-    inp_pad = np.zeros((batch, 3, height, width), dtype=np.float16)
+    inp_pad = np.zeros((batch, POINTWISE_PIXEL_CHANNELS, height, width), dtype=np.float16)
     inp_pad[:, 0:1] = input_1c
-    for start_oc in range(0, out_channels, 16):
-        end_oc = min(start_oc + 16, out_channels)
+    for start_oc in range(0, out_channels, OUTPUT_CHANNEL_CHUNK):
+        end_oc = min(start_oc + OUTPUT_CHANNEL_CHUNK, out_channels)
         chunk_oc = end_oc - start_oc
-        wt_pad = np.zeros((chunk_oc, 3, 1, 1), dtype=np.float16)
+        wt_pad = np.zeros((chunk_oc, POINTWISE_PIXEL_CHANNELS, 1, 1), dtype=np.float16)
         wt_pad[:, 0:1] = weight_ochw[start_oc:end_oc]
-        p = compute_conv2d_params(3, chunk_oc, 1, 1, (height, width), 1)
+        p = compute_conv2d_params(POINTWISE_PIXEL_CHANNELS, chunk_oc, 1, 1, (height, width), 1)
         result[:, start_oc:end_oc] = _npu_submit(
             p, inp_pad.reshape(-1), wt_pad.reshape(-1), True, log_submit=False)
     return result
@@ -627,11 +657,11 @@ def _run_conv2d_spatial_decomposed(in_channels, out_channels, kernel_h, kernel_w
 def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1):
     original_in_c = in_channels
     is_1x1 = (kernel_h == 1 and kernel_w == 1)
-    pad_to_c = 3 if (is_1x1 and in_channels < 3) else None
+    pad_to_c = POINTWISE_PIXEL_CHANNELS if (is_1x1 and in_channels < POINTWISE_PIXEL_CHANNELS) else None
     if pad_to_c: in_channels = pad_to_c
-    needs_1x1_channel_slicing = is_1x1 and in_channels >= 5 and not pad_to_c and groups == 1
+    needs_1x1_channel_slicing = is_1x1 and in_channels > MAX_PIXEL_DMA_CHANNELS and not pad_to_c and groups == 1
     p = compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups)
-    needs_depthwise_slicing = p['is_depthwise'] and in_channels > 8
+    needs_depthwise_slicing = p['is_depthwise'] and in_channels > DEPTHWISE_SLICE_CHANNELS
     needs_spatial_decomposition = not is_1x1
 
     if DRY_RUN:
