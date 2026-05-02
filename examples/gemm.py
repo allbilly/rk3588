@@ -229,9 +229,29 @@ def decode_output_c2_4(m, n, k, raw, align_out):
     return raw[:n // 4 * m * 4].reshape(n // 4, m, 4).transpose(1, 0, 2).reshape(m, n).copy()
 
 # Hardware constants
+FP16_BYTES = 2
+FP32_BYTES = 4
+ATOM_CUBE_BYTES = 32
+CBUF_ENTRY_BYTES = 128
+CBUF_ENTRIES_PER_BANK = 256
+NVDLA_CBUF_BANKS = 16
+RK_CBUF_BANKS = 12
+MIN_CHANNEL_TILE = 32
 C2_INPUT = 8   # 8 FP16 = 16B; two C2 groups form one 32B CDMA/CSC atom.
 C2_OUTPUT = 4  # RK-only output decode group; not an NVDLA CACC/SDP constant.
-CBUF_BANK_SIZE = 32768  # NVDLA bank size: 256 CBUF entries * 128B per entry.
+CBUF_BANK_SIZE = CBUF_ENTRIES_PER_BANK * CBUF_ENTRY_BYTES
+RK_WEIGHT_BANK_MIN = 1
+RK_MAX_DATA_BANKS = RK_CBUF_BANKS - RK_WEIGHT_BANK_MIN
+RK_LINE_STRIDE_GROUP_CAP = 13
+RK_MIN_WIDE_FEATURE_GRAINS = 80
+RK_VERY_WIDE_K = 7872
+RK_KN_LINE_STRIDE_START = 512
+
+def _ceil_div(x, y):
+    return (x + y - 1) // y
+
+def _align_up(x, align):
+    return _ceil_div(x, align) * align
 
 def _uses_c2_input(m, n, k):
     square = m == n == k
@@ -252,12 +272,40 @@ def _gemm_layout(m, n, k):
     # CDMA/CSC direct-conv data is atom-addressed: FP16 atom = 32B = 16 values.
     # Weight packing also groups two atoms (32 input channels), so align K/N to
     # 32 and keep at least one full 32-channel tile for tiny matmuls.
-    aligned_k = max(32, ((k + 31) // 32) * 32)
-    align_out = max(32, ((n + 31) // 32) * 32)
+    aligned_k = max(MIN_CHANNEL_TILE, _align_up(k, MIN_CHANNEL_TILE))
+    align_out = max(MIN_CHANNEL_TILE, _align_up(n, MIN_CHANNEL_TILE))
     align_in = max(aligned_k, align_out)
     pad_k = align_in != aligned_k
     eff_k = align_in if pad_k else k
     return align_in, align_out, eff_k, pad_k
+
+def _rk_data_bank_count(input_bytes):
+    return max(1, min(RK_MAX_DATA_BANKS, _ceil_div(input_bytes, CBUF_BANK_SIZE)))
+
+def _rk_cbuf_data_entries(align_in):
+    return _ceil_div(align_in, MIN_CHANNEL_TILE)
+
+def _rk_line_stride(m, n, k, eff_k):
+    if eff_k <= MIN_CHANNEL_TILE or eff_k >= RK_KN_LINE_STRIDE_START or _uses_c2_input(m, n, k):
+        return 4
+    return min(RK_LINE_STRIDE_GROUP_CAP, _ceil_div(eff_k, MIN_CHANNEL_TILE)) * 4
+
+def _rk_feature_grains(m, align_in, eff_k):
+    if eff_k > RK_VERY_WIDE_K:
+        return 2
+    if m <= RK_MIN_WIDE_FEATURE_GRAINS:
+        return m + 1
+    denom = align_in * FP16_BYTES
+    grains = _ceil_div(2 * CBUF_BANK_SIZE, denom)
+    grains = (grains + 1) & ~1
+    return max(RK_MIN_WIDE_FEATURE_GRAINS, grains)
+
+def _rk_notch_value(k, n, align_out, eff_k):
+    notch_blocks = min(RK_LINE_STRIDE_GROUP_CAP, align_out // MIN_CHANNEL_TILE)
+    notch_val = C2_INPUT * notch_blocks - 1
+    if (k == n and align_out >= 64) or eff_k > RK_VERY_WIDE_K:
+        return 0
+    return notch_val
 
 def get_input_packer(m, n, k, align_in):
     if _uses_c2_input(m, n, k): return pack_input_c2_8
@@ -296,7 +344,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     # field with <<5 because memory moves in 32B atoms, and checks packed lines
     # with line_stride == ATOM_CUBE_SIZE * width. The 4-unit tiny/KN schedule and
     # 13-group clamp are RK vendor matmul rules; they are not NVDLA constants.
-    line_stride = 4 if (eff_k <= 32 or eff_k >= 512 or _uses_c2_input(m, n, k)) else min(13, (eff_k + 31) // 32) * 4
+    line_stride = _rk_line_stride(m, n, k, eff_k)
 
     # CDMA surface_stride is also encoded in 32B units and is added per
     # super-surface in DirectConvDataRequestSequencerCommon. Only C2=8 NC1HWC2
@@ -306,18 +354,18 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     if align_in >= 64 and _uses_c2_input(m, n, k):
         surf_stride = line_stride * (surf_groups - 1) + int(surf_groups == 0)
 
-    input_bytes = m * align_in * 2  # M planes * align_in elements * 2 bytes (FP16).
+    input_bytes = m * align_in * FP16_BYTES  # M planes * align_in elements * 2 bytes (FP16).
     # Local NVDLA encodes bank counts as field+1 and uses 256*128B=32768B per
     # bank. NVDLA has 16 CBUF banks, but RK matmul register dumps use a 12-bank
     # data+weight budget here; keep at least one weight bank in that RK budget.
     # The -1 in ceil-div is important: exact 32768B boundaries do not consume an
     # extra data bank (confirmed against gemm.c/vendor register dumps).
-    data_bank = max(1, min(11, (input_bytes + CBUF_BANK_SIZE - 1) // CBUF_BANK_SIZE))
+    data_bank = _rk_data_bank_count(input_bytes)
     # RK CBUF_CON1 follows the vendor matmul register dump here: count 64B
     # half-entry groups, i.e. 32 FP16 values per unit. Vanilla NVDLA C-model
     # collapses four 32B atoms into one 128B CBUF entry, but RK's CNA field for
     # this path is programmed as ceil(align_in / 32).
-    data_entries = (1 * align_in + 31) // 32
+    data_entries = _rk_cbuf_data_entries(align_in)
 
     # Output surface stride is RK DPU-side programming, not present in local
     # NVDLA CACC/SDP source. Empirically, aligned K==N schedules need align_out
@@ -331,22 +379,12 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     # 80 and 7872 are vendor matmul thresholds, not NVDLA defines: 80 is the
     # minimum proven grain for wide rows, and K>7872 switches to a two-line grain
     # to avoid over-planning CBUF residency for very wide FP16 rows.
-    feature_grains = m + 1
-    if eff_k > 7872:
-        feature_grains = 2
-    elif m > 80:
-        denom = align_in * 2
-        grains = (2 * CBUF_BANK_SIZE + denom - 1) // denom
-        grains = (grains + 1) & ~1
-        feature_grains = max(80, grains)
+    feature_grains = _rk_feature_grains(m, align_in, eff_k)
 
     # DPU notch is RK output-side programming and is not in local NVDLA CACC/SDP
     # source. The 8-value sub-block formula, 13-group clamp, KN-wide zeroing,
     # and K>7872 zeroing are preserved from vendor matmul register schedules.
-    notch_blocks = min(13, align_out // 32)
-    notch_val = 8 * notch_blocks - 1
-    if (k == n and align_out >= 64) or eff_k > 7872:
-        notch_val = 0
+    notch_val = _rk_notch_value(k, n, align_out, eff_k)
 
     def E(target, reg_addr, value):
         return (target << 48) | ((value & 0xFFFFFFFF) << 16) | reg_addr
@@ -364,10 +402,10 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
         E(reg.TARGET_CNA,  reg.CNA_DATA_SIZE1,   ((align_in - 1) << 16) | align_in),
         E(reg.TARGET_CNA,  reg.CNA_DATA_SIZE2,   1),
         E(reg.TARGET_CNA,  reg.CNA_DATA_SIZE3,   m),
-        E(reg.TARGET_CNA,  reg.CNA_WEIGHT_SIZE0, align_in * 2 * align_out),
-        E(reg.TARGET_CNA,  reg.CNA_WEIGHT_SIZE1, align_in * 2),
+        E(reg.TARGET_CNA,  reg.CNA_WEIGHT_SIZE0, align_in * FP16_BYTES * align_out),
+        E(reg.TARGET_CNA,  reg.CNA_WEIGHT_SIZE1, align_in * FP16_BYTES),
         E(reg.TARGET_CNA,  reg.CNA_WEIGHT_SIZE2, (1 << 24) | (1 << 16) | align_out),
-        E(reg.TARGET_CNA,  reg.CNA_CBUF_CON0,    ((12 - data_bank) << 4) | data_bank),
+        E(reg.TARGET_CNA,  reg.CNA_CBUF_CON0,    ((RK_CBUF_BANKS - data_bank) << 4) | data_bank),
         E(reg.TARGET_CNA,  reg.CNA_CBUF_CON1,    data_entries),
         E(reg.TARGET_CNA,  reg.CNA_CVT_CON0,     (1 << 3) | (1 << 1) | 1),
         E(reg.TARGET_CNA,  reg.CNA_CVT_CON1,     1 << 16),
@@ -432,7 +470,7 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
 
     # Keep at least one 256B cache/DMA-sized read window for tiny outputs, then
     # size the FP32 buffer by the last decoded row and real N columns.
-    out_nbytes = max(256, (m - 1) * align_out * 4 + n * 4)
+    out_nbytes = max(256, ((m - 1) * align_out + n) * FP32_BYTES)
     npu_regs = make_gemm_regs(m, n, k,
         input_mem_create.dma_addr, weight_mem_create.dma_addr, output_mem_create.dma_addr)
 

@@ -13,13 +13,29 @@ RKNPU_MEM_NON_CONTIGUOUS = 1
 RKNPU_MEM_IOMMU_LIMIT_IOVA_ALIGNMENT = 0x400
 RKNPU_ACT_RESET = 1
 REGCMD_RESERVED = 16384
-NPU_CBUF_BANK_SIZE = 32768
+FP16_BYTES = 2
+FP16_ATOM_ELEMENTS = 16
+ATOM_CUBE_BYTES = 32
+CBUF_ENTRY_BYTES = 128
+CBUF_ENTRIES_PER_BANK = 256
+NVDLA_CBUF_BANKS = 16
+# Local NVDLA CBUF constants: CBUF_ENTRY_PER_BANK=256 and CBUF_ENTRY_SIZE=128,
+# so one bank is 32768B. RK conv register schedules use a 12-bank data+weight
+# budget here even though upstream NVDLA large config has 16 CBUF banks.
+NPU_CBUF_BANK_SIZE = CBUF_ENTRIES_PER_BANK * CBUF_ENTRY_BYTES
 NPU_CBUF_BANKS = 12
+RK_WEIGHT_BANK_MIN = 1
+# RK-specific scheduling limits, not upstream NVDLA C-model constants.
 MAX_PIXEL_DMA_CHANNELS = 4
 POINTWISE_PIXEL_CHANNELS = 3
 DEPTHWISE_SLICE_CHANNELS = 8
 OUTPUT_CHANNEL_CHUNK = 16
 PIXEL_DMA_CHANNELS = (1, 3, 4)
+RK_PIXEL_C2_MAX = 8
+RK_DPU_OUTPUT_GROUP = 8
+RK_CVT_BITS = 128
+# RK DPU bypass/reserved values taken from working register schedules; local
+# NVDLA CACC/SDP source does not expose these RK DPU bit encodings.
 DPU_BYPASS_CFG = 0x53
 DPU_EW_BYPASS_CFG = 0x383
 CORE_RESERVED_ZERO_ADDR = 0x3030
@@ -110,8 +126,11 @@ def mv_address(mv):
 def emit(target, value, addr):
     return ((target & 0xFFFF) << 48) | ((value & 0xFFFFFFFF) << 16) | (addr & 0xFFFF)
 
+def ceil_div(x, y):
+    return (x + y - 1) // y
+
 def align_up_int(x, align):
-    return ((x + align - 1) // align) * align
+    return ceil_div(x, align) * align
 
 def _is_depthwise(in_channels, out_channels, groups):
     return groups == in_channels and out_channels == in_channels
@@ -121,20 +140,29 @@ def _is_pixel_dma_input(in_channels, is_depthwise):
 
 def should_use_nhwc_pack(batch, channels, height, width, width_stride, c2,
                          out_c=None, kh=None, kw=None, groups=None):
+    # RK image/pixel DMA accepts direct-conv image input separately from feature
+    # input. Local CDMA source confirms ACT_MODE_DIRECT_PIXEL exists, but this
+    # exact NHWC predicate is schedule-derived from passing RK submits.
     c_ratio = c2 // channels if channels > 0 else 0
     has_group_context = groups is not None and out_c is not None
     is_depthwise = has_group_context and _is_depthwise(channels, out_c, groups)
     return not is_depthwise and c_ratio == 2 and width_stride >= width
 
 def _input_pack_c2(in_channels, out_channels, kernel_h, kernel_w, groups, align_c):
+    # FP16 feature input is atom-based in local NVDLA: 32B atom = 16 values, and
+    # CDMA groups two atoms into a 64B half-entry. The selected C2 values below
+    # are RK packing choices layered on top of that atom machinery.
     is_spatial = kernel_h != 1 or kernel_w != 1
     is_depthwise = _is_depthwise(in_channels, out_channels, groups)
     if in_channels == 1 and groups == 1 and is_spatial and not is_depthwise:
         return 2
-    return min(align_c, 8)
+    return min(align_c, RK_PIXEL_C2_MAX)
 
 def _output_width_stride(in_channels, out_channels, kernel_h, kernel_w, groups, out_h, out_w, align_out_c):
     out_atoms = out_w * out_h
+    # Output stride is RK DPU formatting, not local NVDLA CACC. CACC only shows
+    # FP16/INT16 delivery in 16-element payloads; these stride cases come from
+    # working RK conv schedules and submit tests.
     if kernel_h == 1 and kernel_w == 1:
         return out_atoms if out_atoms < 4 else align_up_int(out_atoms, 4)
     if in_channels == 3 and out_channels == 6 and kernel_h == 3:
@@ -143,24 +171,36 @@ def _output_width_stride(in_channels, out_channels, kernel_h, kernel_w, groups, 
     return max(1, (out_w * align_out_c) // 4)
 
 def _feature_grains(in_h, kernel_h, width_stride, align_c):
+    # Local CDMA uses fetch_slice_grain = cdma_grains + 1 and requires grain=1
+    # for unpacked direct-conv lines. RK packed conv schedules can fetch multiple
+    # lines; cap the planned lines to about two RK CBUF banks of FP16 rows.
     grains = in_h + kernel_h
-    row_bytes = width_stride * align_c * 2
+    row_bytes = width_stride * align_c * FP16_BYTES
     if row_bytes <= 0: return grains
-    max_grains = max(2, (2 * NPU_CBUF_BANK_SIZE + row_bytes - 1) // row_bytes)
+    max_grains = max(2, ceil_div(2 * NPU_CBUF_BANK_SIZE, row_bytes))
     return min(grains, (max_grains + 1) & ~1)
 
 def _dma_strides(in_h, width_stride, use_pixel_mode):
+    # Local CDMA shifts line/surface stride registers by <<5, so these fields are
+    # 32B atom units. Pixel/image mode is a separate CDMA path; non-pixel feature
+    # mode uses four 32B atom groups per logical row in the RK schedules here.
     if use_pixel_mode:
         return width_stride, width_stride * (in_h - 1) if in_h > 1 else 0
     return width_stride * 4, width_stride * (in_h - 4) if in_h > 4 else 0
 
 def _cbuf_entries(width_stride, align_c, in_h, is_depthwise):
-    row_entries = max(1, (width_stride * align_c + 31) // 32)
+    # Local CDMA/CSC validate entries-per-slice from FP16 atom count:
+    # atom_per_channel = ceil(channels*2 / 32B), then four atoms per 128B CBUF
+    # entry. The align_c<16 multiplier is RK schedule-specific for small feature
+    # inputs and is not an upstream NVDLA formula.
+    row_entries = max(1, ceil_div(width_stride * align_c, 2 * FP16_ATOM_ELEMENTS))
     return row_entries if align_c >= 16 or is_depthwise else max(1, row_entries * in_h * 4)
 
 def _data_bank(width_stride, feature_grains, align_c):
-    fd_bytes = width_stride * feature_grains * align_c * 2
-    return max(1, min(NPU_CBUF_BANKS - 1, (fd_bytes + NPU_CBUF_BANK_SIZE - 1) // NPU_CBUF_BANK_SIZE))
+    # Local NVDLA bank fields are interpreted as field+1 banks. Use RK's 12-bank
+    # conv budget and leave at least one bank for weights.
+    fd_bytes = width_stride * feature_grains * align_c * FP16_BYTES
+    return max(1, min(NPU_CBUF_BANKS - RK_WEIGHT_BANK_MIN, ceil_div(fd_bytes, NPU_CBUF_BANK_SIZE)))
 
 if not DRY_RUN:
     fd = os.open("/dev/dri/card1", os.O_RDWR)
@@ -182,6 +222,8 @@ def pack_nc1hwc2_fp16(src, batch, channels, height, width, c2, width_stride,
                                         out_c=out_c, kh=kh, kw=kw, groups=groups)
     nchw = src.reshape(batch, channels, height, width)
     if use_nhwc:
+        # RK image/pixel mode consumes NHWC-style rows. Local NVDLA confirms the
+        # separate image-load path but not this RK-specific channel predicate.
         packed = np.zeros((batch, height, width_stride, channels), dtype=np.float16)
         packed[:, :, :width, :] = nchw.transpose(0, 2, 3, 1)
         return packed.reshape(-1)
@@ -192,6 +234,9 @@ def pack_nc1hwc2_fp16(src, batch, channels, height, width, c2, width_stride,
     return padded.reshape(batch, c1, c2, height, width_stride).transpose(0, 1, 3, 4, 2).reshape(-1)
 
 def _is_kh_major(out_c, in_c, kh, kw, groups):
+    # Weight order is RK schedule-derived. Local CSC confirms kernel iteration is
+    # height/width nested over kernel_atom_num, and CDMA confirms FP16 weights are
+    # fetched in 16-kernel groups, but this shape predicate itself is empirical.
     is_small_head = out_c == 6 and in_c in (1, 3)
     is_small_odd_width_kernel = 1 <= kh <= 3 and kw % 2 == 1 and kw <= 5 and kh * kw > 1
     single_input_spatial = is_small_head and in_c == 1 and groups == 1 and is_small_odd_width_kernel and not (kh == 2 and kw == 5)
@@ -201,18 +246,25 @@ def _is_kh_major(out_c, in_c, kh, kw, groups):
     return single_input_spatial or three_input_spatial or three_input_2x or square_small_spatial
 
 def _pack_dw_spatial_major(src, out_c, in_c, kh, kw, c2_out):
+    # Depthwise here uses RK CONV_MODE=3 packing. Local NVDLA has split-C/depth
+    # related CACC/CSC machinery, but this compact spatial-major layout is from
+    # the RK conv schedule validated by tests.
     weights = src.reshape(out_c, in_c, kh, kw)
     spatial = np.zeros((kh, kw, c2_out), dtype=np.float16)
     spatial[:, :, :out_c] = weights[np.arange(out_c), np.arange(out_c)].transpose(1, 2, 0)
     return spatial.reshape(-1)
 
 def _pack_kh_major(src, out_c, in_c, kh, kw, c2_out):
+    # KH-major is not a generic NVDLA layout; it matches the RK register/weight
+    # schedule for the shapes selected by _is_kh_major().
     aligned_in = align_up_int(in_c, c2_out)
     padded = np.zeros((out_c, aligned_in, kh, kw), dtype=np.float16)
     padded[:, :in_c] = src.reshape(out_c, in_c, kh, kw)
     return padded.transpose(2, 3, 0, 1).reshape(-1)
 
 def _pack_default(src, out_c, in_c, kh, kw, c2_out):
+    # Default RK FP16 conv weights: output channel, spatial, then aligned input
+    # channel. Alignment still follows NVDLA FP16 atom grouping.
     aligned_in = align_up_int(in_c, c2_out)
     padded = np.zeros((out_c, aligned_in, kh, kw), dtype=np.float16)
     padded[:, :in_c] = src.reshape(out_c, in_c, kh, kw)
@@ -259,8 +311,9 @@ def _target(addr):
 
 
 def _pack_depthwise_expanded_weights_fp16(weight_ochw, out_channels, ic_per_group, kh, kw, packed_weight_size):
-    # Depthwise CONV_MODE=3 still fetches one full aligned kernel. Expand the
-    # one-channel-per-group OCHW weights into that aligned kernel footprint.
+    # RK depthwise CONV_MODE=3 still fetches one full aligned kernel. Local CDMA
+    # only verifies FP16 kernel groups/CBUF fetch width; this slot expansion is
+    # RK schedule-specific.
     slot_sz = kh * kw
     wt_full = np.zeros(packed_weight_size // 2, dtype=np.float16)
     wt_full[:out_channels * slot_sz] = weight_ochw.reshape(out_channels, ic_per_group, slot_sz)[:, 0].reshape(-1)
@@ -268,6 +321,8 @@ def _pack_depthwise_expanded_weights_fp16(weight_ochw, out_channels, ic_per_grou
 
 
 def _expand_grouped_weights_fp16(weight_ochw, out_channels, in_channels, ic_per_group, oc_per_group, kh, kw):
+    # Generic grouped conv is lowered to a dense RK submit. This is software
+    # expansion, not an NVDLA hardware grouping feature.
     wt_full = np.zeros((out_channels, in_channels, kh, kw), dtype=np.float16)
     oc = np.arange(out_channels)[:, None]
     dst_ic = (oc // oc_per_group) * ic_per_group + np.arange(ic_per_group)
@@ -276,15 +331,17 @@ def _expand_grouped_weights_fp16(weight_ochw, out_channels, in_channels, ic_per_
 
 
 def _output_unpack_c2(params):
+    # RK DPU output grouping. Local CACC source only verifies 16 FP16/INT16
+    # elements per payload; final DPU surface C2 is RK formatter behavior.
     if params.get('is_depthwise', False):
         return params['align_c']
     return 8 if params['align_out_c'] >= 8 else params['align_out_c']
 
 
 def _packed_sizes(params):
-    packed_input_size = ((params['in_channels'] + params['align_c'] - 1) // params['align_c']) * params['in_h'] * params['width_stride'] * params['align_c'] * 2
-    packed_weight_size = params['out_channels'] * params['kernel_h'] * params['kernel_w'] * ((params['weight_in_channels'] + params['align_c'] - 1) // params['align_c']) * params['align_c'] * 2
-    packed_output_size = ((params['out_channels'] + params['align_out_c'] - 1) // params['align_out_c']) * params['out_h'] * params['out_width_stride'] * params['align_out_c'] * 2
+    packed_input_size = ceil_div(params['in_channels'], params['align_c']) * params['in_h'] * params['width_stride'] * params['align_c'] * FP16_BYTES
+    packed_weight_size = params['out_channels'] * params['kernel_h'] * params['kernel_w'] * ceil_div(params['weight_in_channels'], params['align_c']) * params['align_c'] * FP16_BYTES
+    packed_output_size = ceil_div(params['out_channels'], params['align_out_c']) * params['out_h'] * params['out_width_stride'] * params['align_out_c'] * FP16_BYTES
     return packed_input_size, packed_weight_size, packed_output_size
 
 
@@ -340,9 +397,12 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
     is_depthwise = _is_depthwise(in_channels, out_channels, groups)
     out_h, out_w = in_h - kernel_h + 1, in_w - kernel_w + 1
 
+    # FP16 atoms are 16 elements in local NVDLA. RK depthwise schedules align up
+    # to 32 channels, while regular conv output/kernel groups align to 16.
     max_align = 32 if is_depthwise else 16
     align_c = max(8, min(1 << (max(1, in_channels) - 1).bit_length(), max_align))
-    align_out_c = max(16, ((out_channels + 15) // 16) * 16)
+    align_out_c = max(FP16_ATOM_ELEMENTS, align_up_int(out_channels, FP16_ATOM_ELEMENTS))
+    # Keep each row aligned to at least one 16-FP16 atom's worth of channels.
     width_stride = align_up_int(in_w, max(1, (16 + align_c - 1) // align_c))
     out_channel_field = (align_up_int(align_out_c, 32) if is_depthwise else align_out_c) - 1
     orig_channel = out_channels - 1 if out_channels > 0 else 0
@@ -353,7 +413,7 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
     data_in_channel_real = in_channels - 1 if in_channels > 0 else 0
     data_in_channel_aligned = max(align_c, align_up_int(in_channels, align_c))
     weight_kernels = 1 if is_depthwise else out_channels
-    weight_bytes_per_kernel = kernel_h * kernel_w * data_in_channel_aligned * 2
+    weight_bytes_per_kernel = kernel_h * kernel_w * data_in_channel_aligned * FP16_BYTES
     weight_bytes_total = weight_bytes_per_kernel * out_channels
 
     feature_grains = _feature_grains(in_h, kernel_h, width_stride, align_c)
@@ -364,7 +424,9 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
     use_pixel_mode = use_nhwc or _is_pixel_dma_input(in_channels, is_depthwise)
     line_stride, surf_stride = _dma_strides(in_h, width_stride, use_pixel_mode)
 
-    cvt_lanes = 128 // 16
+    # RK CNA_CVT_CON5 mask covers lanes inside a 128-bit converter group. Local
+    # NVDLA conversion code operates on atom payloads, but this mask field is RK.
+    cvt_lanes = RK_CVT_BITS // FP16_ATOM_ELEMENTS
     cvt_active = max(1, min(in_channels if use_nhwc else input_pack_c2, cvt_lanes))
     cvt_mask = 0xFFFFFFFF if cvt_active >= 32 else ((1 << cvt_active) - 1)
     cbuf_entries = _cbuf_entries(width_stride, align_c, in_h, is_depthwise)
@@ -372,9 +434,11 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
 
     effective_align_out = out_channel_field + 1
     if groups > 1 and not is_depthwise:
-        per_group_align = max(16, align_up_int((out_channels + groups - 1) // groups, 16))
+        per_group_align = max(FP16_ATOM_ELEMENTS, align_up_int(ceil_div(out_channels, groups), FP16_ATOM_ELEMENTS))
         effective_align_out = per_group_align
-    surface_add = out_width_stride * (effective_align_out // 8)
+    # RK DPU surface_add is in output formatter groups of 8 FP16 values; not a
+    # local NVDLA CACC constant.
+    surface_add = out_width_stride * (effective_align_out // RK_DPU_OUTPUT_GROUP)
     return {
         'batch': batch, 'in_channels': in_channels, 'out_channels': out_channels,
         'kernel_h': kernel_h, 'kernel_w': kernel_w, 'input_hw': input_hw, 'groups': groups,
@@ -400,6 +464,15 @@ def build_conv2d_regs(params, input_dma=0, weights_dma=0, output_dma=0):
     regs = []
     def E(addr, val): regs.append((_target(addr), val, addr))
 
+    # Register values below mix local NVDLA mechanisms (FP16 precision, CDMA
+    # grains/strides/CBUF banks, CSC/CMAC/CACC dimensions) with RK-only DPU/CNA
+    # bitfields from working register schedules. Comments above mark which magic
+    # constants are actually confirmed in local nvdla/hw source.
+    # Verified local NVDLA pieces: precision enum value 2 for FP16, CDMA/CSC
+    # dimensions are programmed as register+1 fields, CDMA stride fields are
+    # 32B units, feature_grains is emitted as field<<4, and weight size is bytes.
+    # RK-only pieces: pixel flags, CVT mask/bypass values, DPU formatter/bypass
+    # values, reserved writes, and PC op-enable payload.
     E(rk.REG_DPU_S_POINTER, (1 << 3) | (1 << 2) | (1 << 1))
     conv_con1 = (2 << 7) | (2 << 4)
     if _is_pixel_dma_input(p['in_channels'], p['is_depthwise']):
@@ -514,7 +587,9 @@ def _npu_submit(params, input_nchw, weight_ochw, is_1x1, log_submit=True):
 
 def _run_conv2d_channel_sliced(out_channels, kernel_h, kernel_w, input_hw, original_in_c, is_1x1):
     """1x1 conv with in_channels >= 5: HW non-aligned DMA supports max 4 in-channels.
-    Slices into groups of 4, submits each independently, accumulates results."""
+    Slices into groups of 4, submits each independently, accumulates results.
+    This is an RK schedule limit; local NVDLA only confirms a separate image
+    load path, not this exact 4-channel cap."""
     np.random.seed(42)
     full_in = np.random.randn(1, original_in_c, input_hw[0], input_hw[1]).astype(np.float16)
     full_wt = np.random.randn(out_channels, original_in_c, 1, 1).astype(np.float16)
@@ -532,7 +607,8 @@ def _run_conv2d_channel_sliced(out_channels, kernel_h, kernel_w, input_hw, origi
 def _run_depthwise_channel_sliced(channels, kernel_h, kernel_w, input_hw, is_1x1):
     """Depthwise channels above 8 are submitted in 8-channel lanes.
     A single 32-channel depthwise task selects weight slots by 8-row stripe,
-    so channel groups must be isolated and concatenated in software."""
+    so channel groups must be isolated and concatenated in software.
+    This 8-channel lane is RK schedule-derived, not an NVDLA C-model constant."""
     np.random.seed(42)
     full_in = np.random.randn(1, channels, input_hw[0], input_hw[1]).astype(np.float16)
     full_wt = np.random.randn(channels, 1, kernel_h, kernel_w).astype(np.float16)
@@ -575,8 +651,9 @@ def _pad_pointwise_channels(input_nchw, weight_ochw, params, original_in_c, pad_
 def _run_conv2d_spatial_decomposed(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups):
     """Run kh*kw convolution as exact-order 1x1 NPU submits.
     Direct non-1x1 programming still has shape-dependent partial/numerical
-    behavior. This keeps execution on NPU while matching test_conv's fp16
-    accumulation order."""
+    behavior in this RK schedule. Local CSC supports kernel_height*kernel_width
+    iteration, but this fallback avoids the unverified RK direct-spatial cases
+    while matching test_conv's fp16 accumulation order."""
     np.random.seed(42)
     batch, in_h, in_w = 1, input_hw[0], input_hw[1]
     out_h, out_w = in_h - kernel_h + 1, in_w - kernel_w + 1
