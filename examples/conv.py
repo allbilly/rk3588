@@ -20,6 +20,11 @@ POINTWISE_PIXEL_CHANNELS = 3
 DEPTHWISE_SLICE_CHANNELS = 8
 OUTPUT_CHANNEL_CHUNK = 16
 PIXEL_DMA_CHANNELS = (1, 3, 4)
+DPU_BYPASS_CFG = 0x53
+DPU_EW_BYPASS_CFG = 0x383
+CORE_RESERVED_ZERO_ADDR = 0x3030
+DPU_RESERVED_ZERO_ADDR = 0x40c4
+PC_OPERATION_ENABLE_VALUE = 0xD
 
 DRY_RUN = "--submit" not in sys.argv
 VALIDATE = "--validate" in sys.argv
@@ -117,7 +122,9 @@ def _is_pixel_dma_input(in_channels, is_depthwise):
 def should_use_nhwc_pack(batch, channels, height, width, width_stride, c2,
                          out_c=None, kh=None, kw=None, groups=None):
     c_ratio = c2 // channels if channels > 0 else 0
-    return not (groups is not None and out_c is not None and _is_depthwise(channels, out_c, groups)) and c_ratio == 2 and width_stride >= width
+    has_group_context = groups is not None and out_c is not None
+    is_depthwise = has_group_context and _is_depthwise(channels, out_c, groups)
+    return not is_depthwise and c_ratio == 2 and width_stride >= width
 
 def _input_pack_c2(in_channels, out_channels, kernel_h, kernel_w, groups, align_c):
     is_spatial = kernel_h != 1 or kernel_w != 1
@@ -139,7 +146,8 @@ def _feature_grains(in_h, kernel_h, width_stride, align_c):
     grains = in_h + kernel_h
     row_bytes = width_stride * align_c * 2
     if row_bytes <= 0: return grains
-    return min(grains, (max(2, (2 * NPU_CBUF_BANK_SIZE + row_bytes - 1) // row_bytes) + 1) & ~1)
+    max_grains = max(2, (2 * NPU_CBUF_BANK_SIZE + row_bytes - 1) // row_bytes)
+    return min(grains, (max_grains + 1) & ~1)
 
 def _dma_strides(in_h, width_stride, use_pixel_mode):
     if use_pixel_mode:
@@ -151,7 +159,8 @@ def _cbuf_entries(width_stride, align_c, in_h, is_depthwise):
     return row_entries if align_c >= 16 or is_depthwise else max(1, row_entries * in_h * 4)
 
 def _data_bank(width_stride, feature_grains, align_c):
-    return max(1, min(NPU_CBUF_BANKS - 1, (width_stride * feature_grains * align_c * 2 + NPU_CBUF_BANK_SIZE - 1) // NPU_CBUF_BANK_SIZE))
+    fd_bytes = width_stride * feature_grains * align_c * 2
+    return max(1, min(NPU_CBUF_BANKS - 1, (fd_bytes + NPU_CBUF_BANK_SIZE - 1) // NPU_CBUF_BANK_SIZE))
 
 if not DRY_RUN:
     fd = os.open("/dev/dri/card1", os.O_RDWR)
@@ -183,10 +192,11 @@ def pack_nc1hwc2_fp16(src, batch, channels, height, width, c2, width_stride,
     return padded.reshape(batch, c1, c2, height, width_stride).transpose(0, 1, 3, 4, 2).reshape(-1)
 
 def _is_kh_major(out_c, in_c, kh, kw, groups):
-    small_head = out_c == 6 and in_c in (1, 3) and kw in (1, 3, 5)
-    single_input_spatial = small_head and in_c == 1 and groups == 1 and (kh, kw) != (1, 1) and (kh, kw) != (2, 5)
-    three_input_spatial = small_head and in_c == 3 and kh == 3
-    three_input_2x = small_head and in_c == 3 and kh == 2 and (kw == 1 or groups == 1)
+    is_small_head = out_c == 6 and in_c in (1, 3)
+    is_small_odd_width_kernel = 1 <= kh <= 3 and kw % 2 == 1 and kw <= 5 and kh * kw > 1
+    single_input_spatial = is_small_head and in_c == 1 and groups == 1 and is_small_odd_width_kernel and not (kh == 2 and kw == 5)
+    three_input_spatial = is_small_head and in_c == 3 and kh == 3 and kw % 2 == 1 and kw <= 5
+    three_input_2x = is_small_head and in_c == 3 and kh == 2 and (kw == 1 or (groups == 1 and kw % 2 == 1 and kw <= 5))
     square_small_spatial = groups == 1 and out_c == in_c and in_c in (4, 16) and kh == 3 and kw == 3
     return single_input_spatial or three_input_spatial or three_input_2x or square_small_spatial
 
@@ -253,10 +263,7 @@ def _pack_depthwise_expanded_weights_fp16(weight_ochw, out_channels, ic_per_grou
     # one-channel-per-group OCHW weights into that aligned kernel footprint.
     slot_sz = kh * kw
     wt_full = np.zeros(packed_weight_size // 2, dtype=np.float16)
-    for oc in range(out_channels):
-        src_start = oc * ic_per_group * slot_sz
-        dst_start = oc * slot_sz
-        wt_full[dst_start:dst_start + slot_sz] = weight_ochw[src_start:src_start + slot_sz]
+    wt_full[:out_channels * slot_sz] = weight_ochw.reshape(out_channels, ic_per_group, slot_sz)[:, 0].reshape(-1)
     return wt_full
 
 
@@ -368,7 +375,24 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
         per_group_align = max(16, align_up_int((out_channels + groups - 1) // groups, 16))
         effective_align_out = per_group_align
     surface_add = out_width_stride * (effective_align_out // 8)
-    return locals()
+    return {
+        'batch': batch, 'in_channels': in_channels, 'out_channels': out_channels,
+        'kernel_h': kernel_h, 'kernel_w': kernel_w, 'input_hw': input_hw, 'groups': groups,
+        'in_h': in_h, 'in_w': in_w, 'weight_in_channels': weight_in_channels,
+        'is_depthwise': is_depthwise, 'out_h': out_h, 'out_w': out_w,
+        'align_c': align_c, 'align_out_c': align_out_c, 'width_stride': width_stride,
+        'out_channel_field': out_channel_field, 'orig_channel': orig_channel,
+        'out_width_stride': out_width_stride, 'out_atoms': out_atoms,
+        'data_in_channel_real': data_in_channel_real,
+        'data_in_channel_aligned': data_in_channel_aligned,
+        'weight_kernels': weight_kernels, 'weight_bytes_per_kernel': weight_bytes_per_kernel,
+        'weight_bytes_total': weight_bytes_total, 'feature_grains': feature_grains,
+        'input_pack_c2': input_pack_c2, 'use_nhwc': use_nhwc,
+        'use_pixel_mode': use_pixel_mode, 'line_stride': line_stride,
+        'surf_stride': surf_stride, 'cvt_mask': cvt_mask,
+        'cbuf_entries': cbuf_entries, 'data_bank': data_bank,
+        'surface_add': surface_add,
+    }
 
 
 def build_conv2d_regs(params, input_dma=0, weights_dma=0, output_dma=0):
@@ -412,7 +436,7 @@ def build_conv2d_regs(params, input_dma=0, weights_dma=0, output_dma=0):
     E(rk.REG_CORE_MISC_CFG, core)
     E(rk.REG_CORE_DATAOUT_SIZE_0, ((p['out_h'] - 1) << 16) | (p['out_w'] - 1))
     E(rk.REG_CORE_DATAOUT_SIZE_1, p['out_channel_field'])
-    regs.append((rk.CORE | 0x1, 0, 0x3030))
+    regs.append((rk.CORE | 0x1, 0, CORE_RESERVED_ZERO_ADDR))
     dpu_fmc = (15 << 5) | (2 << 1)
     if p['is_depthwise']: dpu_fmc |= (3 << 3)
     E(rk.REG_DPU_FEATURE_MODE_CFG, dpu_fmc)
@@ -422,18 +446,18 @@ def build_conv2d_regs(params, input_dma=0, weights_dma=0, output_dma=0):
     E(rk.REG_DPU_DATA_CUBE_WIDTH, p['out_w'] - 1)
     E(rk.REG_DPU_DATA_CUBE_HEIGHT, p['out_h'] - 1)
     E(rk.REG_DPU_DATA_CUBE_CHANNEL, (p['orig_channel'] << 16) | p['out_channel_field'])
-    E(rk.REG_DPU_BS_CFG, 0x53)
+    E(rk.REG_DPU_BS_CFG, DPU_BYPASS_CFG)
     ow_cfg = 3 if p['is_depthwise'] else 1
     E(rk.REG_DPU_BS_OW_CFG, (ow_cfg << 8) | (ow_cfg << 5) | (ow_cfg << 2) | (1 << 1))
     E(rk.REG_DPU_WDMA_SIZE_0, p['out_channel_field'])
     E(rk.REG_DPU_WDMA_SIZE_1, ((p['out_h'] - 1) << 16) | (p['out_w'] - 1))
-    E(rk.REG_DPU_BN_CFG, 0x53)
-    E(rk.REG_DPU_EW_CFG, 0x383)
+    E(rk.REG_DPU_BN_CFG, DPU_BYPASS_CFG)
+    E(rk.REG_DPU_EW_CFG, DPU_EW_BYPASS_CFG)
     E(rk.REG_DPU_EW_CVT_SCALE_VALUE, 1)
     E(rk.REG_DPU_OUT_CVT_SCALE, (1 << 16) | 1)
     E(rk.REG_DPU_SURFACE_ADD, p['surface_add'] << 4)
-    regs.append((0x1, 0, 0x40c4))
-    regs.append((0x81, 0xD, rk.REG_PC_OPERATION_ENABLE))
+    regs.append((0x1, 0, DPU_RESERVED_ZERO_ADDR))
+    regs.append((0x81, PC_OPERATION_ENABLE_VALUE, rk.REG_PC_OPERATION_ENABLE))
     return regs
 
 
@@ -541,6 +565,13 @@ def _npu_submit_single_input_pointwise(input_1c, weight_ochw):
             p, inp_pad.reshape(-1), wt_pad.reshape(-1), True, log_submit=False)
     return result
 
+def _pad_pointwise_channels(input_nchw, weight_ochw, params, original_in_c, pad_to_c):
+    input_padded = np.zeros((params['batch'], pad_to_c, params['in_h'] * params['in_w']), dtype=np.float16)
+    input_padded[:, :original_in_c] = input_nchw.reshape(params['batch'], original_in_c, params['in_h'] * params['in_w'])
+    weight_padded = np.zeros((params['out_channels'], pad_to_c, params['kernel_h'] * params['kernel_w']), dtype=np.float16)
+    weight_padded[:, :original_in_c] = weight_ochw.reshape(params['out_channels'], original_in_c, params['kernel_h'] * params['kernel_w'])
+    return input_padded.reshape(-1), weight_padded.reshape(-1)
+
 def _run_conv2d_spatial_decomposed(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups):
     """Run kh*kw convolution as exact-order 1x1 NPU submits.
     Direct non-1x1 programming still has shape-dependent partial/numerical
@@ -607,15 +638,7 @@ def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1
     weight_ochw = np.random.randn(p['out_channels'] * (original_in_c // groups if groups > 0 else original_in_c) * p['kernel_h'] * p['kernel_w']).astype(np.float16)
 
     if pad_to_c:
-        pad = pad_to_c
-        inp_r = input_nchw.reshape(p['batch'], original_in_c, p['in_h'] * p['in_w'])
-        padded = np.zeros((p['batch'], pad, p['in_h'] * p['in_w']), dtype=np.float16)
-        padded[:, :original_in_c] = inp_r
-        input_nchw = padded.reshape(-1)
-        wt_r = weight_ochw.reshape(p['out_channels'], original_in_c, p['kernel_h'] * p['kernel_w'])
-        expanded = np.zeros((p['out_channels'], pad, p['kernel_h'] * p['kernel_w']), dtype=np.float16)
-        expanded[:, :original_in_c] = wt_r
-        weight_ochw = expanded.reshape(-1)
+        input_nchw, weight_ochw = _pad_pointwise_channels(input_nchw, weight_ochw, p, original_in_c, pad_to_c)
 
     result = _npu_submit(p, input_nchw, weight_ochw, is_1x1)
     return result, \
