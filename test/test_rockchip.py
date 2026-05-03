@@ -250,6 +250,31 @@ class TestOps(unittest.TestCase):
     helper_test_op([(45,65)], torch.nn.functional.relu6, Tensor.relu6, high=100)
     helper_test_op([()], torch.nn.functional.relu6, Tensor.relu6)
 
+  def _test_conv2d(self, in_shape, weight_shape, *, groups=1, stride=1, padding=0, dilation=1, atol=5e-3, rtol=5e-3):
+    helper_test_op(
+      [in_shape, weight_shape],
+      lambda x, w: torch.nn.functional.conv2d(x, w, groups=groups, stride=stride, padding=padding, dilation=dilation),
+      lambda x, w: Tensor.conv2d(x, w, groups=groups, stride=stride, padding=padding, dilation=dilation),
+      forward_only=True, atol=atol, rtol=rtol)
+
+  def test_conv_pointwise_1x1(self):
+    self._test_conv2d((1, 3, 5, 7), (6, 3, 1, 1))
+
+  def test_conv_3x3(self):
+    self._test_conv2d((1, 3, 5, 7), (6, 3, 3, 3))
+
+  def test_conv_cin1_3x3(self):
+    self._test_conv2d((1, 1, 5, 7), (6, 1, 3, 3))
+
+  def test_conv_nonsquare_3x1(self):
+    self._test_conv2d((1, 3, 5, 7), (6, 3, 3, 1))
+
+  def test_conv_grouped_1x1(self):
+    self._test_conv2d((1, 4, 1, 1), (2, 2, 1, 1), groups=2)
+
+  def test_conv_depthwise_1x1(self):
+    self._test_conv2d((1, 32, 32, 32), (32, 1, 1, 1), groups=32, atol=1e-4, rtol=1e-4)
+
   # failed special case math.inf
   def _test_cmp(self, fxn, reverse=True):
     # test different dtypes
