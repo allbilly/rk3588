@@ -2,7 +2,14 @@
 
 ## Current Conclusion
 
-Multicore on RK3588 is definitely possible, but the working open-source model is **not** the downstream Rockchip `rknpu_submit.core_mask + subcore_task[]` model we were guessing against.
+Multicore on RK3588 is definitely possible, but there are two different open-source models that must not be conflated:
+
+- Tomeu Vizoso's Rocket/Mesa path has proven multicore support through a new mainline-style Rocket UAPI and kernel scheduler.
+- The vendor-style `rknpu_submit.core_mask + subcore_task[]` path also appears to support multicore in `allbilly/rknpu_driver`, but the expected `subcore_task[]` indexing is more specific than our original guess.
+
+The biggest new finding from `allbilly/rknpu_driver` is that 3-core RK3588 jobs reportedly read per-core task ranges from `subcore_task[2]`, `subcore_task[3]`, and `subcore_task[4]`, not `subcore_task[0]`, `subcore_task[1]`, and `subcore_task[2]`.
+
+That may explain why our previous raw `split3` layout was unsafe or invalid.
 
 Tomeu Vizoso's Rocket/Mesa path uses a different UAPI:
 - Userspace submits an array of independent jobs with `DRM_IOCTL_ROCKET_SUBMIT`.
@@ -12,11 +19,15 @@ Tomeu Vizoso's Rocket/Mesa path uses a different UAPI:
 - Multiple tasks inside one job execute sequentially on the same core to preserve SRAM/CBUF residency.
 - Parallelism comes from submitting multiple independent jobs, not from manually filling `subcore_task[1]` or `[2]`.
 
-That means our local raw ioctl experiments should be redesigned around **job-level parallelism** and **tiling into independent jobs**, not around one downstream submit with multiple `subcore_task[]` ranges.
+That means our local raw ioctl experiments should treat downstream `subcore_task[]` as a driver-specific ABI. Safe work still stays on core 0 by default. Risky multicore experiments must explicitly choose a layout and remain behind `--allow-unsafe-submit`.
+
+Current raw experiment layouts:
+- `direct`: maps core 0/1/2 to `subcore_task[0]`, `[1]`, `[2]`; this was our original guessed layout.
+- `rk3588-tricore-tail`: maps core 0/1/2 to `subcore_task[2]`, `[3]`, `[4]`; this matches the `allbilly/rknpu_driver` analysis for `use_core_num == 3`.
 
 ## Crash Incident
 
-Running `examples/multicore_elementwise.py` with `--core-mask 0x7 --core-ranges split3` caused a full kernel panic. Later, even some separate raw submits aimed at core 1/2 caused timeout or hard lock depending on task object layout.
+Running `experimental/multicore_elementwise.py` with `--core-mask 0x7 --core-ranges split3` caused a full kernel panic. Later, even some separate raw submits aimed at core 1/2 caused timeout or hard lock depending on task object layout.
 
 Confirmed unsafe patterns on the current downstream driver:
 - Single downstream `rknpu_submit` with multiple nonzero `subcore_task[]` entries.
@@ -24,6 +35,366 @@ Confirmed unsafe patterns on the current downstream driver:
 - Shifting `task_obj_addr` into the middle of the task BO.
 
 These crashes do not disprove multicore. They show that the downstream ABI is not the same abstraction as Rocket and should not be guessed into shape.
+
+## Ground Truth From allbilly/rknpu_driver
+
+DeepWiki source analysis of `allbilly/rknpu_driver` says the vendor-style driver supports RK3588 multicore execution:
+
+- RK3588 config advertises `core_mask = 0x7` for three cores.
+- `rknpu_submit` exposes `core_mask` and `subcore_task[5]` to userspace.
+- `rknpu_job_alloc` derives `job->use_core_num` from `args->core_mask`.
+- `rknpu_job_commit` commits work to each selected core.
+- `run_count` and `interrupt_count` are initialized from `use_core_num`, so a multicore job is not complete until all selected cores finish.
+- `rknpu_job_schedule` handles `RKNPU_CORE_AUTO_MASK` by choosing a core, while explicit masks select the participating cores.
+
+Important `subcore_task[]` indexing detail from `rknpu_job_subcore_commit_pc`:
+
+```text
+use_core_num == 1 or 2:
+  core i uses subcore_task[i]
+
+use_core_num == 3:
+  core 0 uses subcore_task[2]
+  core 1 uses subcore_task[3]
+  core 2 uses subcore_task[4]
+```
+
+Implications:
+- A 3-core raw submit with only `subcore_task[0..2]` populated may be invalid.
+- The driver may read `subcore_task[3]` and `[4]` as zero if userspace did not populate them.
+- Zero or wrong task ranges could lead to failed submit, NPU fault, timeout, or hard lock.
+- Task ranges are expected to be explicit per-core ranges. They should normally be disjoint unless the compiler/runtime intentionally creates duplicated task streams.
+
+This means the earlier captured RKNN layout:
+
+```text
+task_number = 3
+subcore_task[0] = {0, 1}
+subcore_task[1] = {0, 1}
+subcore_task[2] = {0, 1}
+```
+
+is not enough to prove a valid 3-core raw layout. If `core_mask=0x7` and the driver uses the 3-core path, the relevant entries would be `[2]`, `[3]`, and `[4]`.
+
+Updated experiment code:
+- `experimental/rknpu_common.py` now supports `subcore_layout="direct"` and `subcore_layout="rk3588-tricore-tail"`.
+- `experimental/multicore_elementwise.py` and `experimental/multicore_gemm.py` expose `--subcore-layout`.
+- `experimental/multicore_probe.py` exposes `--use-rk3588-tricore-tail-layout` for risky split3 probes.
+- All nonzero-core or multi-range raw submits still require `--allow-unsafe-submit`.
+
+Candidate risky command, only with physical reset access:
+
+```bash
+python experimental/multicore_elementwise.py --n 4096 --ops ADD,MUL,SUB --core-mask 0x7 --core-ranges split3 --subcore-layout rk3588-tricore-tail --allow-unsafe-submit
+```
+
+Result on this board/runtime:
+
+```text
+flags=0x5
+core_mask=0x7
+task_number=3
+subcore_task[0]=(0,0)
+subcore_task[1]=(0,0)
+subcore_task[2]=(0,1)
+subcore_task[3]=(1,1)
+subcore_task[4]=(2,1)
+submit ret=[0] elapsed_ms=0.218
+ADD task[0] PASS sentinel=True max_diff=0.0000
+MUL task[1] FAIL sentinel=False max_diff=nan
+SUB task[2] FAIL sentinel=False max_diff=nan
+```
+
+Interpretation:
+- The `rk3588-tricore-tail` layout did **not** hard-lock the board.
+- The ioctl returned success.
+- Only task 0 produced output.
+- Tasks assigned to cores 1 and 2 left output sentinels untouched.
+- Therefore, multicore execution is still **not working** in our raw userspace experiment.
+- This suggests either cores 1/2 were not actually committed/enabled, the captured allbilly indexing is not sufficient for this kernel/runtime, or additional compiler/runtime metadata/register setup is required for nonzero cores.
+
+Follow-up: core 0 with all three task descriptors in one submit also timed out:
+
+```bash
+python experimental/multicore_elementwise.py --n 4096 --ops ADD,MUL,SUB --core-mask 0x1 --core-ranges core0
+```
+
+This supports the PC-chaining concern from `conv_vs_mesa.md`: before a `task_number > 1` range can work reliably, the register command streams may need Mesa-style PC tail patching:
+
+- `REG_PC_BASE_ADDRESS` points to the next regcmd buffer.
+- `REG_PC_REGISTER_AMOUNTS` gives the next regcmd count.
+- the chain ends with zero next-address/count.
+
+`experimental/multicore_elementwise.py` now has `--pc-chain` to patch regcmd tails this way for elementwise experiments.
+
+Narrow core-0 chain test:
+
+```bash
+python experimental/multicore_elementwise.py --n 4096 --ops ADD,ADD,ADD --core-mask 0x1 --core-ranges core0 --pc-chain --timeout 6000
+```
+
+Result:
+
+```text
+task[0] op=ADD regcfg_amount=18 regcfg_offset=0
+task[1] op=ADD regcfg_amount=18 regcfg_offset=256
+task[2] op=ADD regcfg_amount=18 regcfg_offset=512
+TimeoutError: [Errno 110] Connection timed out
+```
+
+Conclusion: before multicore can work, we need to solve **single-core multi-task PC submit**. Multicore experiments should pause until one core can complete three chained/descriptor tasks in one submit.
+
+Plan to solve single-core multi-task PC submit:
+
+1. Find a known-good multi-task submit from official RKNN or `~/npu` artifacts.
+2. Capture or locate the exact `rknpu_submit` fields for that known-good run:
+   - `flags`
+   - `task_number`
+   - `task_obj_addr`
+   - `task_base_addr`
+   - `core_mask`
+   - `subcore_task[]`
+3. Decode the first several `struct_rknpu_task` descriptors:
+   - `regcmd_addr`
+   - `regcfg_amount`
+   - `regcfg_offset`
+   - `enable_mask`
+   - `int_mask`
+4. Dump the regcmd tail of each task and compare:
+   - whether `REG_PC_BASE_ADDRESS` / `REG_PC_REGISTER_AMOUNTS` are embedded
+   - whether the final task uses zeros
+   - whether `REG_PC_OPERATION_ENABLE` value is `0x0d`, `0x18`, or another mask
+5. Compare task BO layout:
+   - whether descriptor array starts at `task_obj_addr`
+   - whether `task_base_addr` is zero or points to task DMA base
+   - whether `regcfg_offset` mode or absolute `regcmd_addr` mode is used
+6. Reproduce the known-good single-core multi-task shape in `experimental/multicore_elementwise.py` before retrying `core_mask=0x7`.
+
+`~/npu` reference found:
+
+- File: `~/npu/include/rknnops.h`
+- Key section: `build_handles()` around lines 4380-4470 and `submitTask()` around lines 4473-4505.
+- It supports multiple PC tasks with one submit.
+- It emits `REG_PC_BASE_ADDRESS` and `REG_PC_REGISTER_AMOUNTS` placeholders inside each task's regcmd stream.
+- During finalization, it patches:
+  - `REG_PC_BASE_ADDRESS` to `PC_BASE_ADDRESS_PC_SOURCE_ADDR((uint32_t)(next_addr >> 4))`
+  - `REG_PC_REGISTER_AMOUNTS` to `PC_REGISTER_AMOUNTS_PC_DATA_AMOUNT((uint32_t)reg_task_lengths[i])`
+- It pads each task regcmd segment to 64-byte alignment.
+- It sets each task descriptor:
+  - `op_idx = 1`
+  - `enable_mask = 0x0d` for normal DPU/CNA/Core style tasks
+  - `int_mask = 0x300`
+  - `regcfg_amount = reg_task_lengths[i]`
+  - `regcfg_offset = reg_task_offsets[i] * 8`
+  - `regcmd_addr = reg_base_addr + regcmd_offset`
+- It submits:
+  - `flags = RKNPU_JOB_PC | RKNPU_JOB_BLOCK | optional RKNPU_JOB_PINGPONG`
+  - `task_number = task_count`
+  - `task_obj_addr = tasks_obj`
+  - `task_base_addr = 0`
+  - `core_mask = 0` in that reference
+  - `subcore_task[0] = {0, task_count}`
+
+Important differences from our first `--pc-chain` attempt:
+- Our previous `REG_PC_BASE_ADDRESS` encoding incorrectly set `PC_SEL=1`; `rknnops.h` leaves it as the encoded `next_addr >> 4` field only.
+- Our previous `REG_PC_REGISTER_AMOUNTS` used the next task length; `rknnops.h` patches each task's amount field to that same task's `reg_task_lengths[i]`.
+- `rknnops.h` uses `op_idx=1`, while our raw elementwise task currently uses `op_idx=4`.
+- `rknnops.h` includes `RKNPU_JOB_BLOCK` in submit flags, while our raw helper originally had `RKNPU_JOB_BLOCK = 0` and did not expose it.
+
+Mesa Rocket PC-chain ground truth from local source:
+
+- DeepWiki's public `mesa/mesa` index did not include the Rocket driver, so the local `mesa/` checkout is the source of truth here.
+- Register definitions: `mesa/src/gallium/drivers/rocket/registers.xml`:
+  - `REG_PC_BASE_ADDRESS = 0x0010`
+  - `PC_SOURCE_ADDR` bits `[31:4]`
+  - `PC_SEL` bit `0`
+  - `REG_PC_REGISTER_AMOUNTS = 0x0014`
+  - `PC_DATA_AMOUNT` bits `[15:0]`
+- Regcmd emission: `mesa/src/gallium/drivers/rocket/rkt_regcmd.c`:
+  - if `num_tasks == 1`, Mesa appends a literal zero where the next-address command would be.
+  - if `num_tasks > 1`, Mesa emits `REG_PC_BASE_ADDRESS, 0`.
+  - Mesa then emits `REG_PC_REGISTER_AMOUNTS, 0`.
+  - Mesa then appends raw `0x0041000000000000`.
+  - Mesa then emits `REG_PC_OPERATION_ENABLE` with `PC_OPERATION_ENABLE_RESERVED_0(14) | PC_OPERATION_ENABLE_OP_EN(1)`.
+- Tail layout is therefore the final four qwords of each regcmd segment:
+  1. `REG_PC_BASE_ADDRESS` or literal zero
+  2. `REG_PC_REGISTER_AMOUNTS`
+  3. raw `0x0041000000000000`
+  4. `REG_PC_OPERATION_ENABLE`
+- Patching: `mesa/src/gallium/drivers/rocket/rkt_ml.c::compile_operation()`:
+  - patches `reg_count - 4` with `addr << 16`, where `addr` is the next regcmd physical address.
+  - patches `reg_count - 3` with `regs_to_fetch << 16`.
+  - `regs_to_fetch = len(next_regcfg)` initially.
+  - `regs_to_fetch -= 4` to exclude the next segment's four-qword PC tail.
+  - `regs_to_fetch = ALIGN(regs_to_fetch / 2, 2)`.
+  - final task remains zero/zero and terminates the chain.
+- Mesa task descriptors are Rocket UAPI `drm_rocket_task`, not vendor `struct rknpu_task`:
+  - `regcmd = task->regcfg_addr`
+  - `regcmd_count = task->regcfg_amount`
+
+Important difference from our second `--pc-chain` attempt:
+- We patched `REG_PC_REGISTER_AMOUNTS` with the raw current segment length.
+- Mesa patches it with the transformed **next** segment fetch amount: `ALIGN((next_len - 4) / 2, 2)`.
+- This may explain the core-0 PC-chain timeout or no-output behavior.
+
+Additional `~/npu` dump artifact finding:
+
+- `~/npu/ops_rknn/dump/gem1-dump` shows a valid official RKNN PC tail:
+  - literal zero at the next-address slot for a single-task chain
+  - `REG_PC_REGISTER_AMOUNTS` encoded as raw qword `0x0101000000000014`
+  - raw `0x0041000000000000`
+  - `REG_PC_OPERATION_ENABLE` encoded as raw qword `0x00810000000d0008`
+- This means `REG_PC_BASE_ADDRESS` and `REG_PC_REGISTER_AMOUNTS` use target `0x101`, not `0x81`.
+- `REG_PC_OPERATION_ENABLE` uses target `0x81`.
+- Our previous PC-chain attempts used target `0x81` for `BASE_ADDRESS` and `REGISTER_AMOUNTS`, which likely made those writes ineffective or wrong.
+
+Focused official RKNN matmul split dump:
+
+- `~/npu/README` says `424x424x424` is the known matmul boundary case and the FAQ says too-large matmul is split along `N`.
+- `~/npu/ops_rknn/matmul_api.cpp` now accepts CLI dimensions, so the focused dump command was:
+
+```bash
+cd ~/npu/ops_rknn
+RKNN_CORE_MASK=1 sh ./run.sh --gdb matmul_api 424 424 424
+```
+
+Result:
+- The RKNN matmul run completed on core 0 and passed.
+- Runtime allocated a task BO of 80 bytes and a `shared_cmd_tensor` BO of 1792 bytes.
+- The task BO contained exactly two valid descriptors:
+
+```text
+Task 0:
+  flags         = 0
+  op_idx        = 0
+  enable_mask   = 0x0d
+  int_mask      = 0x300
+  int_clear     = 0x1ffff
+  regcfg_amount = 108
+  regcfg_offset = 0
+  regcmd_addr   = 0xfff76000
+
+Task 1:
+  flags         = 0
+  op_idx        = 0
+  enable_mask   = 0x0d
+  int_mask      = 0x300
+  int_clear     = 0x1ffff
+  regcfg_amount = 108
+  regcfg_offset = 0
+  regcmd_addr   = 0xfff76380
+```
+
+PC-chain details from the first segment tail:
+
+```text
+REG_PC_BASE_ADDRESS      -> 0xfff76380 >> 4
+REG_PC_REGISTER_AMOUNTS  -> 55
+0x0041000000000000
+REG_PC_OPERATION_ENABLE  -> 0x000d0008
+```
+
+Final segment tail:
+
+```text
+literal zero for next address
+REG_PC_REGISTER_AMOUNTS -> 0
+0x0041000000000000
+REG_PC_OPERATION_ENABLE -> 0x000d0008
+```
+
+Important correction:
+- Official RKNN does **not** set `PC_REGISTER_AMOUNTS` to the descriptor `regcfg_amount` (`108`).
+- Official RKNN does **not** use Mesa's `ALIGN((next_len - 4) / 2, 2)` formula (`52` for this dump).
+- For `regcfg_amount=108`, official RKNN uses `55`, i.e. `regcfg_amount / 2 + 1`.
+- The four-qword PC tail is included in descriptor `regcfg_amount=108`; the next segment starts at `0x380` bytes because each segment is padded to `112` qwords / 64-byte alignment.
+- Descriptors use absolute `regcmd_addr` with `regcfg_offset=0`; this matches our `--regcmd-mode absolute`, not the default `offset` mode.
+
+Submit header capture for `424x424x424` without forced mask:
+
+```text
+flags=0x5
+timeout=6000
+task_number=6
+task_obj_addr=<kernel task obj addr>
+task_base_addr=0
+core_mask=0
+subcore_task[0]={0,2}
+subcore_task[1]={0,2}
+subcore_task[2]={0,2}
+subcore_task[3]={0,0}
+subcore_task[4]={0,0}
+```
+
+This submit passed. The task BO still contains only two descriptors, so RKNN reports `task_number=6` because the same two-descriptor PC chain is made available to three possible cores. With `RKNN_CORE_MASK=1`, the submit header becomes `core_mask=1` but the same `task_number=6` / three duplicate subcore ranges were used, and this shape timed out in that particular forced-core run. Therefore, the passed focused dump came from RKNN's auto/core-mask-zero path, not forced core 0.
+
+New GEMM harness attempt:
+
+- Added `experimental/gemm_multicore.py` as a GEMM-specific reproducer that imports `examples/gemm.py` helpers and can run either an official baseline or explicit row tiles.
+- The baseline path still times out on `examples/gemm.py` for `424x424x424`, which matches the README note that this shape was a known failure in that branch.
+- The explicit official-style submit header (`flags=0x5`, `task_number=6`, `core_mask=0`, `subcore_task[0..2]=(0,2)`) also timed out when paired with the raw GEMM register stream from `examples/gemm.py`.
+
+Conclusion:
+- The official RKNN `ops_rknn` dump is the useful ground truth for the shape.
+- `examples/gemm.py` is still a good register-layout reference, but it is not the working execution path for `424x424x424` on this branch.
+- Next step should be a register diff between the official `ops_rknn` dump and `examples/gemm.py`'s emitted GEMM stream, especially around the task header and PC tail, before trying more split submits.
+
+Experiment updates after comparing `rknnops.h`:
+- `experimental/rknpu_common.py` now defines `RKNPU_JOB_BLOCK = 0x2`.
+- `experimental/multicore_elementwise.py --pc-chain` now encodes `REG_PC_BASE_ADDRESS` without setting `PC_SEL`.
+- `--pc-chain` now patches `REG_PC_REGISTER_AMOUNTS` with the current segment length, matching `rknnops.h`.
+- Added `--task-op-idx` to test `op_idx=1` versus the previous `op_idx=4`.
+- Added `--submit-block` to include `RKNPU_JOB_BLOCK` in default submit flags.
+
+Core-0 chain test matching `rknnops.h` descriptor flags more closely:
+
+```bash
+python experimental/multicore_elementwise.py --n 4096 --ops ADD,ADD,ADD --core-mask 0x1 --core-ranges core0 --pc-chain --task-op-idx 1 --submit-block --timeout 10000
+```
+
+Result:
+
+```text
+flags=0x7
+core_mask=0x1
+task_number=3
+subcore_task[0]=(0,3)
+submit ret=[0]
+ADD task[0] FAIL sentinel=False
+ADD task[1] FAIL sentinel=False
+ADD task[2] FAIL sentinel=False
+```
+
+Core-0 chain test with our previous known-good `op_idx=4` plus `RKNPU_JOB_BLOCK`:
+
+```bash
+python experimental/multicore_elementwise.py --n 4096 --ops ADD,ADD,ADD --core-mask 0x1 --core-ranges core0 --pc-chain --submit-block --timeout 10000
+```
+
+Result:
+
+```text
+flags=0x7
+core_mask=0x1
+task_number=3
+subcore_task[0]=(0,3)
+submit ret=[0]
+ADD task[0] FAIL sentinel=False
+ADD task[1] FAIL sentinel=False
+ADD task[2] FAIL sentinel=False
+```
+
+Interpretation:
+- `RKNPU_JOB_BLOCK` changes failure mode from timeout to quick successful ioctl with no output writes.
+- `op_idx=1` from `rknnops.h` is not directly compatible with this raw elementwise DPU/RDMA task descriptor/register mix.
+- `op_idx=4` plus block also does not execute the chain.
+- The remaining difference is likely the exact register stream shape used by `rknnops.h` for multi-task PC mode, not just the submit header. We need to build or run an actual `~/npu/ops_reg` case that produces `task_count > 1`, then dump its descriptors/regcmds and copy that layout.
+
+Safer dry/static command:
+
+```bash
+python -m py_compile experimental/rknpu_common.py experimental/multicore_elementwise.py experimental/multicore_gemm.py experimental/multicore_probe.py
+```
 
 ## Ground Truth From Rocket/Mesa
 
@@ -210,7 +581,7 @@ CPU stitches C = concat(C0, C1, C2, axis=N)
 ```
 
 Implications for this repo:
-- For matmul/GEMV, the first serious multicore experiment should be **N-axis tiling**, not `examples/multicore_gemm.py --core-ranges split3`.
+- For matmul/GEMV, the first serious multicore experiment should be **N-axis tiling**, not `experimental/multicore_gemm.py --core-ranges split3`.
 - Each tile should be a complete standalone matmul with its own weight slice and output buffer.
 - For official RKNN matmul API, this likely means multiple `rknn_matmul_ctx` objects, each created for smaller `N_tile`.
 - For raw `gemm.py`, this means generating independent register streams with different weight/output base addresses and dimensions.
@@ -265,10 +636,10 @@ The correct direction is:
 ## Safe Script State
 
 Current guard changes in this repo:
-- `examples/multicore_elementwise.py` defaults to `core0`, `core_mask=0x1`.
-- `examples/multicore_gemm.py` defaults to `core0`, `core_mask=0x1`.
+- `experimental/multicore_elementwise.py` defaults to `core0`, `core_mask=0x1`.
+- `experimental/multicore_gemm.py` defaults to `core0`, `core_mask=0x1`.
 - Raw nonzero-core and multi-range paths require `--allow-unsafe-submit`.
-- `examples/multicore_probe.py` requires explicit opt-in for risky probes.
+- `experimental/multicore_probe.py` requires explicit opt-in for risky probes.
 - `test/test_multicore_*.py` are static guard tests and do not submit to NPU.
 
 ## Experiment Run Log
@@ -678,7 +1049,7 @@ Only run after Stage 5 passes and Stage 7 is understood.
 
 Start with one independent tile, not split3:
 ```text
-python examples/multicore_elementwise.py --core-mask 0x2 --core-ranges 0:0:1 --allow-unsafe-submit
+python experimental/multicore_elementwise.py --core-mask 0x2 --core-ranges 0:0:1 --allow-unsafe-submit
 ```
 
 Try only one hypothesis at a time:
@@ -727,6 +1098,88 @@ Success criteria:
 - No crash.
 - Outputs correct.
 - Captured layout matches official runtime.
+
+## PC-Chain Update
+
+The GEMM PC-chain work now gives a concrete regcmd reference that should be
+carried into any later multicore experiment:
+
+- `REG_PC_BASE_ADDRESS` and `REG_PC_REGISTER_AMOUNTS` are emitted as `TARGET_PC_REG` (`0x0101`) records.
+- `REG_PC_OPERATION_ENABLE` is the `TARGET_PC` (`0x0081`) record.
+- The 394x394x394 GEMM chain matches the raw capture qword-for-qword when built from decoded register writes.
+- The last segment ends with `PC_REGISTER_AMOUNTS = 0`.
+
+That means the older wrapper-style assumption is not good enough for elementwise
+or multicore work.
+
+Current elementwise probe results from `experimental/multicore_elementwise.py`:
+
+```text
+--core-ranges 0:0:1 --core-mask 0x1 --ops ADD --regcmd-mode offset
+  ioctl returned EINVAL
+
+--core-ranges 0:0:1 --core-mask 0x1 --ops ADD --regcmd-mode absolute
+  ioctl returned EINVAL
+
+--core-ranges core0 --core-mask 0x1 --ops ADD,MUL,SUB --regcmd-mode absolute
+  ioctl returned EINVAL
+
+--core-ranges core0 --core-mask 0x1 --ops ADD,MUL,SUB --regcmd-mode absolute --pc-chain --pc-chain-style rknnops
+  submit returned 0
+  task[0] PASS
+  task[1] FAIL
+  task[2] FAIL
+
+--core-ranges core0 --core-mask 0x1 --ops ADD,ADD,ADD --regcmd-mode absolute --pc-chain --pc-chain-style rknnops
+  submit timed out
+
+--core-ranges core0 --core-mask 0x1 --ops ADD,MUL,SUB --regcmd-mode absolute --pc-chain --pc-chain-style mesa
+  ioctl returned EINVAL
+
+--core-ranges core0 --core-mask 0x1 --ops ADD,MUL,SUB --regcmd-mode absolute --pc-chain --pc-chain-style rknn-matmul
+  ioctl returned EINVAL
+```
+
+Additional focused tests after separating descriptor `enable_mask` from regcmd
+`REG_PC_OPERATION_ENABLE`:
+
+```text
+--pc-chain --pc-chain-style rknnops --regcmd-mode offset --pc-op-enable 0x18
+  submit returned 0
+  ADD,MUL,SUB: task[0] PASS, task[1]/task[2] FAIL
+
+--pc-chain --pc-chain-style rknnops --regcmd-mode absolute --pc-op-enable 0x18
+  ioctl returned EINVAL
+
+--pc-chain --pc-chain-style rknnops --task-op-idx 1 --enable-mask 0x0d --submit-block --pc-op-enable 0x0d
+  submit returned 0
+  no outputs written
+
+--pc-chain --pc-chain-style rknnops --task-op-idx 1 --enable-mask 0x0d --submit-block --pc-op-enable 0x18
+  submit returned 0
+  no outputs written
+
+--pc-chain --pc-chain-style rknn-gemm --regcmd-mode offset --pc-op-enable 0x18 --ops ADD,ADD,ADD
+  submit returned 0
+  task[0] PASS, task[1]/task[2] FAIL
+
+--pc-chain --pc-chain-style rknn-gemm --regcmd-mode offset --pc-op-enable 0x18 --ops ADD,MUL,SUB
+  ioctl returned EINVAL
+```
+
+Interpretation:
+
+- The chain still needs more than a PC tail.
+- The `rknnops` amount style is the only one that gets mixed ADD/MUL/SUB past submit on this board.
+- The GEMM-derived amount style `ceil(next_body_regs / 2) + 1` is valid enough to submit a uniform ADD chain, but it still does not make later tasks correct.
+- The official `op_idx=1`, descriptor `enable_mask=0x0d`, and `RKNPU_JOB_BLOCK` combination is not compatible with this raw elementwise register body: it returns quickly with no output writes.
+- The raw elementwise body still needs regcmd `PC_OPERATION_ENABLE = 0x18` for task 0 to write output.
+- Later elementwise tasks are not executing correctly yet, so the next fix is
+  likely task descriptor shape, op/enable mix, or the body register stream, not
+  just the tail patch.
+- Therefore, yes: single-core elementwise PC-chain correctness is the immediate
+  prerequisite before any multicore test. Multicore should remain paused until
+  `task0 -> task1 -> task2` works on core 0.
 
 ## What To Fix In Local Scripts
 
@@ -786,3 +1239,572 @@ Medium-term success:
 
 Long-term success:
 - One logical workload is tiled, submitted as independent jobs, reassembled correctly, and is faster than single-core baseline.
+
+## 2026-05-03 ADD PC-Chain Progress
+
+Single-core ADD PC-chain is now working for the minimal raw DPU/RDMA body and
+for the integrated elementwise helper. This unblocks the next stage of multicore
+debugging, but it does not prove multicore by itself.
+
+Verified commands:
+
+```bash
+python3 experimental/add_rawbuf_pcchain.py --amount-style body --regcmd-mode absolute --descriptor-amount segment --segment-elements 8
+python3 experimental/min_add_pcchain.py
+python3 experimental/add_pcchain.py --segment-elements 4096
+python3 experimental/multicore_elementwise.py --n 4096 --ops ADD --task-count 3 --core-ranges core0 --core-mask 0x1 --pc-chain --pc-chain-style add --regcmd-mode absolute --submit-block --timeout 10000
+```
+
+Results:
+
+```text
+add_rawbuf_pcchain.py, 8 values/segment:
+  ADD RAWBUF PCCHAIN PASS
+
+min_add_pcchain.py, 4096 values/segment:
+  ADD RAWBUF PCCHAIN PASS
+
+add_pcchain.py, decoded 4096 values/segment:
+  ADD PCCHAIN PASS
+
+multicore_elementwise.py, core0 three-task PC-chain:
+  submit ret=[0]
+  ADD task[0] PASS
+  ADD task[1] PASS
+  ADD task[2] PASS
+```
+
+Important implementation details:
+
+- `REG_PC_BASE_ADDRESS` / `REG_PC_REGISTER_AMOUNTS` use target `0x0101`.
+- `REG_PC_OPERATION_ENABLE` uses target `0x0081`.
+- ADD/DPU-RDMA PC-chain uses descriptor `regcfg_amount = body + 4-qword PC tail`.
+- The working amount style for the minimal ADD chain is `PC_REGISTER_AMOUNTS = next body qword count`.
+- Every chained segment re-arms both `DPU.S_POINTER = 0x0e` and `DPU_RDMA.S_POINTER = 0x0e`.
+- `multicore_elementwise.py` now defaults to one core-0 task. Three-task tests must be explicit with `--task-count 3` or three comma-separated ops.
+- `--separate-submits` now means sequential core-0 submits; it no longer maps task 1/2 to cores 1/2 by default.
+
+Official RKNN runtime multicore is still not a solved path for this ADD model.
+This command was tested:
+
+```bash
+RKNN_CORE_MASK=7 /home/orangepi/npu/ops_rknn/add 16
+```
+
+It failed in `rknn_run`:
+
+```text
+failed to submit!, op id: 2, flags: 0x5, task start: 13, task number: 9
+rknn_run failed: -1
+```
+
+Core-0 RKNN ADD references still pass through:
+
+```bash
+python3 experimental/min_add_small.py
+python3 experimental/min_add_medium.py
+python3 experimental/min_add_large.py
+```
+
+Next safe multicore step:
+
+1. Keep raw nonzero-core submit behind `--allow-unsafe-submit`.
+2. First test split execution only after the core-0 PC-chain command above
+   remains green.
+3. Prefer official/runtime captures for any `core_mask != 1` path before
+   guessing raw `subcore_task[]` layouts.
+
+## 2026-05-03 Chain-Length Caution
+
+`experimental/add_pcchain_length.py` was added to measure how many ADD PC-chain
+segments can run on single core. The only trustworthy hardware runs are the
+serialized ones. Do not trust results from multiple NPU submit commands launched
+in parallel; those can race the downstream driver/runtime and leave later
+outputs at zero even for configurations that previously passed.
+
+Serialized evidence before the accidental parallel probes:
+
+```text
+segments=1 elements=4096 PASS
+segments=2 elements=4096 PASS
+segments=4 elements=4096 PASS
+segments=8 elements=4096 PASS
+segments=16 elements=4096 FAIL at task 14
+```
+
+Because later tests were accidentally launched in parallel, the boundary above
+should be treated as provisional. The script now defaults to the known-stable
+range only:
+
+```bash
+python3 experimental/add_pcchain_length.py --max-segments 8 --segment-elements 4096 --stop-on-fail
+```
+
+Lengths above 8 require an explicit opt-in:
+
+```bash
+python3 experimental/add_pcchain_length.py --lengths 16 --segment-elements 4096 --stop-on-fail --allow-risky-length
+```
+
+Use that only with physical reset access and after confirming no other RKNN/raw
+NPU process is running. The current conservative conclusion is:
+
+- 8 chained ADD segments at 4096 FP16 values/segment is verified stable.
+- 16 segments is not verified; one serialized run failed near task 14.
+- `experimental/add_pcchain_length.py` and `experimental/rknpu_common.py` use
+  `/tmp/rk3588_npu_submit.lock` and refuse parallel submits instead of waiting.
+- Multicore tests should not be resumed until the board/runtime can again pass
+  the known-good core-0 PC-chain smoke test.
+
+## 2026-05-03 Tiled Elementwise Multicore Plan
+
+`experimental/multicore_elementwise.py` now has `--tile-flat` so multicore tests
+use one logical ADD vector split into independent tiles instead of three
+unrelated test tensors.
+
+Safe baseline command, after the board/runtime is healthy:
+
+```bash
+python3 experimental/multicore_elementwise.py --tile-flat --ops ADD --n 12288 --tiles 3 --execution sequential-core0 --timeout 10000
+```
+
+Fresh post-reboot tiled ADD evidence:
+
+```bash
+python3 experimental/multicore_elementwise.py --tile-flat --ops ADD --n 12288 --tiles 3 --execution sequential-core0 --timeout 10000
+```
+
+```text
+execution=sequential-core0 submit ret=[0, 0, 0]
+ADD tile[0] PASS
+ADD tile[1] PASS
+ADD tile[2] PASS
+ADD tiled_output PASS
+```
+
+Core-0 one-submit PC-chain tiled validation also passed:
+
+```bash
+python3 experimental/multicore_elementwise.py --tile-flat --ops ADD --n 12288 --tiles 3 --execution pc-chain-core0 --timeout 10000
+```
+
+```text
+flags=0x7
+core_mask=0x1
+task_number=3
+subcore_task[0]=(0,3)
+execution=pc-chain-core0 submit ret=[0]
+ADD tile[0] PASS
+ADD tile[1] PASS
+ADD tile[2] PASS
+ADD tiled_output PASS
+```
+
+Raw split-core tiled ADD now has a working evidence path. Guarded command:
+
+```bash
+timeout 25s python3 experimental/multicore_elementwise.py --tile-flat --ops ADD --n 12288 --tiles 3 --execution unsafe-split3 --timeout 10000 --allow-unsafe-submit
+```
+
+Working submit layout:
+
+```text
+flags=0x7
+core_mask=0x7
+task_number=3
+subcore_task[0]=(0,0)
+subcore_task[1]=(0,0)
+subcore_task[2]=(0,1)
+subcore_task[3]=(1,1)
+subcore_task[4]=(2,1)
+```
+
+```text
+execution=unsafe-split3 submit ret=[0]
+ADD tile[0] PASS
+ADD tile[1] PASS
+ADD tile[2] PASS
+ADD tiled_output PASS
+```
+
+Larger split-core tiled ADD also passed:
+
+```bash
+timeout 25s python3 experimental/multicore_elementwise.py --tile-flat --ops ADD --n 24576 --tiles 3 --execution unsafe-split3 --timeout 10000 --allow-unsafe-submit
+```
+
+```text
+tile[0] n=8192 PASS
+tile[1] n=8192 PASS
+tile[2] n=8192 PASS
+ADD tiled_output PASS
+```
+
+Current conclusion:
+
+- The safe model is confirmed: split one logical flat ADD into independent
+  output tiles.
+- The raw vendor submit that works on this board is the RK3588 tail layout:
+  `subcore_task[2]=(0,1)`, `[3]=(1,1)`, `[4]=(2,1)`.
+- Each tile is a standalone DPU/RDMA ADD task with absolute `regcmd_addr`.
+- `unsafe-split3` uses one submit with PC-chain tails and
+  `PC | BLOCK | PINGPONG` flags.
+- Keep the explicit `--allow-unsafe-submit` guard. This path works for tiled ADD
+  now, but it is still a raw downstream-driver path, not a general proof for all
+  ops or GEMM.
+
+Additional tiled elementwise coverage:
+
+```bash
+python3 experimental/multicore_elementwise.py --tile-flat --ops MUL --n 12288 --tiles 3 --execution sequential-core0 --timeout 10000
+python3 experimental/multicore_elementwise.py --tile-flat --ops MUL --n 12288 --tiles 3 --execution pc-chain-core0 --timeout 10000
+timeout 25s python3 experimental/multicore_elementwise.py --tile-flat --ops MUL --n 12288 --tiles 3 --execution unsafe-split3 --timeout 10000 --allow-unsafe-submit
+```
+
+Results:
+
+```text
+MUL sequential-core0: PASS, all 3 tiles and stitched output
+MUL pc-chain-core0:   PASS, all 3 tiles and stitched output
+MUL unsafe-split3:    PASS, all 3 tiles and stitched output
+```
+
+```bash
+python3 experimental/multicore_elementwise.py --tile-flat --ops SUB --n 12288 --tiles 3 --execution sequential-core0 --timeout 10000
+python3 experimental/multicore_elementwise.py --tile-flat --ops SUB --n 12288 --tiles 3 --execution pc-chain-core0 --timeout 10000
+timeout 25s python3 experimental/multicore_elementwise.py --tile-flat --ops SUB --n 12288 --tiles 3 --execution unsafe-split3 --timeout 10000 --allow-unsafe-submit
+```
+
+Results:
+
+```text
+SUB sequential-core0: PASS, all 3 tiles and stitched output
+SUB pc-chain-core0:   PASS, all 3 tiles and stitched output
+SUB unsafe-split3:    PASS, all 3 tiles and stitched output
+```
+
+Updated supported scope:
+
+- Flat tiled ADD/MUL/SUB are verified through sequential core-0, core-0
+  PC-chain, and raw split3 on this board.
+- The split3 evidence is for independent flat tiles only. It should not be
+  generalized to chained dependent tasks, convolution, or GEMM without separate
+  tile-specific validation.
+
+`MAX` is also verified:
+
+```bash
+python3 experimental/multicore_elementwise.py --tile-flat --ops MAX --n 12288 --tiles 3 --execution sequential-core0 --timeout 10000
+python3 experimental/multicore_elementwise.py --tile-flat --ops MAX --n 12288 --tiles 3 --execution pc-chain-core0 --timeout 10000
+timeout 25s python3 experimental/multicore_elementwise.py --tile-flat --ops MAX --n 12288 --tiles 3 --execution unsafe-split3 --timeout 10000 --allow-unsafe-submit
+```
+
+Results:
+
+```text
+MAX sequential-core0: PASS, all 3 tiles and stitched output
+MAX pc-chain-core0:   PASS, all 3 tiles and stitched output
+MAX unsafe-split3:    PASS, all 3 tiles and stitched output
+```
+
+The verified flat tiled elementwise set is now:
+
+```text
+ADD, MUL, SUB, MAX
+```
+
+Larger split3 tile size also passes for the verified set:
+
+```bash
+timeout 25s python3 experimental/multicore_elementwise.py --tile-flat --ops ADD --n 24576 --tiles 3 --execution unsafe-split3 --timeout 10000 --allow-unsafe-submit
+timeout 25s python3 experimental/multicore_elementwise.py --tile-flat --ops MUL --n 24576 --tiles 3 --execution unsafe-split3 --timeout 10000 --allow-unsafe-submit
+timeout 25s python3 experimental/multicore_elementwise.py --tile-flat --ops SUB --n 24576 --tiles 3 --execution unsafe-split3 --timeout 10000 --allow-unsafe-submit
+timeout 25s python3 experimental/multicore_elementwise.py --tile-flat --ops MAX --n 24576 --tiles 3 --execution unsafe-split3 --timeout 10000 --allow-unsafe-submit
+```
+
+Results:
+
+```text
+ADD 3x8192 split3: PASS
+MUL 3x8192 split3: PASS
+SUB 3x8192 split3: PASS
+MAX 3x8192 split3: PASS
+```
+
+Next expansion targets:
+
+- GEMM N-axis tiling
+
+`NEG` is verified:
+
+```bash
+python3 experimental/multicore_elementwise.py --tile-flat --ops NEG --n 12288 --tiles 3 --execution sequential-core0 --timeout 10000
+python3 experimental/multicore_elementwise.py --tile-flat --ops NEG --n 12288 --tiles 3 --execution pc-chain-core0 --timeout 10000
+timeout 25s python3 experimental/multicore_elementwise.py --tile-flat --ops NEG --n 12288 --tiles 3 --execution unsafe-split3 --timeout 10000 --allow-unsafe-submit
+```
+
+Results:
+
+```text
+NEG sequential-core0: PASS, all 3 tiles and stitched output
+NEG pc-chain-core0:   PASS, all 3 tiles and stitched output
+NEG unsafe-split3:    PASS, all 3 tiles and stitched output
+```
+
+`FDIV` is verified with `--atol 0.2`:
+
+```bash
+python3 experimental/multicore_elementwise.py --tile-flat --ops FDIV --n 12288 --tiles 3 --execution sequential-core0 --timeout 10000 --atol 0.2
+python3 experimental/multicore_elementwise.py --tile-flat --ops FDIV --n 12288 --tiles 3 --execution pc-chain-core0 --timeout 10000 --atol 0.2
+timeout 25s python3 experimental/multicore_elementwise.py --tile-flat --ops FDIV --n 12288 --tiles 3 --execution unsafe-split3 --timeout 10000 --allow-unsafe-submit --atol 0.2
+```
+
+Results:
+
+```text
+FDIV sequential-core0: PASS, all 3 tiles and stitched output, max_diff=0.0039
+FDIV pc-chain-core0:   PASS, all 3 tiles and stitched output, max_diff=0.0039
+FDIV unsafe-split3:    PASS, all 3 tiles and stitched output, max_diff=0.0039
+```
+
+The verified flat tiled elementwise set is now all ops currently exposed by
+`experimental/multicore_elementwise.py`:
+
+```text
+ADD, MUL, SUB, MAX, NEG, FDIV
+```
+
+Remaining major target:
+
+- GEMM N-axis tiling
+
+## 2026-05-03 GEMM Multicore Status
+
+`experimental/multicore_gemm.py` now imports the local GEMM helper from
+`examples/gemm.py`, but it is not yet a usable multicore path. Safe core0 smoke:
+
+```bash
+timeout 25s python3 experimental/multicore_gemm.py --m 32 --n 32 --k 32 --core-ranges core0 --core-mask 0x1 --regcmd-mode absolute --timeout 10000
+```
+
+Result:
+
+```text
+task[0] GEMM 32x32x32 regcfg_amount=45 regcmd_addr=...
+task[1] GEMM 32x32x32 regcfg_amount=45 regcmd_addr=...
+task[2] GEMM 32x32x32 regcfg_amount=45 regcmd_addr=...
+TimeoutError: [Errno 110] Connection timed out
+```
+
+Conclusion:
+
+- The existing GEMM helper is still the old three-independent-descriptor shape.
+- It does not yet reproduce the working GEMM PC-chain approach.
+- Do not run GEMM split-core until a core0 GEMM PC-chain/tiled baseline passes.
+
+Next GEMM work:
+
+1. Port the working `experimental/gemm_pcchain.py` submit shape into a tiled
+   logical workload.
+2. Validate one logical GEMM split along N on core 0.
+3. Validate the same N tiles as independent sequential core0 submits.
+4. Only then try `rk3588-tricore-tail` split3 for GEMM.
+
+Update: generic small GEMM N-axis tiling now works for independent tiles. First,
+the helper was fixed to default to one safe core-0 task; the previous three-task
+core0 submit timeout was caused by submitting multiple GEMM descriptors together
+without a valid chain. Single-task smoke:
+
+```bash
+timeout 25s python3 experimental/multicore_gemm.py --m 32 --n 32 --k 32 --task-count 1 --core-ranges core0 --core-mask 0x1 --regcmd-mode absolute --timeout 10000
+```
+
+Result:
+
+```text
+flags=0x5
+core_mask=0x1
+task_number=1
+GEMM task[0] PASS max_diff=0.0044
+```
+
+Three independent 32x32x32 GEMMs also pass on split3:
+
+```bash
+timeout 25s python3 experimental/multicore_gemm.py --m 32 --n 32 --k 32 --task-count 3 --core-ranges split3 --core-mask 0x7 --subcore-layout rk3588-tricore-tail --regcmd-mode absolute --timeout 10000 --allow-unsafe-submit
+```
+
+Result:
+
+```text
+flags=0x5
+core_mask=0x7
+task_number=3
+subcore_task[2]=(0,1)
+subcore_task[3]=(1,1)
+subcore_task[4]=(2,1)
+GEMM task[0] PASS
+GEMM task[1] PASS
+GEMM task[2] PASS
+```
+
+Logical N-axis tiled GEMM now has a working baseline. This treats `--n` as total
+N and splits the weight/output columns across three independent GEMM tasks:
+
+```bash
+timeout 25s python3 experimental/multicore_gemm.py --tile-n --m 32 --n 96 --k 32 --tiles 3 --execution sequential-core0 --timeout 10000 --atol 0.1
+```
+
+Result:
+
+```text
+execution=sequential-core0 submit ret=[0, 0, 0]
+GEMM task[0] PASS max_diff=0.0052
+GEMM task[1] PASS max_diff=0.0054
+GEMM task[2] PASS max_diff=0.0065
+GEMM tiled_output PASS max_diff=0.0065
+```
+
+Split3 N-axis tiled GEMM also passes:
+
+```bash
+timeout 25s python3 experimental/multicore_gemm.py --tile-n --m 32 --n 96 --k 32 --tiles 3 --execution unsafe-split3 --timeout 10000 --allow-unsafe-submit --atol 0.1
+```
+
+Result:
+
+```text
+flags=0x5
+core_mask=0x7
+task_number=3
+subcore_task[2]=(0,1)
+subcore_task[3]=(1,1)
+subcore_task[4]=(2,1)
+execution=unsafe-split3 submit ret=[0]
+GEMM task[0] PASS
+GEMM task[1] PASS
+GEMM task[2] PASS
+GEMM tiled_output PASS max_diff=0.0065
+```
+
+Current GEMM scope:
+
+- Verified: small 32x96x32 logical GEMM split into three N-axis tiles.
+- Verified: split3 tail layout works for independent GEMM tasks.
+- Not yet verified: larger GEMM/GEMV tile sizes, 394x394x394-style PC-chain
+  row splits, or performance speedup.
+
+Important failing large-shape check:
+
+```bash
+timeout 25s python3 experimental/multicore_gemm.py --m 395 --n 395 --k 295 --task-count 1 --core-ranges core0 --core-mask 0x1 --regcmd-mode absolute --timeout 10000 --atol 0.2
+```
+
+Result:
+
+```text
+task[0] GEMM 395x395x295 regcfg_amount=45 regcmd_addr=...
+TimeoutError: [Errno 110] Connection timed out
+```
+
+Conclusion:
+
+- `395x395x295` is still not solved.
+- It fails before multicore: one single core, one descriptor times out.
+- The new split3 success only covers independent GEMM tiles whose individual
+  tile shape already works, such as `32x32x32`.
+- `395x395x295` needs the GEMM register/packing path fixed or rewritten around
+  the known-good RKNN/GEMM PC-chain capture style before multicore can help.
+- Since `N=395` is not divisible by 3, N-axis tiling also needs uneven tile
+  support, for example `132 + 132 + 131`, after each tile shape is proven on
+  core 0.
+
+`395x395x395` has the same current failure mode:
+
+```bash
+timeout 25s python3 experimental/multicore_gemm.py --m 395 --n 395 --k 395 --task-count 1 --core-ranges core0 --core-mask 0x1 --regcmd-mode absolute --timeout 10000 --atol 0.2
+```
+
+Result:
+
+```text
+task[0] GEMM 395x395x395 regcfg_amount=45 regcmd_addr=...
+TimeoutError: [Errno 110] Connection timed out
+```
+
+Conclusion:
+
+- `395x395x395` is not covered by the small N-axis tiled GEMM success.
+- It fails before multicore, in the single-task core0 path.
+- This likely needs the specialized GEMM PC-chain split path, not the generic
+  one-descriptor `examples/gemm.py` register stream.
+
+Specialized GEMM PC-chain check:
+
+```bash
+timeout 25s python3 experimental/gemm_pcchain.py --constant-data --mode core0 --timeout 10000
+timeout 25s python3 experimental/gemm_pcchain.py --constant-data --mode official --timeout 10000
+timeout 25s python3 experimental/gemm_pcchain.py --mode official --seed 0 --timeout 10000
+```
+
+Results:
+
+```text
+394x394x394 pcchain core0 constant:    PASS max_diff=0.000000
+394x394x394 pcchain official constant: PASS max_diff=0.000000
+394x394x394 pcchain official seed 0:   PASS max_diff=0.031067
+```
+
+Interpretation:
+
+- The hardcoded RKNN-style GEMM PC-chain reproducer works on core0.
+- The existing `official` mode also passes. It uses the RKNN-style submit shape:
+  `task_number = TASKS * 3`, `core_mask = 0`, and duplicate
+  `subcore_task[0..2] = (0,TASKS)`.
+- This is useful evidence that the PC-chain path is the right direction for the
+  large GEMM family.
+- It is not yet a generic fix for `395x395x395`; that shape still needs either
+  a generalized version of the PC-chain register generator or a reference dump
+  from RKNN/ops_rknn for that exact shape.
+
+This should run three independent tile submits on core 0, stitch the output in
+host memory, and verify the full logical vector. This is the Rocket-style model:
+
+```text
+one logical workload
+  -> tile 0: valid standalone ADD task
+  -> tile 1: valid standalone ADD task
+  -> tile 2: valid standalone ADD task
+host verifies concat(tile outputs)
+```
+
+Core-0 one-submit PC-chain tiled validation:
+
+```bash
+python3 experimental/multicore_elementwise.py --tile-flat --ops ADD --n 12288 --tiles 3 --execution pc-chain-core0 --timeout 10000
+```
+
+Only after both commands pass should raw split-core be tested:
+
+```bash
+python3 experimental/multicore_elementwise.py --tile-flat --ops ADD --n 12288 --tiles 3 --execution unsafe-split3 --timeout 10000 --allow-unsafe-submit
+```
+
+`unsafe-split3` forces:
+
+```text
+core_ranges      = split3
+core_mask        = 0x7
+subcore_layout   = rk3588-tricore-tail
+pc_chain         = add
+regcmd_mode      = absolute
+submit flags     = PC | BLOCK | PINGPONG
+```
+
+Do not run `unsafe-split3` while the board is segfaulting or after failed
+parallel submit experiments. The immediate next evidence needed is a fresh
+post-reboot pass of:
+
+```bash
+python3 experimental/multicore_elementwise.py --tile-flat --ops ADD --n 12288 --tiles 3 --execution sequential-core0 --timeout 10000
+```
