@@ -9,6 +9,27 @@ sys.path.insert(0, "examples")
 import pool  # noqa: E402
 
 
+TEST_OPS_POOL_2D_SHAPES = (
+  (2, 3),
+  (11, 28),
+  (110, 28),
+  (111, 28),
+  (17, 14),
+  (6, 6),
+  (5, 5),
+  (10, 10),
+  (7, 7),
+  (12, 13),
+  (50, 50),
+  (30, 30),
+  (7, 6),
+  (8, 8),
+)
+TEST_OPS_POOL_3D_SHAPES = (
+  (16, 16, 16),
+)
+
+
 def decode_reg(word):
   return ((word >> 48) & 0xffff, word & 0xffff, (word >> 16) & 0xffffffff)
 
@@ -41,6 +62,24 @@ class TestPoolHelpers(unittest.TestCase):
 
   def test_all_pool_modes_present(self):
     self.assertEqual(pool.POOL_OPS, ("min", "max", "avg", "globalmin", "globalmax", "globalavg"))
+
+  def test_test_ops_pool_shape_inventory(self):
+    self.assertEqual(TEST_OPS_POOL_2D_SHAPES,
+      ((2, 3), (11, 28), (110, 28), (111, 28), (17, 14), (6, 6), (5, 5), (10, 10), (7, 7),
+       (12, 13), (50, 50), (30, 30), (7, 6), (8, 8)))
+    self.assertEqual(TEST_OPS_POOL_3D_SHAPES, ((16, 16, 16),))
+
+  def test_reference_outputs_for_test_ops_2d_shapes(self):
+    for h, w in TEST_OPS_POOL_2D_SHAPES:
+      with self.subTest(shape=(h, w)):
+        x = (np.arange(h * w * pool.POOL_CHANNELS, dtype=np.float16).reshape(h, w, pool.POOL_CHANNELS) /
+             np.float16(8.0)).astype(np.float16)
+        self.assertEqual(pool.pool2d_reference(x, "max").shape, (h - 1, w - 1, pool.POOL_CHANNELS))
+        self.assertEqual(pool.pool2d_reference(x, "min").shape, (h - 1, w - 1, pool.POOL_CHANNELS))
+        self.assertEqual(pool.pool2d_reference(x, "avg").shape, (h - 1, w - 1, pool.POOL_CHANNELS))
+        self.assertEqual(pool.pool2d_reference(x, "globalmax").shape, (1, 1, pool.POOL_CHANNELS))
+        self.assertEqual(pool.pool2d_reference(x, "globalmin").shape, (1, 1, pool.POOL_CHANNELS))
+        self.assertEqual(pool.pool2d_reference(x, "globalavg").shape, (1, 1, pool.POOL_CHANNELS))
 
 
 class TestPoolRegs(unittest.TestCase):
@@ -80,6 +119,32 @@ class TestPoolRegs(unittest.TestCase):
     self.assertEqual(pool.POOL_INT_MASK, 0xc00)
     self.assertEqual(pool.POOL_PC_ENABLE, 48)
 
+  def test_register_generation_for_test_ops_2d_shapes(self):
+    for h, w in TEST_OPS_POOL_2D_SHAPES:
+      with self.subTest(shape=(h, w)):
+        regs = pool.pooling_regs("max", in_h=h, in_w=w)
+        self.assertEqual(reg_values(regs, pool.rk.REG_PPU_DATA_CUBE_IN_HEIGHT), [h - 1])
+        self.assertEqual(reg_values(regs, pool.rk.REG_PPU_DATA_CUBE_IN_WIDTH), [w - 1])
+        self.assertEqual(reg_values(regs, pool.rk.REG_PPU_DATA_CUBE_OUT_HEIGHT), [h - 2])
+        self.assertEqual(reg_values(regs, pool.rk.REG_PPU_DATA_CUBE_OUT_WIDTH), [w - 2])
+
+        avg_regs = pool.pooling_regs("avg", in_h=h, in_w=w)
+        self.assertEqual(reg_values(avg_regs, pool.rk.REG_PPU_DST_SURF_STRIDE),
+                         [pool.field("PPU_DST_SURF_STRIDE_DST_SURF_STRIDE", w * (h - 1))])
+
+        global_regs = pool.pooling_regs("globalavg", in_h=h, in_w=w)
+        self.assertEqual(reg_values(global_regs, pool.rk.REG_PPU_DATA_CUBE_OUT_HEIGHT), [0])
+        self.assertEqual(reg_values(global_regs, pool.rk.REG_PPU_DATA_CUBE_OUT_WIDTH), [0])
+        self.assertEqual(reg_values(global_regs, pool.rk.REG_PPU_POOLING_KERNEL_CFG),
+                         [pool.kernel_cfg(h - 1, w - 1, h - 1, w - 1)])
+
+  def test_dry_run_cli_for_test_ops_2d_shapes(self):
+    for h, w in TEST_OPS_POOL_2D_SHAPES:
+      with self.subTest(shape=(h, w)):
+        proc = subprocess.run([sys.executable, "examples/pool.py", "--height", str(h), "--width", str(w)],
+                              check=False, text=True, capture_output=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
 
 @unittest.skipUnless(os.path.exists("/dev/dri/card1"), "requires RK3588 NPU at /dev/dri/card1")
 class TestPoolSubmit(unittest.TestCase):
@@ -89,6 +154,7 @@ class TestPoolSubmit(unittest.TestCase):
         proc = subprocess.run([sys.executable, "examples/pool.py", "--submit", "--op", op],
                               check=False, text=True, capture_output=True)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
 
 
 if __name__ == "__main__":

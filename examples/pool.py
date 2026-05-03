@@ -20,7 +20,8 @@ POOL_INT_MASK = 0xc00
 POOL_TASK_OP_IDX = 1
 POOL_PC_ENABLE = 48
 POOL_RETRY_ENV = "RK3588_POOL_SUBMIT_RETRY"
-POOL_SUBMIT_ATTEMPTS = 4
+POOL_SUBMIT_ATTEMPTS = 8
+POOL_CHANNELS = 8
 
 
 class rknpu_mem_create(ctypes.Structure):
@@ -167,6 +168,10 @@ def read_f16_strided(buf, n, stride_fp16=8):
   return raw[::stride_fp16].copy()
 
 
+def align_up(value, align):
+  return ((int(value) + align - 1) // align) * align
+
+
 def pool2d_reference(x, op):
   if op.startswith("global"):
     window = x
@@ -174,9 +179,10 @@ def pool2d_reference(x, op):
     if op == "globalmin": return np.min(window, axis=(0, 1), keepdims=True).astype(np.float16)
     return np.mean(window.astype(np.float32), axis=(0, 1), keepdims=True).astype(np.float16)
 
-  out = np.empty((3, 3) + x.shape[2:], dtype=np.float16)
-  for y in range(3):
-    for x0 in range(3):
+  out_h, out_w = x.shape[0] - 1, x.shape[1] - 1
+  out = np.empty((out_h, out_w) + x.shape[2:], dtype=np.float16)
+  for y in range(out_h):
+    for x0 in range(out_w):
       window = x[y:y + 2, x0:x0 + 2]
       if op == "max":
         out[y, x0] = np.max(window, axis=(0, 1))
@@ -209,20 +215,21 @@ def kernel_cfg(stride_h=0, stride_w=0, kernel_h=1, kernel_w=1):
 def pooling_regs(op, input_dma=0x11110000, output_dma=0x22220000, in_h=4, in_w=4):
   if op not in POOL_OPS:
     raise ValueError(f"unknown pool op {op!r}; expected one of {', '.join(POOL_OPS)}")
+  if in_h < 2 or in_w < 2:
+    raise ValueError(f"pool input must be at least 2x2, got {in_h}x{in_w}")
 
   hw_op = "max" if op in ("min", "globalmin") else op
-  global_pool = op.startswith("global")
   direct_global = op in ("globalmax", "globalavg")
   max_pool = hw_op in ("max", "globalmax")
-  in_h_field = in_h - 1 if global_pool else 3
-  in_w_field = in_w - 1 if global_pool else 3
-  out_h_field = 0 if direct_global else 2
-  out_w_field = 0 if direct_global else 2
-  channel_field = 7
-  width_stride = in_w if direct_global else 4
-  src_surf_stride = width_stride * in_h if direct_global else 16
-  dst_surf_stride = 1 if direct_global else 12
-  index_add = 1 if direct_global else 12
+  in_h_field = in_h - 1
+  in_w_field = in_w - 1
+  out_h_field = 0 if direct_global else in_h - 2
+  out_w_field = 0 if direct_global else in_w - 2
+  channel_field = POOL_CHANNELS - 1
+  width_stride = in_w
+  src_surf_stride = width_stride * in_h
+  dst_surf_stride = 1 if direct_global else in_w * (in_h - 1)
+  index_add = 1 if direct_global else dst_surf_stride
   k_h = in_h_field if direct_global else 1
   k_w = in_w_field if direct_global else 1
   s_h = in_h_field if direct_global else 0
@@ -284,7 +291,7 @@ def pooling_regs(op, input_dma=0x11110000, output_dma=0x22220000, in_h=4, in_w=4
   return regs
 
 
-def run_pool(op):
+def run_pool(op, in_h=4, in_w=4):
   fd = os.open("/dev/dri/card1", os.O_RDWR)
   maps = []
   mems = []
@@ -292,21 +299,28 @@ def run_pool(op):
     reset_npu(fd)
     task_map, task_mc = mem_allocate(fd, 4096, RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
     regcmd_map, regcmd_mc = mem_allocate(fd, 4096, RKNPU_MEM_NON_CACHEABLE)
-    input_map, input_mc = mem_allocate(fd, 4096, RKNPU_MEM_NON_CACHEABLE)
-    output_map, output_mc = mem_allocate(fd, 4096, RKNPU_MEM_NON_CACHEABLE)
+    input_bytes = align_up(in_h * in_w * POOL_CHANNELS * np.dtype(np.float16).itemsize, 4096)
+    out_h = 1 if op in ("globalmax", "globalavg") else in_h - 1
+    out_w = 1 if op in ("globalmax", "globalavg") else in_w - 1
+    if op == "globalmin":
+      out_h, out_w = in_h - 1, in_w - 1
+    output_bytes = align_up(max(1, out_h * out_w * POOL_CHANNELS * np.dtype(np.float16).itemsize), 4096)
+    input_map, input_mc = mem_allocate(fd, input_bytes, RKNPU_MEM_NON_CACHEABLE)
+    output_map, output_mc = mem_allocate(fd, output_bytes, RKNPU_MEM_NON_CACHEABLE)
     maps = [task_map, regcmd_map, input_map, output_map]
     mems = [task_mc, regcmd_mc, input_mc, output_mc]
 
     tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
     regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
 
-    x = (np.arange(4 * 4 * 8, dtype=np.float16).reshape(4, 4, 8) / np.float16(8.0)).astype(np.float16)
+    x = (np.arange(in_h * in_w * POOL_CHANNELS, dtype=np.float16).reshape(in_h, in_w, POOL_CHANNELS) /
+         np.float16(8.0)).astype(np.float16)
     expected = pool2d_reference(x, op)
     input_for_op = -x if op in ("min", "globalmin") else x
     input_map[:input_for_op.nbytes] = input_for_op.reshape(-1).tobytes()
-    output_map[:4096] = b"\x00" * 4096
+    output_map[:output_bytes] = b"\x00" * output_bytes
 
-    regs = pooling_regs(op, input_mc.dma_addr, output_mc.dma_addr)
+    regs = pooling_regs(op, input_mc.dma_addr, output_mc.dma_addr, in_h, in_w)
     for i, value in enumerate(regs): regcmd[i] = value
 
     tasks[0].flags = 0
@@ -320,10 +334,10 @@ def run_pool(op):
     tasks[0].regcmd_addr = regcmd_mc.dma_addr
 
     ret = submit(fd, task_mc.obj_addr)
-    read_elems = 9 * x.shape[2] if op == "globalmin" else expected.size
+    read_elems = (in_h - 1) * (in_w - 1) * x.shape[2] if op == "globalmin" else expected.size
     got_raw = np.frombuffer(output_map, dtype=np.float16, count=read_elems).copy()
     if op == "globalmin":
-      pooled = got_raw.reshape(3, 3, x.shape[2])
+      pooled = got_raw.reshape(in_h - 1, in_w - 1, x.shape[2])
       got = -np.max(pooled.astype(np.float32), axis=(0, 1), keepdims=True).astype(np.float16)
     elif op == "min":
       got = -got_raw.reshape(expected.shape)
@@ -333,7 +347,7 @@ def run_pool(op):
     atol = 0.25 if op in ("avg", "globalavg") else 0.0
     ok = ret == 0 and np.allclose(decoded, expected, atol=atol)
     print(f"SUBMIT ret={ret}")
-    print(f"op={op} output_shape={expected.shape} reg_count={len(regs)}")
+    print(f"op={op} input_shape={x.shape} output_shape={expected.shape} reg_count={len(regs)}")
     print(f"NPU output={got.reshape(-1)[:min(32, got.size)]}")
     if op == "globalavg":
       print(f"NPU decoded={decoded.reshape(-1)[:min(32, decoded.size)]}")
@@ -349,12 +363,13 @@ def run_pool(op):
     os.close(fd)
 
 
-def run_pool_fresh_process(op, attempts=POOL_SUBMIT_ATTEMPTS):
+def run_pool_fresh_process(op, in_h=4, in_w=4, attempts=POOL_SUBMIT_ATTEMPTS):
   env = os.environ.copy()
   env[POOL_RETRY_ENV] = "1"
   results = []
   for _ in range(attempts):
-    proc = subprocess.run([sys.executable, __file__, "--submit", "--op", op],
+    proc = subprocess.run([sys.executable, __file__, "--submit", "--op", op,
+                           "--height", str(in_h), "--width", str(in_w)],
                           env=env, check=False, text=True, capture_output=True)
     results.append(proc)
     if proc.returncode == 0:
@@ -374,23 +389,25 @@ def run_pool_fresh_process(op, attempts=POOL_SUBMIT_ATTEMPTS):
 def main():
   parser = argparse.ArgumentParser(description="Dry-run RK3588 PPU pool register streams from experimental/rknnops.h")
   parser.add_argument("--op", choices=POOL_OPS + ("all",), default="all")
+  parser.add_argument("--height", type=int, default=4)
+  parser.add_argument("--width", type=int, default=4)
   parser.add_argument("--submit", action="store_true", help="run one pool register stream on the NPU")
   args = parser.parse_args()
 
   if args.submit:
     if os.environ.get(POOL_RETRY_ENV) == "1":
-      return run_pool(args.op)
+      return run_pool(args.op, args.height, args.width)
     if args.op == "all":
       rc = 0
       for op in POOL_OPS:
-        rc |= run_pool_fresh_process(op)
+        rc |= run_pool_fresh_process(op, args.height, args.width)
       return rc
-    return run_pool_fresh_process(args.op)
+    return run_pool_fresh_process(args.op, args.height, args.width)
 
   ops = POOL_OPS if args.op == "all" else (args.op,)
   print("Pool dry run only: no /dev/dri open, no ioctl, no submit")
   for op in ops:
-    regs = pooling_regs(op)
+    regs = pooling_regs(op, in_h=args.height, in_w=args.width)
     print(f"op={op} reg_count={len(regs)}")
     print("first_regs:")
     for value in regs[:6]: print(f"  0x{value:016x}")
