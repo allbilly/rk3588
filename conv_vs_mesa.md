@@ -230,14 +230,16 @@ It also records Mesa-like values in `compute_conv2d_params()`:
 - `pad_con1`
 - `weights_banks`
 
-However, the current passing path intentionally disables direct spatial tiling:
+By default, the current passing path still disables direct spatial tiling:
 
 ```python
 needs_spatial_tiling = False
 needs_spatial_decomposition = not is_1x1
 ```
 
-That means `conv_mesa.py` currently keeps the Mesa-inspired calculations and the experimental tiling function in the file, but it uses the same stable decomposition route as `conv.py` for non-`1x1` tests.
+That means normal `conv_mesa.py` runs keep the Mesa-inspired calculations and experimental tiling function in the file, but use the same stable decomposition route as `conv.py` for non-`1x1` tests.
+
+There is now an opt-in direct-spatial path behind `CONV_MESA_DIRECT=1`. It is guarded by a shape allowlist and only bypasses decomposition for shapes that have passed board-side NumPy comparison. `CONV_MESA_DIRECT_ALL=1` exists only as an unsafe exploration override for testing candidate shapes.
 
 This is deliberate. The direct spatial tiling path produced full but sometimes numerically mismatched output for some non-`1x1` shapes. The stable route is to keep it disabled until full PC chaining and direct spatial register parity are implemented.
 
@@ -361,11 +363,19 @@ This approximates Mesa's `rkt_split_tasks()`, but it is not equivalent because:
 - it does not use weight reuse through `CNA_CBUF_CON0_WEIGHT_REUSE`
 - it still relies on repeated standalone Python submits
 
-Current routing keeps it disabled:
+Default routing keeps it disabled:
 
 ```python
 needs_spatial_tiling = False
 ```
+
+Opt-in routing can use direct spatial for allowlisted shapes with:
+
+```bash
+CONV_MESA_DIRECT=1 python /home/orangepi/rk3588/test/test_conv_mesa.py --submit
+```
+
+As of this note, direct spatial is verified for small `ic=1/3, oc=6` spatial kernels, grouped `3->6 g=3 3x3`, and `4->4 3x3 9x9`. Larger regular conv, several mismatched-channel kernels, depthwise spatial, and high-channel spatial still fall back to decomposition.
 
 ### PAD_CON1 Difference
 
@@ -387,10 +397,10 @@ Mesa's direct convolution path is a coordinated system:
 
 `conv_mesa.py` currently has only part of that system. It can estimate slice sizes and perform software stitching, but it does not yet reproduce Mesa's exact multi-task command chain.
 
-Until that is implemented, the robust path is:
+Until full direct-spatial parity is implemented, the robust default path is:
 
 - use direct pointwise hardware for `1x1`
-- decompose non-`1x1` into exact `1x1` submits
+- decompose non-allowlisted non-`1x1` into exact `1x1` submits
 - keep the Mesa tiling code as scaffolding, disabled by default
 
 ## Next Implementation Step
