@@ -17,6 +17,8 @@ def main() -> int:
         "absolute",
         "--descriptor-amount",
         "segment",
+        "--segment-elements",
+        "4096",
         *sys.argv[1:],
     ]
     return subprocess.call(cmd, cwd=str(ROOT))

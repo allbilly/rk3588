@@ -98,19 +98,20 @@ def regcmd(target, addr, value):
     return (target << 48) | ((value & 0xFFFFFFFF) << 16) | addr
 
 
-def add_body(input_dma, weight_dma, output_dma):
+def add_body(input_dma, weight_dma, output_dma, elements):
+    width = (elements + 7) // 8 - 1
     return [
         0x10010000000e4004,
         0x1001000001e5400c,
         0x1001480000024010,
-        0x100100070007403c,
-        0x1001000000004030,
+        regcmd(TARGET_DPU, 0x403c, 0x00070007),
+        regcmd(TARGET_DPU, 0x4030, width),
         0x1001108202c04070,
         0x1001000100014084,
         0x20010000000e5004,
-        0x200100000000500c,
+        regcmd(TARGET_RDMA, 0x500c, width),
         0x2001000000005010,
-        0x2001000700075014,
+        0x2001000000075014,
         0x2001400000085034,
         regcmd(TARGET_DPU, 0x4020, output_dma),
         regcmd(TARGET_RDMA, 0x5018, input_dma),
@@ -187,10 +188,13 @@ def main():
         help="Allow official-style three-core submit. This is not used for PC-chain bring-up because it can race/lock this kernel.",
     )
     parser.add_argument("--pc-op-enable", type=lambda x: int(x, 0), default=0x18)
-    parser.add_argument("--task-number", type=int, default=TASKS)
+    parser.add_argument("--task-number", type=int, default=SEGMENTS)
     parser.add_argument("--timeout", type=int, default=6000)
     parser.add_argument("--descriptor-amount", choices=("body", "segment"), default="body")
+    parser.add_argument("--segment-elements", type=int, default=8, help="FP16 values per chained ADD segment.")
     args = parser.parse_args()
+    if args.segment_elements <= 0 or args.segment_elements % 8:
+        raise ValueError("--segment-elements must be a positive multiple of 8")
     if args.mode != "core0" and not args.allow_unsafe_submit:
         raise RuntimeError("Refusing non-core0 PC-chain submit. Use --allow-unsafe-submit only with physical reset access.")
     fixed_amounts = None
@@ -203,9 +207,11 @@ def main():
     try:
         task_map, task_mc = mem_allocate(fd, 1024, RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
         regcmd_map, regcmd_mc = mem_allocate(fd, SEGMENTS * REG_BLOCK_QWORDS * ctypes.sizeof(ctypes.c_uint64), RKNPU_MEM_NON_CACHEABLE)
-        input_map, input_mc = mem_allocate(fd, SEGMENTS * 4096, RKNPU_MEM_NON_CACHEABLE)
-        weight_map, weight_mc = mem_allocate(fd, SEGMENTS * 4096, RKNPU_MEM_NON_CACHEABLE)
-        output_map, output_mc = mem_allocate(fd, SEGMENTS * 4096, RKNPU_MEM_NON_CACHEABLE)
+        byte_stride = max(4096, args.segment_elements * ctypes.sizeof(ctypes.c_uint16))
+        elem_stride = byte_stride // ctypes.sizeof(ctypes.c_uint16)
+        input_map, input_mc = mem_allocate(fd, SEGMENTS * byte_stride, RKNPU_MEM_NON_CACHEABLE)
+        weight_map, weight_mc = mem_allocate(fd, SEGMENTS * byte_stride, RKNPU_MEM_NON_CACHEABLE)
+        output_map, output_mc = mem_allocate(fd, SEGMENTS * byte_stride, RKNPU_MEM_NON_CACHEABLE)
 
         regs = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
         tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(rknpu_task))
@@ -215,15 +221,17 @@ def main():
 
         body_len = None
         for task_idx, (aval, bval) in enumerate(VALUES):
-            for i in range(8):
-                inputs[task_idx * 2048 + i] = aval
-                weights[task_idx * 2048 + i] = bval
-                outputs[task_idx * 2048 + i] = 0
+            base_elem = task_idx * elem_stride
+            for i in range(args.segment_elements):
+                inputs[base_elem + i] = aval
+                weights[base_elem + i] = bval
+                outputs[base_elem + i] = 0
 
             body = add_body(
-                input_mc.dma_addr + task_idx * 4096,
-                weight_mc.dma_addr + task_idx * 4096,
-                output_mc.dma_addr + task_idx * 4096,
+                input_mc.dma_addr + task_idx * byte_stride,
+                weight_mc.dma_addr + task_idx * byte_stride,
+                output_mc.dma_addr + task_idx * byte_stride,
+                args.segment_elements,
             )
             body_len = len(body)
             segment = body + pc_tail(
@@ -256,15 +264,19 @@ def main():
                 tasks[task_idx].regcmd_addr = regcmd_mc.dma_addr + base * ctypes.sizeof(ctypes.c_uint64)
 
         ret = submit(fd, task_mc.obj_addr, args.flags, args.timeout, args.task_number, args.mode)
-        got = [[outputs[task_idx * 2048 + i] for i in range(8)] for task_idx in range(SEGMENTS)]
-        expected = [[a + b] * 8 for a, b in VALUES]
+        got = [
+            [outputs[task_idx * elem_stride + i] for i in range(args.segment_elements)]
+            for task_idx in range(SEGMENTS)
+        ]
+        expected = [[a + b] * args.segment_elements for a, b in VALUES]
         ok = ret == 0 and got == expected
         print(
             f"submit ret={ret} amount_style={args.amount_style} fixed_amount={args.fixed_amount} fixed_amounts={args.fixed_amounts} "
-            f"regcmd_mode={args.regcmd_mode} descriptor_amount={args.descriptor_amount} flags=0x{args.flags:x} mode={args.mode}"
+            f"regcmd_mode={args.regcmd_mode} descriptor_amount={args.descriptor_amount} "
+            f"segment_elements={args.segment_elements} flags=0x{args.flags:x} mode={args.mode}"
         )
-        print("got", got)
-        print("expected", expected)
+        print("got_head", [row[:16] for row in got])
+        print("expected_head", [row[:16] for row in expected])
         print("ADD RAWBUF PCCHAIN PASS" if ok else "ADD RAWBUF PCCHAIN FAIL")
         return 0 if ok else 1
     finally:
