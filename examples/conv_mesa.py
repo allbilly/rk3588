@@ -41,9 +41,32 @@ DPU_EW_BYPASS_CFG = 0x383
 CORE_RESERVED_ZERO_ADDR = 0x3030
 DPU_RESERVED_ZERO_ADDR = 0x40c4
 PC_OPERATION_ENABLE_VALUE = 0xD
+PC_TASK_COUNT_CLEAR = 1 << 12
+PC_TASK_NUMBER_MASK = 0xFFF
 
 DRY_RUN = "--submit" not in sys.argv
 VALIDATE = "--validate" in sys.argv
+DIRECT_SPATIAL = os.environ.get('CONV_MESA_DIRECT') == '1'
+DIRECT_SPATIAL_ALL = os.environ.get('CONV_MESA_DIRECT_ALL') == '1'
+DIRECT_CHAIN = os.environ.get('CONV_MESA_CHAIN') == '1'
+DUMP_REGS = os.environ.get('CONV_MESA_DUMP_REGS') == '1'
+EMIT_PAD_CON1 = os.environ.get('CONV_MESA_PAD_CON1') == '1'
+REG_BLOCK_QWORDS = 128
+DIRECT_SPATIAL_ALLOWLIST = {
+    (1, 6, 2, 1, (5, 7), 1),
+    (1, 6, 2, 3, (5, 7), 1),
+    (1, 6, 3, 1, (5, 7), 1),
+    (1, 6, 3, 3, (5, 7), 1),
+    (1, 6, 3, 5, (5, 7), 1),
+    (3, 6, 2, 1, (5, 7), 1),
+    (3, 6, 2, 3, (5, 7), 1),
+    (3, 6, 1, 3, (5, 5), 1),
+    (3, 6, 3, 1, (5, 7), 1),
+    (3, 6, 3, 3, (5, 7), 3),
+    (3, 6, 3, 3, (5, 7), 1),
+    (3, 6, 3, 5, (5, 7), 1),
+    (4, 4, 3, 3, (9, 9), 1),
+}
 
 fd = None
 
@@ -202,6 +225,116 @@ def _data_bank(width_stride, feature_grains, align_c):
     fd_bytes = width_stride * feature_grains * align_c * FP16_BYTES
     return max(1, min(NPU_CBUF_BANKS - RK_WEIGHT_BANK_MIN, ceil_div(fd_bytes, NPU_CBUF_BANK_SIZE)))
 
+
+def _calc_pad_con1(params, addition_input=False):
+    # Mirrors Mesa's CNA_PAD_CON1 selection rules; defaulted for FP16 path where
+    # zero points are conceptually neutral.
+    is_depthwise = params.get('is_depthwise', False)
+    input_zero_point = params.get('input_zero_point', 0x80)
+    if addition_input:
+        return 0xFFFFFF80
+    if params.get('kernel_w', 0) >= 3 and input_zero_point == 0x00:
+        return 0xFFFF8080
+    if is_depthwise and input_zero_point == 0x8B:
+        return 0x0B0B
+    if input_zero_point == 0x80:
+        return 0xFFFFFFFF
+    return int(input_zero_point) - 0x80
+
+
+def _packed_line_stride_channels(in_channels, width_stride, align_c):
+    # Byte stride between consecutive input feature rows in the local pack layout.
+    c_groups = max(1, ceil_div(in_channels, align_c))
+    return width_stride * c_groups * align_c * FP16_BYTES
+
+
+def _output_line_stride_bytes(params):
+    # Conservative output row stride used for output offsets and slice placements.
+    unpack_c2 = _output_unpack_c2(params)
+    return params['out_width_stride'] * unpack_c2 * FP16_BYTES
+
+
+def _calc_weight_banks(packed_weight_bytes):
+    # Mesa-style conservative rule: allocate one extra bank for safety.
+    entries = ceil_div(packed_weight_bytes, CBUF_ENTRY_BYTES)
+    return ceil_div(entries, CBUF_ENTRIES_PER_BANK) + 1
+
+
+def _calc_slice_budget_in_rows(params, packed_weight_bytes):
+    # Estimate max input rows that can fit in CBUF with current hardware budget.
+    line_bytes = _packed_line_stride_channels(params['in_channels'], params['width_stride'], params['align_c'])
+    if line_bytes <= 0:
+        return params['in_h']
+
+    weight_banks = _calc_weight_banks(packed_weight_bytes)
+    if weight_banks + 1 < NPU_CBUF_BANKS:
+        available_input_banks = max(1, NPU_CBUF_BANKS - weight_banks)
+    else:
+        # Partial weights path in Mesa uses fixed 7 input banks.
+        available_input_banks = 7
+
+    max_rows = (available_input_banks * NPU_CBUF_BANK_SIZE) // line_bytes
+    if max_rows < params['kernel_h']:
+        return params['kernel_h']
+    return min(params['in_h'], max_rows)
+
+
+def _line_offset_bytes(params, row):
+    return _packed_line_stride_channels(params['in_channels'], params['width_stride'], params['align_c']) * row
+
+
+def _plan_split_tasks(params, packed_weight_bytes):
+    weight_banks = min(NPU_CBUF_BANKS - 1, max(1, _calc_weight_banks(packed_weight_bytes)))
+    reuse_weights = weight_banks + 1 < NPU_CBUF_BANKS
+    available_input_banks = max(1, NPU_CBUF_BANKS - weight_banks) if reuse_weights else 7
+    line_bytes = _packed_line_stride_channels(params['in_channels'], params['width_stride'], params['align_c'])
+    max_input_rows = params['in_h'] if line_bytes <= 0 else max(params['kernel_h'], (available_input_banks * NPU_CBUF_BANK_SIZE) // line_bytes)
+    max_input_rows = min(params['in_h'], max_input_rows)
+
+    if max_input_rows >= params['in_h']:
+        return [{
+            'task_index': 0,
+            'input_top': 0,
+            'input_height': params['in_h'],
+            'output_top': 0,
+            'output_height': params['out_h'],
+            'input_offset_bytes': 0,
+            'output_offset_bytes': 0,
+            'input_banks': params['data_bank'],
+            'weights_banks': weight_banks,
+            'weight_reuse': False,
+        }]
+
+    tasks_out = []
+    step_out_rows = max(1, max_input_rows - params['kernel_h'] + 1)
+    out_row = 0
+    while out_row < params['out_h']:
+        output_height = min(step_out_rows, params['out_h'] - out_row)
+        input_top = out_row
+        input_height = output_height + params['kernel_h'] - 1
+        if input_top + input_height > params['in_h']:
+            input_height = params['in_h'] - input_top
+            output_height = max(1, input_height - params['kernel_h'] + 1)
+        slice_params = dict(params)
+        slice_params['in_h'] = input_height
+        slice_params['out_h'] = output_height
+        feature_grains = _feature_grains(input_height, params['kernel_h'], params['width_stride'], params['align_c'])
+        input_banks = max(1, min(available_input_banks, _data_bank(params['width_stride'], feature_grains, params['align_c'])))
+        tasks_out.append({
+            'task_index': len(tasks_out),
+            'input_top': input_top,
+            'input_height': input_height,
+            'output_top': out_row,
+            'output_height': output_height,
+            'input_offset_bytes': _line_offset_bytes(params, input_top),
+            'output_offset_bytes': _output_line_stride_bytes(params) * out_row,
+            'input_banks': input_banks,
+            'weights_banks': weight_banks,
+            'weight_reuse': reuse_weights and len(tasks_out) > 0,
+        })
+        out_row += output_height
+    return tasks_out
+
 if not DRY_RUN:
     fd = os.open("/dev/dri/card1", os.O_RDWR)
     task_map, task_mc = mem_allocate(fd, 1024, RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
@@ -241,7 +374,7 @@ def _is_kh_major(out_c, in_c, kh, kw, groups):
     is_small_head = out_c == 6 and in_c in (1, 3)
     is_small_odd_width_kernel = 1 <= kh <= 3 and kw % 2 == 1 and kw <= 5 and kh * kw > 1
     single_input_spatial = is_small_head and in_c == 1 and groups == 1 and is_small_odd_width_kernel and not (kh == 2 and kw == 5)
-    three_input_spatial = is_small_head and in_c == 3 and kh == 3 and kw % 2 == 1 and kw <= 5
+    three_input_spatial = is_small_head and in_c == 3 and kh in (1, 3) and kw % 2 == 1 and kw <= 5
     three_input_2x = is_small_head and in_c == 3 and kh == 2 and (kw == 1 or (groups == 1 and kw % 2 == 1 and kw <= 5))
     square_small_spatial = groups == 1 and out_c == in_c and in_c in (4, 16) and kh == 3 and kw == 3
     return single_input_spatial or three_input_spatial or three_input_2x or square_small_spatial
@@ -309,6 +442,74 @@ def _target(addr):
     if 0x4000 <= addr < 0x5000: return rk.DPU | 0x1
     if addr < 0x1000: return addr | 0x1
     raise ValueError(f"Unknown address 0x{addr:x}")
+
+
+REG_NAMES = {
+    rk.REG_PC_OPERATION_ENABLE: 'PC_OPERATION_ENABLE',
+    rk.REG_PC_BASE_ADDRESS: 'PC_BASE_ADDRESS',
+    rk.REG_PC_REGISTER_AMOUNTS: 'PC_REGISTER_AMOUNTS',
+    rk.REG_CNA_CONV_CON1: 'CNA_CONV_CON1',
+    rk.REG_CNA_CONV_CON2: 'CNA_CONV_CON2',
+    rk.REG_CNA_DATA_SIZE0: 'CNA_DATA_SIZE0',
+    rk.REG_CNA_DATA_SIZE1: 'CNA_DATA_SIZE1',
+    rk.REG_CNA_DATA_SIZE2: 'CNA_DATA_SIZE2',
+    rk.REG_CNA_DATA_SIZE3: 'CNA_DATA_SIZE3',
+    rk.REG_CNA_WEIGHT_SIZE0: 'CNA_WEIGHT_SIZE0',
+    rk.REG_CNA_WEIGHT_SIZE1: 'CNA_WEIGHT_SIZE1',
+    rk.REG_CNA_WEIGHT_SIZE2: 'CNA_WEIGHT_SIZE2',
+    rk.REG_CNA_CBUF_CON0: 'CNA_CBUF_CON0',
+    rk.REG_CNA_CBUF_CON1: 'CNA_CBUF_CON1',
+    rk.REG_CNA_PAD_CON1: 'CNA_PAD_CON1',
+    rk.REG_CNA_FEATURE_DATA_ADDR: 'CNA_FEATURE_DATA_ADDR',
+    rk.REG_CNA_DMA_CON1: 'CNA_DMA_CON1',
+    rk.REG_CNA_DMA_CON2: 'CNA_DMA_CON2',
+    rk.REG_CNA_FC_DATA_SIZE0: 'CNA_FC_DATA_SIZE0',
+    rk.REG_CNA_DCOMP_ADDR0: 'CNA_DCOMP_ADDR0',
+    rk.REG_CORE_MISC_CFG: 'CORE_MISC_CFG',
+    rk.REG_CORE_DATAOUT_SIZE_0: 'CORE_DATAOUT_SIZE_0',
+    rk.REG_CORE_DATAOUT_SIZE_1: 'CORE_DATAOUT_SIZE_1',
+    rk.REG_DPU_DST_BASE_ADDR: 'DPU_DST_BASE_ADDR',
+    rk.REG_DPU_DST_SURF_STRIDE: 'DPU_DST_SURF_STRIDE',
+    rk.REG_DPU_DATA_CUBE_WIDTH: 'DPU_DATA_CUBE_WIDTH',
+    rk.REG_DPU_DATA_CUBE_HEIGHT: 'DPU_DATA_CUBE_HEIGHT',
+    rk.REG_DPU_DATA_CUBE_CHANNEL: 'DPU_DATA_CUBE_CHANNEL',
+    rk.REG_DPU_WDMA_SIZE_0: 'DPU_WDMA_SIZE_0',
+    rk.REG_DPU_WDMA_SIZE_1: 'DPU_WDMA_SIZE_1',
+    rk.REG_DPU_SURFACE_ADD: 'DPU_SURFACE_ADD',
+}
+
+
+def _target_name(target):
+    return {0x0201: 'CNA', 0x0801: 'CORE', 0x1001: 'DPU', 0x0081: 'PC'}.get(target, f'0x{target:04x}')
+
+
+def _decode_reg(addr, value):
+    if addr == rk.REG_CNA_CBUF_CON0:
+        return f"data_banks={value & 0xf} weight_banks={(value >> 4) & 0xf} fc_data_bank={(value >> 8) & 0x7} data_reuse={(value >> 12) & 1} weight_reuse={(value >> 13) & 1}"
+    if addr == rk.REG_CNA_CONV_CON1:
+        return f"mode={value & 0xf} in_prec={(value >> 4) & 0x7} proc_prec={(value >> 7) & 0x7} argb_in={(value >> 12) & 0xf} group_line_off={(value >> 29) & 1} nonalign_dma={(value >> 30) & 1}"
+    if addr == rk.REG_CNA_DATA_SIZE0:
+        return f"height={value & 0x7ff} width={(value >> 16) & 0x7ff}"
+    if addr == rk.REG_CNA_DATA_SIZE1:
+        return f"channel={value & 0xffff} real={(value >> 16) & 0x3fff}"
+    if addr == rk.REG_CNA_WEIGHT_SIZE2:
+        return f"kernels={value & 0x3fff} kh={(value >> 16) & 0x1f} kw={(value >> 24) & 0x1f}"
+    if addr in (rk.REG_CORE_DATAOUT_SIZE_0, rk.REG_DPU_WDMA_SIZE_1):
+        return f"width={value & 0xffff} height={(value >> 16) & 0xffff}"
+    if addr == rk.REG_DPU_DATA_CUBE_CHANNEL:
+        return f"channel={value & 0x1fff} orig={(value >> 16) & 0x1fff}"
+    if addr == rk.REG_PC_REGISTER_AMOUNTS:
+        return f"pc_data_amount={value & 0xffff}"
+    return ''
+
+
+def dump_regs(label, regs_list):
+    print(f"\n=== {label} ({len(regs_list)} regs) ===")
+    for i, (target, value, addr) in enumerate(regs_list):
+        name = REG_NAMES.get(addr, f'0x{addr:04x}')
+        decoded = _decode_reg(addr, value)
+        suffix = f"  # {decoded}" if decoded else ''
+        print(f"  [{i:3d}] {_target_name(target):4s}[0x{addr:04x}] {name:28s} = 0x{value:08x}{suffix}")
 
 
 def _pack_depthwise_expanded_weights_fp16(weight_ochw, out_channels, ic_per_group, kh, kw, packed_weight_size):
@@ -392,6 +593,28 @@ def _write_task_descriptor(regs_list):
     tasks[0].regcmd_addr = cmd_mc.dma_addr
 
 
+def _write_chained_task_descriptor(reg_segments):
+    for task_idx in range(len(reg_segments)):
+        block_qword = task_idx * REG_BLOCK_QWORDS
+        for i in range(REG_BLOCK_QWORDS):
+            regs_ptr[block_qword + i] = 0
+        regs = reg_segments[task_idx]
+        if len(regs) > REG_BLOCK_QWORDS:
+            raise ValueError(f"reg segment {task_idx} has {len(regs)} regs, block holds {REG_BLOCK_QWORDS}")
+        for i, (target, value, addr) in enumerate(regs):
+            regs_ptr[block_qword + i] = emit(target, value, addr)
+
+    tasks[0].flags = 0
+    tasks[0].op_idx = 1
+    tasks[0].enable_mask = 0xd
+    tasks[0].int_mask = 0x300
+    tasks[0].int_clear = 0x1ffff
+    tasks[0].int_status = 0
+    tasks[0].regcfg_amount = len(reg_segments[0])
+    tasks[0].regcfg_offset = 0
+    tasks[0].regcmd_addr = cmd_mc.dma_addr
+
+
 def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1):
     batch, in_h, in_w = 1, input_hw[0], input_hw[1]
     weight_in_channels = in_channels // groups if groups > 0 else in_channels
@@ -440,6 +663,9 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
     # RK DPU surface_add is in output formatter groups of 8 FP16 values; not a
     # local NVDLA CACC constant.
     surface_add = out_width_stride * (effective_align_out // RK_DPU_OUTPUT_GROUP)
+
+    # Pad constant used by RK's CNA_PAD_CON1.
+    pad_con1 = _calc_pad_con1({'kernel_w': kernel_w, 'is_depthwise': is_depthwise, 'input_zero_point': 0x80})
     return {
         'batch': batch, 'in_channels': in_channels, 'out_channels': out_channels,
         'kernel_h': kernel_h, 'kernel_w': kernel_w, 'input_hw': input_hw, 'groups': groups,
@@ -456,12 +682,54 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
         'use_pixel_mode': use_pixel_mode, 'line_stride': line_stride,
         'surf_stride': surf_stride, 'cvt_mask': cvt_mask,
         'cbuf_entries': cbuf_entries, 'data_bank': data_bank,
-        'surface_add': surface_add,
+        'surface_add': surface_add, 'pad_con1': pad_con1,
+        'weights_banks': _calc_weight_banks(
+            ceil_div(out_channels, 1) * kernel_h * kernel_w * align_up_int(weight_in_channels, align_c) * FP16_BYTES),
     }
 
 
-def build_conv2d_regs(params, input_dma=0, weights_dma=0, output_dma=0):
-    p = params
+def _task_params(params, split_task):
+    if split_task is None:
+        return params
+    p = dict(params)
+    p['in_h'] = split_task['input_height']
+    p['out_h'] = split_task['output_height']
+    p['out_atoms'] = max(1, p['out_w'] * p['out_h'])
+    p['feature_grains'] = _feature_grains(p['in_h'], p['kernel_h'], p['width_stride'], p['align_c'])
+    p['cbuf_entries'] = _cbuf_entries(p['width_stride'], p['align_c'], p['in_h'], p['is_depthwise'])
+    p['data_bank'] = split_task['input_banks']
+    p['weights_banks'] = split_task['weights_banks']
+    p['weight_reuse'] = split_task['weight_reuse']
+    p['mesa_cbuf_con0'] = True
+    p['surface_add'] = _output_width_stride(
+        p['in_channels'], p['out_channels'], p['kernel_h'], p['kernel_w'],
+        p['groups'], p['out_h'], p['out_w'], p['align_out_c']) * ((p['out_channel_field'] + 1) // RK_DPU_OUTPUT_GROUP)
+    return p
+
+
+def _cbuf_con0(params):
+    if not params.get('mesa_cbuf_con0', False):
+        return ((NPU_CBUF_BANKS - params['data_bank']) << 4) | params['data_bank']
+    weight_banks = params.get('weights_banks', NPU_CBUF_BANKS - params['data_bank'])
+    value = ((weight_banks & 0xf) << 4) | (params['data_bank'] & 0xf)
+    if params.get('weight_reuse', False):
+        value |= 1 << 13
+    return value
+
+
+def _pc_base_address_value(regcmd_dma):
+    return regcmd_dma & 0xFFFFFFF0
+
+
+def _mesa_pc_data_amount(reg_count):
+    return align_up_int((reg_count - 4) // 2, 2)
+
+
+def build_conv2d_regs(params, input_dma=0, weights_dma=0, output_dma=0, split_task=None,
+                      pc_next_dma=None, pc_next_regs=None):
+    input_offset = split_task['input_offset_bytes'] if split_task else 0
+    output_offset = split_task['output_offset_bytes'] if split_task else 0
+    p = _task_params(params, split_task)
     regs = []
     def E(addr, val): regs.append((_target(addr), val, addr))
 
@@ -491,12 +759,12 @@ def build_conv2d_regs(params, input_dma=0, weights_dma=0, output_dma=0):
     wk = p['weight_kernels']
     if wk == 0: wk = p['out_channels']
     E(rk.REG_CNA_WEIGHT_SIZE2, (p['kernel_w'] << 24) | (p['kernel_h'] << 16) | wk)
-    E(rk.REG_CNA_CBUF_CON0, ((NPU_CBUF_BANKS - p['data_bank']) << 4) | p['data_bank'])
+    E(rk.REG_CNA_CBUF_CON0, _cbuf_con0(p))
     E(rk.REG_CNA_CBUF_CON1, p['cbuf_entries'])
     E(rk.REG_CNA_CVT_CON0, 0xB if not p['use_nhwc'] else 0x1)
     for a in [rk.REG_CNA_CVT_CON1, rk.REG_CNA_CVT_CON2, rk.REG_CNA_CVT_CON3, rk.REG_CNA_CVT_CON4]:
         E(a, 1 << 16)
-    E(rk.REG_CNA_FEATURE_DATA_ADDR, input_dma & 0xFFFFFFFF)
+    E(rk.REG_CNA_FEATURE_DATA_ADDR, (input_dma + input_offset) & 0xFFFFFFFF)
     E(rk.REG_CNA_DMA_CON0, (15 << 16) | 15)
     E(rk.REG_CNA_DMA_CON1, p['line_stride'])
     E(rk.REG_CNA_DMA_CON2, p['surf_stride'])
@@ -504,6 +772,8 @@ def build_conv2d_regs(params, input_dma=0, weights_dma=0, output_dma=0):
     E(rk.REG_CNA_FC_DATA_SIZE1, p['align_c'])
     E(rk.REG_CNA_DCOMP_ADDR0, (weights_dma + REGCMD_RESERVED) & 0xFFFFFFFF)
     E(rk.REG_CNA_CVT_CON5, p['cvt_mask'])
+    if EMIT_PAD_CON1:
+        E(rk.REG_CNA_PAD_CON1, p['pad_con1'])
     core = (2 << 8)
     if p['is_depthwise']: core |= (1 << 1)
     if p['kernel_h'] > 1 or p['kernel_w'] > 1: core |= (1 << 0)
@@ -515,7 +785,7 @@ def build_conv2d_regs(params, input_dma=0, weights_dma=0, output_dma=0):
     if p['is_depthwise']: dpu_fmc |= (3 << 3)
     E(rk.REG_DPU_FEATURE_MODE_CFG, dpu_fmc)
     E(rk.REG_DPU_DATA_FORMAT, (2 << 29) | (2 << 26) | 2)
-    E(rk.REG_DPU_DST_BASE_ADDR, output_dma & 0xFFFFFFFF)
+    E(rk.REG_DPU_DST_BASE_ADDR, (output_dma + output_offset) & 0xFFFFFFFF)
     E(rk.REG_DPU_DST_SURF_STRIDE, p['out_width_stride'] << 4)
     E(rk.REG_DPU_DATA_CUBE_WIDTH, p['out_w'] - 1)
     E(rk.REG_DPU_DATA_CUBE_HEIGHT, p['out_h'] - 1)
@@ -531,6 +801,9 @@ def build_conv2d_regs(params, input_dma=0, weights_dma=0, output_dma=0):
     E(rk.REG_DPU_OUT_CVT_SCALE, (1 << 16) | 1)
     E(rk.REG_DPU_SURFACE_ADD, p['surface_add'] << 4)
     regs.append((0x1, 0, DPU_RESERVED_ZERO_ADDR))
+    if pc_next_dma is not None and pc_next_regs is not None:
+        regs.append((0x81, _pc_base_address_value(pc_next_dma), rk.REG_PC_BASE_ADDRESS))
+        regs.append((0x81, _mesa_pc_data_amount(pc_next_regs), rk.REG_PC_REGISTER_AMOUNTS))
     regs.append((0x81, PC_OPERATION_ENABLE_VALUE, rk.REG_PC_OPERATION_ENABLE))
     return regs
 
@@ -560,6 +833,8 @@ def _npu_submit(params, input_nchw, weight_ochw, is_1x1, log_submit=True):
 
     regs_list = build_conv2d_regs(params, in_mc.dma_addr, wt_mc.dma_addr, out_mc.dma_addr)
     _verify_config(regs_list)
+    if DUMP_REGS:
+        dump_regs('CONV_MESA SUBMIT', regs_list)
     for i, (t, v, a) in enumerate(regs_list): regs_ptr[i] = emit(t, v, a)
     _write_task_descriptor(regs_list)
 
@@ -630,6 +905,129 @@ def _run_depthwise_channel_sliced(channels, kernel_h, kernel_w, input_hw, is_1x1
         )
     return result, full_in, full_wt
 
+
+def _run_conv2d_spatial_tiled(in_channels, out_channels, kernel_h, kernel_w, input_hw,
+                              weight_ochw, groups, input_nchw=None):
+    # CBUF-aware vertical tiling: split input height into overlapped slices and
+    # submit one NPU task per slice, then stitch outputs by row order.
+    batch, in_h, in_w = 1, input_hw[0], input_hw[1]
+    full_out_h = in_h - kernel_h + 1
+    if full_out_h <= 0:
+        raise ValueError(f"invalid out_h for kernel {kernel_h}x{kernel_w} on input {in_h}")
+
+    if input_nchw is None:
+        np.random.seed(42)
+        input_nchw = np.random.randn(batch, in_channels, in_h, in_w).astype(np.float16)
+    weight_ochw = weight_ochw.astype(np.float16, copy=False)
+
+    result = np.zeros((batch, out_channels, full_out_h, in_w - kernel_w + 1), dtype=np.float16)
+    base_params = compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups)
+    _, packed_weight_size, _ = _packed_sizes(base_params)
+    max_rows = _calc_slice_budget_in_rows(base_params, packed_weight_size)
+    if max_rows >= in_h:
+        # Single task; keep existing fast path behavior.
+        full_result = _npu_submit(base_params, input_nchw.reshape(-1), weight_ochw.reshape(-1), False)
+        result[:] = full_result[:, :, :full_out_h, :]
+        return result, input_nchw, weight_ochw
+
+    # output rows produced by each slice when stepping by `step_rows`.
+    step_rows = max(1, max_rows - kernel_h + 1)
+    out_h_total = full_out_h
+    out_w = in_w - kernel_w + 1
+
+    for start_out_row in range(0, out_h_total, step_rows):
+        rows_for_slice = min(step_rows, out_h_total - start_out_row)
+        slice_in_top = start_out_row
+        slice_in_h = rows_for_slice + kernel_h - 1
+        slice_in_bottom = min(in_h, slice_in_top + slice_in_h)
+        slice_in_h = slice_in_bottom - slice_in_top
+
+        if slice_in_h <= 0:
+            continue
+
+        inp_slice = np.zeros((batch, in_channels, slice_in_h, in_w), dtype=np.float16)
+        inp_slice[:] = input_nchw[:, :, slice_in_top:slice_in_bottom]
+
+        p_slice = compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, (slice_in_h, in_w), groups)
+        part = _npu_submit(p_slice, inp_slice.reshape(-1), weight_ochw.reshape(-1), False, log_submit=False)
+
+        keep_h = min(rows_for_slice, part.shape[2], result.shape[2] - start_out_row)
+        if keep_h <= 0:
+            continue
+
+        if part.shape[2] != keep_h:
+            # Keep conservative shape handling if a backend quirk changes rows.
+            keep_h = min(keep_h, part.shape[2])
+        if groups == 1:
+            result[:, :, start_out_row:start_out_row + keep_h, :part.shape[3]] = part[:, :, :keep_h]
+        else:
+            # Grouped paths keep per-group channel offsets in software.
+            oc_per_group = out_channels // groups
+            for g in range(groups):
+                g_oc_s = g * oc_per_group
+                g_oc_e = g_oc_s + oc_per_group
+                result[:, g_oc_s:g_oc_e, start_out_row:start_out_row + keep_h, :out_w] = part[:, g_oc_s:g_oc_e, :keep_h]
+
+    return result, input_nchw, weight_ochw
+
+
+def _npu_submit_direct_spatial(params, input_nchw, weight_ochw, log_submit=True):
+    packed_input_size, packed_weight_size, packed_output_size = _packed_sizes(params)
+    reset_npu(fd)
+
+    input_packed = pack_nc1hwc2_fp16(
+        input_nchw, params['batch'], params['in_channels'], params['in_h'], params['in_w'],
+        params['align_c'], params['width_stride'], out_c=params['out_channels'],
+        kh=params['kernel_h'], kw=params['kernel_w'], groups=params.get('groups', 1),
+        use_nhwc=params['use_nhwc'])
+    params, weight_packed, packed_weight_size = _pack_weights_for_submit(params, weight_ochw, packed_weight_size)
+
+    split_tasks = _plan_split_tasks(params, packed_weight_size)
+    in_view = memoryview(bytearray(input_packed.tobytes()))
+    wt_view = memoryview(bytearray(weight_packed.tobytes()))
+    ctypes.memmove(mv_address(in_map), mv_address(in_view), min(packed_input_size, len(in_view)))
+    wt_ptr = ctypes.addressof(ctypes.c_char.from_buffer(wt_map))
+    ctypes.memmove(wt_ptr + REGCMD_RESERVED, mv_address(wt_view), min(packed_weight_size, len(wt_view)))
+
+    if len(split_tasks) == 1 or not DIRECT_CHAIN:
+        regs_list = build_conv2d_regs(params, in_mc.dma_addr, wt_mc.dma_addr, out_mc.dma_addr, split_task=split_tasks[0])
+        _verify_config(regs_list)
+        if DUMP_REGS:
+            dump_regs('CONV_MESA DIRECT TASK 0', regs_list)
+        for i, (t, v, a) in enumerate(regs_list):
+            regs_ptr[i] = emit(t, v, a)
+        _write_task_descriptor(regs_list)
+    else:
+        base_regs = [build_conv2d_regs(params, in_mc.dma_addr, wt_mc.dma_addr, out_mc.dma_addr, split_task=t) for t in split_tasks]
+        reg_segments = []
+        for task_idx, task_regs in enumerate(base_regs):
+            next_dma = cmd_mc.dma_addr + (task_idx + 1) * REG_BLOCK_QWORDS * ctypes.sizeof(ctypes.c_uint64)
+            next_count = len(base_regs[task_idx + 1]) + 2 if task_idx + 1 < len(base_regs) else None
+            regs = build_conv2d_regs(
+                params, in_mc.dma_addr, wt_mc.dma_addr, out_mc.dma_addr,
+                split_task=split_tasks[task_idx],
+                pc_next_dma=next_dma if task_idx + 1 < len(base_regs) else None,
+                pc_next_regs=next_count)
+            _verify_config(regs)
+            reg_segments.append(regs)
+            if DUMP_REGS:
+                dump_regs(f'CONV_MESA DIRECT CHAIN TASK {task_idx}', regs)
+        _write_chained_task_descriptor(reg_segments)
+
+    mem_sync(fd, wt_mc.obj_addr, 0, wt_alloc, RKNPU_MEM_SYNC_TO_DEVICE)
+    if data_is_cacheable:
+        mem_sync(fd, in_mc.obj_addr, 0, packed_input_size, RKNPU_MEM_SYNC_TO_DEVICE)
+        mem_sync(fd, out_mc.obj_addr, 0, packed_output_size, RKNPU_MEM_SYNC_TO_DEVICE)
+
+    ret = submit(task_mc.obj_addr)
+    if log_submit:
+        print(f"SUBMIT ret={ret}")
+
+    if data_is_cacheable:
+        mem_sync(fd, out_mc.obj_addr, 0, packed_output_size, RKNPU_MEM_SYNC_FROM_DEVICE)
+    out_packed = np.frombuffer(out_map, dtype=np.float16, count=packed_output_size // 2).copy()
+    return _unpack_output(params, out_packed, False)
+
 def _npu_submit_single_input_pointwise(input_1c, weight_ochw):
     batch, _, height, width = input_1c.shape
     out_channels = weight_ochw.shape[0]
@@ -690,18 +1088,25 @@ def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1
     needs_1x1_channel_slicing = is_1x1 and in_channels > MAX_PIXEL_DMA_CHANNELS and not pad_to_c and groups == 1
     p = compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups)
     needs_depthwise_slicing = p['is_depthwise'] and in_channels > DEPTHWISE_SLICE_CHANNELS
-    needs_spatial_decomposition = not is_1x1
+    shape_key = (in_channels, out_channels, kernel_h, kernel_w, input_hw, groups)
+    needs_spatial_tiling = DIRECT_SPATIAL and not is_1x1 and (DIRECT_SPATIAL_ALL or shape_key in DIRECT_SPATIAL_ALLOWLIST)
+    needs_spatial_decomposition = not is_1x1 and not needs_spatial_tiling
 
     if DRY_RUN:
         regs = build_conv2d_regs(p, 0, 0, 0)
         _verify_config(regs)
-        target_names = {0x0201: "CNA", 0x0801: "CORE", 0x1001: "DPU", 0x0081: "PC"}
         print(f"\n=== CONV2D DRY RUN ({len(regs)} regs) ===")
         print(f"  in=({p['batch']},{p['in_channels']},{p['in_h']},{p['in_w']}) "
               f"out=({p['batch']},{p['out_channels']},{p['out_h']},{p['out_w']}) "
               f"kernel=({p['kernel_h']},{p['kernel_w']}) groups={groups}")
-        for i, (t, v, a) in enumerate(regs):
-            print(f"  [{i:3d}] {target_names.get(t, f'0x{t:04x}')}[0x{a:04x}] = 0x{v:08x}")
+        dump_regs('CONV_MESA BASE DRY RUN', regs)
+        if needs_spatial_tiling:
+            _, packed_weight_size, _ = _packed_sizes(p)
+            split_tasks = _plan_split_tasks(p, packed_weight_size)
+            for split_task in split_tasks:
+                task_regs = build_conv2d_regs(p, 0, 0, 0, split_task=split_task)
+                print(f"  split_task[{split_task['task_index']}]: input_top={split_task['input_top']} input_h={split_task['input_height']} output_top={split_task['output_top']} output_h={split_task['output_height']} input_banks={split_task['input_banks']} weight_banks={split_task['weights_banks']} weight_reuse={int(split_task['weight_reuse'])}")
+                dump_regs(f"CONV_MESA DIRECT DRY TASK {split_task['task_index']}", task_regs)
         return None, None, None
 
     if needs_1x1_channel_slicing:
@@ -709,6 +1114,13 @@ def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1
 
     if needs_depthwise_slicing:
         return _run_depthwise_channel_sliced(in_channels, kernel_h, kernel_w, input_hw, is_1x1)
+
+    if needs_spatial_tiling:
+        np.random.seed(42)
+        input_nchw = np.random.randn(p['batch'], in_channels, p['in_h'], p['in_w']).astype(np.float16)
+        weight_ochw = np.random.randn(out_channels, in_channels // groups, kernel_h, kernel_w).astype(np.float16)
+        result = _npu_submit_direct_spatial(p, input_nchw.reshape(-1), weight_ochw.reshape(-1))
+        return result, input_nchw, weight_ochw
 
     if needs_spatial_decomposition:
         return _run_conv2d_spatial_decomposed(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups)

@@ -15,6 +15,7 @@ test_cases = [
     (8, 8, 1, 1, (5, 5), 1, "ic=8 oc=8 1x1 5x5"),         # test_ops test_biased_conv2d
     (16, 16, 1, 1, (8, 8), 1, "1x1 ic=16 oc=16 8x8"),     # test_ops test_simple_conv2d_1x1_m4-like
     (16, 16, 1, 1, (32, 32), 1, "1x1 32x32"),              # test_ops test_simple_conv2d_1x1_m4
+    (10, 20, 3, 3, (9, 9), 1, "test_ops simple_conv2d_nhwc shape"),
 
     # ── Non-1x1 kernels (partial output — known NPU hardware limitation) ──
     (4, 4, 3, 3, (9, 9), 1, "simple 3x3 9x9"),             # test_ops test_simple_conv2d
@@ -53,6 +54,30 @@ test_cases = [
     (4, 2, 1, 1, (1, 1), 2, "test_ops simple_grouped_conv2d"),
     (4, 4, 1, 1, (1, 1), 2, "test_ops medium_grouped_conv2d"),
     (32, 32, 1, 1, (32, 32), 32, "test_ops depthwise_conv2d"),
+    (15, 35, 3, 3, (5, 5), 5, "test_ops grouped_conv2d"),
+]
+
+# Exact shape coverage for listed slow 2D forward convs.
+slow_test_cases = [
+    (256, 512, 3, 3, (64, 64), 1, "test_ops test_sd_big_conv"),
+    (2048, 1, 3, 3, (3, 3), 1, "test_ops test_large_ic_conv"),
+    (16, 6, 5, 2, (64, 64), 1, "test_ops test_large_input_conv2d"),
+]
+
+# Listed tinygrad helper_test_op cases this harness does not cover yet because
+# conv.run_conv2d currently exposes only batch=1, unbiased, unpadded,
+# stride=1/dilation=1, forward 2D convolution.
+unsupported_test_ops_cases = [
+    "test_large_bs_conv: batch=4096 is not exposed by conv.run_conv2d",
+    "test_biased_conv2d/test_simple_conv2d_bias: bias is not exposed",
+    "test_nested_conv2d: multi-op graph is not exposed",
+    "test_conv1d/*: conv1d is not exposed",
+    "test_simple_conv3d/test_padded_conv3d: conv3d is not exposed",
+    "test_*conv_transpose*: transposed conv is not exposed",
+    "test_*padding_conv2d/test_negative_padding_conv2d: padding/cropping is not exposed",
+    "test_strided_conv2d*: stride is not exposed",
+    "test_dilated_conv2d: dilation is not exposed",
+    "test_conv2d_errors: exception-path API compatibility is not covered",
 ]
 
 def compute_expected(result, inp, wt, in_c, out_c, kh, kw, oh, ow, groups):
@@ -79,13 +104,14 @@ def compute_expected(result, inp, wt, in_c, out_c, kh, kw, oh, ow, groups):
     return expected
 
 all_pass = True
-for in_c, out_c, kh, kw, (ih, iw), groups, desc in test_cases:
+for in_c, out_c, kh, kw, (ih, iw), groups, desc in test_cases + slow_test_cases:
     sys.stdout.write(f"  {desc}: ")
     sys.stdout.flush()
     try:
         result, inp, wt = conv.run_conv2d(in_c, out_c, kh, kw, (ih, iw), groups)
         if result is None:
-            print("SKIP"); continue
+            print("PASS (dry-run)")
+            continue
         b, oc, oh, ow = result.shape
         expected = compute_expected(result, inp, wt, in_c, out_c, kh, kw, oh, ow, groups)
 
@@ -99,12 +125,17 @@ for in_c, out_c, kh, kw, (ih, iw), groups, desc in test_cases:
         else:
             nz_r = np.count_nonzero(np.abs(result) > 0.001)
             nz_e = np.count_nonzero(np.abs(expected) > 0.001)
-            print(f"WARN (non-1x1 partial: nz={nz_r}/{nz_e})")
+            print(f"FAIL (non-1x1 partial: nz={nz_r}/{nz_e})")
+            all_pass = False
     except Exception as e:
-        print(f"ERROR: {e}")
-        import traceback; traceback.print_exc()
+        print(f"FAIL (exception: {e})")
         all_pass = False
 
+print()
+print("Unsupported listed test_ops cases:")
+for desc in unsupported_test_ops_cases:
+    print(f"  FAIL {desc}")
+    all_pass = False
 print()
 if all_pass:
     print("ALL TEST CASES PASS")
