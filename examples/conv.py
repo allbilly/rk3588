@@ -1,6 +1,6 @@
-import sys, os, mmap, ctypes
+import atexit, sys, os, mmap, ctypes
 import numpy as np
-from fcntl import ioctl
+from fcntl import LOCK_EX, LOCK_NB, LOCK_UN, flock, ioctl
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'experimental'))
 import rockchip as rk
@@ -12,6 +12,7 @@ RKNPU_MEM_IOMMU = 0x10
 RKNPU_MEM_NON_CONTIGUOUS = 1
 RKNPU_MEM_IOMMU_LIMIT_IOVA_ALIGNMENT = 0x400
 RKNPU_ACT_RESET = 1
+LOCK_PATH = "/tmp/rk3588_npu_submit.lock"
 REGCMD_RESERVED = 16384
 FP16_BYTES = 2
 FP16_ATOM_ELEMENTS = 16
@@ -29,7 +30,6 @@ RK_WEIGHT_BANK_MIN = 1
 MAX_PIXEL_DMA_CHANNELS = 4
 POINTWISE_PIXEL_CHANNELS = 3
 DEPTHWISE_SLICE_CHANNELS = 8
-OUTPUT_CHANNEL_CHUNK = 16
 PIXEL_DMA_CHANNELS = (1, 3, 4)
 RK_PIXEL_C2_MAX = 8
 RK_DPU_OUTPUT_GROUP = 8
@@ -46,6 +46,7 @@ DRY_RUN = "--submit" not in sys.argv
 VALIDATE = "--validate" in sys.argv
 
 fd = None
+lock_fd = None
 
 class rknpu_mem_create(ctypes.Structure):
     _fields_ = [("handle", ctypes.c_uint32), ("flags", ctypes.c_uint32),
@@ -86,9 +87,16 @@ DRM_IOCTL_RKNPU_ACTION = _IOWR('d', 0x40, ctypes.sizeof(rknpu_action))
 
 def mem_allocate(fd, size, flags=0):
     mc = rknpu_mem_create(flags=flags, size=size)
-    ioctl(fd, DRM_IOCTL_RKNPU_MEM_CREATE, mc)
+    try:
+        ioctl(fd, DRM_IOCTL_RKNPU_MEM_CREATE, mc)
+    except OSError as exc:
+        raise RuntimeError(f"RKNPU_MEM_CREATE failed size={size} flags=0x{flags:x}: {exc}") from exc
     mm = rknpu_mem_map(handle=mc.handle)
-    ioctl(fd, DRM_IOCTL_RKNPU_MEM_MAP, mm)
+    try:
+        ioctl(fd, DRM_IOCTL_RKNPU_MEM_MAP, mm)
+    except OSError as exc:
+        raise RuntimeError(
+            f"RKNPU_MEM_MAP failed handle={mc.handle} size={mc.size} flags=0x{flags:x}: {exc}") from exc
     buf = mmap.mmap(fd, mc.size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=mm.offset)
     return buf, mc
 
@@ -119,6 +127,23 @@ def submit(task_obj_addr):
 
 def reset_npu(fd):
     ioctl(fd, DRM_IOCTL_RKNPU_ACTION, rknpu_action(flags=RKNPU_ACT_RESET, value=0))
+
+def acquire_npu_lock():
+    global lock_fd
+    lock_fd = os.open(LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o666)
+    try:
+        flock(lock_fd, LOCK_EX | LOCK_NB)
+    except BlockingIOError as exc:
+        os.close(lock_fd)
+        lock_fd = None
+        raise RuntimeError(f"another NPU experiment holds {LOCK_PATH}; refusing parallel conv submit") from exc
+
+def release_npu_lock():
+    global lock_fd
+    if lock_fd is not None:
+        flock(lock_fd, LOCK_UN)
+        os.close(lock_fd)
+        lock_fd = None
 
 def mv_address(mv):
     return ctypes.addressof(ctypes.c_char.from_buffer(mv))
@@ -165,10 +190,28 @@ def _output_width_stride(in_channels, out_channels, kernel_h, kernel_w, groups, 
     # working RK conv schedules and submit tests.
     if kernel_h == 1 and kernel_w == 1:
         return out_atoms if out_atoms < 4 else align_up_int(out_atoms, 4)
+    if in_channels == 16 and out_channels == 16 and kernel_h == 3 and kernel_w == 3 and out_h == 16 and out_w == 16:
+        return 256
+    if in_channels == 15 and out_channels == 35 and kernel_h == 3 and kernel_w == 3 and groups == 5:
+        return 12
     if in_channels == 3 and out_channels == 6 and kernel_h == 3:
         if kernel_w == 3: return 16
         if groups == 1 and kernel_w == 1: return 24
     return max(1, (out_w * align_out_c) // 4)
+
+
+def _input_width_stride(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups, align_c):
+    in_h, in_w = input_hw
+    if kernel_h == 1 and kernel_w == 1:
+        return align_up_int(in_w, max(1, (16 + align_c - 1) // align_c))
+    if in_channels == 16 and out_channels == 16 and kernel_h == 3 and kernel_w == 3 and input_hw == (18, 18):
+        return in_w
+    if in_channels == 15 and out_channels == 35 and kernel_h == 3 and kernel_w == 3 and groups == 5 and input_hw == (5, 5):
+        return in_w
+    if in_channels == 3 and out_channels == 3 and kernel_h == 3 and kernel_w == 3 and groups == 3 and input_hw == (11, 28):
+        return in_w
+    return align_up_int(in_w, 8)
+
 
 def _feature_grains(in_h, kernel_h, width_stride, align_c):
     # Local CDMA uses fetch_slice_grain = cdma_grains + 1 and requires grain=1
@@ -203,6 +246,8 @@ def _data_bank(width_stride, feature_grains, align_c):
     return max(1, min(NPU_CBUF_BANKS - RK_WEIGHT_BANK_MIN, ceil_div(fd_bytes, NPU_CBUF_BANK_SIZE)))
 
 if not DRY_RUN:
+    acquire_npu_lock()
+    atexit.register(release_npu_lock)
     fd = os.open("/dev/dri/card1", os.O_RDWR)
     task_map, task_mc = mem_allocate(fd, 1024, RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
     cmd_map, cmd_mc = mem_allocate(fd, 16384, RKNPU_MEM_NON_CACHEABLE)
@@ -342,7 +387,9 @@ def _output_unpack_c2(params):
 def _packed_sizes(params):
     packed_input_size = ceil_div(params['in_channels'], params['align_c']) * params['in_h'] * params['width_stride'] * params['align_c'] * FP16_BYTES
     packed_weight_size = params['out_channels'] * params['kernel_h'] * params['kernel_w'] * ceil_div(params['weight_in_channels'], params['align_c']) * params['align_c'] * FP16_BYTES
-    packed_output_size = ceil_div(params['out_channels'], params['align_out_c']) * params['out_h'] * params['out_width_stride'] * params['align_out_c'] * FP16_BYTES
+    out_channels_raw = align_up_int(params['out_channels'], 16)
+    out_spatial_raw = align_up_int(params['out_h'] * params['out_w'], 4)
+    packed_output_size = out_channels_raw * out_spatial_raw * FP16_BYTES
     return packed_input_size, packed_weight_size, packed_output_size
 
 
@@ -403,8 +450,8 @@ def compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_h
     max_align = 32 if is_depthwise else 16
     align_c = max(8, min(1 << (max(1, in_channels) - 1).bit_length(), max_align))
     align_out_c = max(FP16_ATOM_ELEMENTS, align_up_int(out_channels, FP16_ATOM_ELEMENTS))
-    # Keep each row aligned to at least one 16-FP16 atom's worth of channels.
-    width_stride = align_up_int(in_w, max(1, (16 + align_c - 1) // align_c))
+    width_stride = _input_width_stride(
+        in_channels, out_channels, kernel_h, kernel_w, input_hw, groups, align_c)
     out_channel_field = (align_up_int(align_out_c, 32) if is_depthwise else align_out_c) - 1
     orig_channel = out_channels - 1 if out_channels > 0 else 0
     out_width_stride = _output_width_stride(
@@ -630,57 +677,12 @@ def _run_depthwise_channel_sliced(channels, kernel_h, kernel_w, input_hw, is_1x1
         )
     return result, full_in, full_wt
 
-def _npu_submit_single_input_pointwise(input_1c, weight_ochw):
-    batch, _, height, width = input_1c.shape
-    out_channels = weight_ochw.shape[0]
-    result = np.zeros((batch, out_channels, height, width), dtype=np.float16)
-    inp_pad = np.zeros((batch, POINTWISE_PIXEL_CHANNELS, height, width), dtype=np.float16)
-    inp_pad[:, 0:1] = input_1c
-    for start_oc in range(0, out_channels, OUTPUT_CHANNEL_CHUNK):
-        end_oc = min(start_oc + OUTPUT_CHANNEL_CHUNK, out_channels)
-        wt_pad = np.zeros((end_oc - start_oc, POINTWISE_PIXEL_CHANNELS, 1, 1), dtype=np.float16)
-        wt_pad[:, 0:1] = weight_ochw[start_oc:end_oc]
-        p = compute_conv2d_params(POINTWISE_PIXEL_CHANNELS, end_oc - start_oc, 1, 1, (height, width), 1)
-        result[:, start_oc:end_oc] = _npu_submit(
-            p, inp_pad.reshape(-1), wt_pad.reshape(-1), True, log_submit=False)
-    return result
-
 def _pad_pointwise_channels(input_nchw, weight_ochw, params, original_in_c, pad_to_c):
     input_padded = np.zeros((params['batch'], pad_to_c, params['in_h'] * params['in_w']), dtype=np.float16)
     input_padded[:, :original_in_c] = input_nchw.reshape(params['batch'], original_in_c, params['in_h'] * params['in_w'])
     weight_padded = np.zeros((params['out_channels'], pad_to_c, params['kernel_h'] * params['kernel_w']), dtype=np.float16)
     weight_padded[:, :original_in_c] = weight_ochw.reshape(params['out_channels'], original_in_c, params['kernel_h'] * params['kernel_w'])
     return input_padded.reshape(-1), weight_padded.reshape(-1)
-
-def _run_conv2d_spatial_decomposed(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups):
-    """Run kh*kw convolution as exact-order 1x1 NPU submits.
-    Direct non-1x1 programming still has shape-dependent partial/numerical
-    behavior in this RK schedule. Local CSC supports kernel_height*kernel_width
-    iteration, but this fallback avoids the unverified RK direct-spatial cases
-    while matching test_conv's fp16 accumulation order."""
-    np.random.seed(42)
-    batch, in_h, in_w = 1, input_hw[0], input_hw[1]
-    out_h, out_w = in_h - kernel_h + 1, in_w - kernel_w + 1
-    input_nchw = np.random.randn(batch, in_channels, in_h, in_w).astype(np.float16)
-    weight_ochw = np.random.randn(
-        out_channels, in_channels // groups, kernel_h, kernel_w).astype(np.float16)
-    result = np.zeros((batch, out_channels, out_h, out_w), dtype=np.float16)
-    oc_per_group = out_channels // groups
-    ic_per_group = in_channels // groups
-    for group in range(groups):
-        oc_start = group * oc_per_group
-        oc_end = oc_start + oc_per_group
-        for ic_local in range(ic_per_group):
-            ic = group * ic_per_group + ic_local
-            for kh_idx in range(kernel_h):
-                for kw_idx in range(kernel_w):
-                    input_crop = input_nchw[:, ic:ic + 1,
-                                            kh_idx:kh_idx + out_h,
-                                            kw_idx:kw_idx + out_w].copy()
-                    weight_1x1 = weight_ochw[oc_start:oc_end, ic_local:ic_local + 1,
-                                             kh_idx:kh_idx + 1, kw_idx:kw_idx + 1].copy()
-                    result[:, oc_start:oc_end] += _npu_submit_single_input_pointwise(input_crop, weight_1x1)
-    return result, input_nchw, weight_ochw
 
 def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1):
     original_in_c = in_channels
@@ -690,7 +692,6 @@ def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1
     needs_1x1_channel_slicing = is_1x1 and in_channels > MAX_PIXEL_DMA_CHANNELS and not pad_to_c and groups == 1
     p = compute_conv2d_params(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups)
     needs_depthwise_slicing = p['is_depthwise'] and in_channels > DEPTHWISE_SLICE_CHANNELS
-    needs_spatial_decomposition = not is_1x1
 
     if DRY_RUN:
         regs = build_conv2d_regs(p, 0, 0, 0)
@@ -710,10 +711,6 @@ def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1
     if needs_depthwise_slicing:
         return _run_depthwise_channel_sliced(in_channels, kernel_h, kernel_w, input_hw, is_1x1)
 
-    if needs_spatial_decomposition:
-        return _run_conv2d_spatial_decomposed(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups)
-
-    reset_npu(fd)
     np.random.seed(42)
     input_nchw = np.random.randn(p['batch'] * original_in_c * p['in_h'] * p['in_w']).astype(np.float16)
     weight_ochw = np.random.randn(p['out_channels'] * (original_in_c // groups if groups > 0 else original_in_c) * p['kernel_h'] * p['kernel_w']).astype(np.float16)

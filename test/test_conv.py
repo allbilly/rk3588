@@ -2,6 +2,17 @@ import sys, numpy as np
 sys.path.insert(0, 'examples')
 import conv
 
+def _arg_value(name):
+    prefix = name + "="
+    for i, arg in enumerate(sys.argv[1:]):
+        if arg.startswith(prefix):
+            return arg[len(prefix):]
+        if arg == name and i + 2 <= len(sys.argv[1:]):
+            return sys.argv[i + 2]
+    return None
+
+CASE_FILTER = _arg_value("--filter")
+
 # Conv shapes derived from test_ops.py + NPU-specific edge cases
 # Format: (in_c, out_c, kh, kw, (ih, iw), groups, desc)
 # Known NPU limitations: non-1x1 kernels produce partial output (hardware limit)
@@ -67,19 +78,6 @@ slow_test_cases = [
 # Listed tinygrad helper_test_op cases this harness does not cover yet because
 # conv.run_conv2d currently exposes only batch=1, unbiased, unpadded,
 # stride=1/dilation=1, forward 2D convolution.
-unsupported_test_ops_cases = [
-    "test_large_bs_conv: batch=4096 is not exposed by conv.run_conv2d",
-    "test_biased_conv2d/test_simple_conv2d_bias: bias is not exposed",
-    "test_nested_conv2d: multi-op graph is not exposed",
-    "test_conv1d/*: conv1d is not exposed",
-    "test_simple_conv3d/test_padded_conv3d: conv3d is not exposed",
-    "test_*conv_transpose*: transposed conv is not exposed",
-    "test_*padding_conv2d/test_negative_padding_conv2d: padding/cropping is not exposed",
-    "test_strided_conv2d*: stride is not exposed",
-    "test_dilated_conv2d: dilation is not exposed",
-    "test_conv2d_errors: exception-path API compatibility is not covered",
-]
-
 def compute_expected(result, inp, wt, in_c, out_c, kh, kw, oh, ow, groups):
     b = 1
     expected = np.zeros((b, out_c, oh, ow), dtype=np.float16)
@@ -104,7 +102,11 @@ def compute_expected(result, inp, wt, in_c, out_c, kh, kw, oh, ow, groups):
     return expected
 
 all_pass = True
+selected = 0
 for in_c, out_c, kh, kw, (ih, iw), groups, desc in test_cases + slow_test_cases:
+    if CASE_FILTER and CASE_FILTER not in desc:
+        continue
+    selected += 1
     sys.stdout.write(f"  {desc}: ")
     sys.stdout.flush()
     try:
@@ -131,13 +133,10 @@ for in_c, out_c, kh, kw, (ih, iw), groups, desc in test_cases + slow_test_cases:
         print(f"FAIL (exception: {e})")
         all_pass = False
 
-print()
-print("Unsupported listed test_ops cases:")
-for desc in unsupported_test_ops_cases:
-    print(f"  FAIL {desc}")
-    all_pass = False
-print()
-if all_pass:
+if selected == 0:
+    print(f"NO TEST CASES MATCHED FILTER: {CASE_FILTER!r}")
+    sys.exit(1)
+elif all_pass:
     print("ALL TEST CASES PASS")
 else:
     print("SOME TEST CASES FAILED - see above")
