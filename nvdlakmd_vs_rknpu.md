@@ -346,3 +346,19 @@ Both drivers:
 - Handle interrupts via `devm_request_irq()`
 - Use `writel`/`readl` for register access
 - Use `copy_from_user`/`copy_to_user` for UAPI data transfer
+
+## 14. Tengine OpenDLA Comparison
+
+Tengine's `source/device/opendla/` backend is not a kernel driver. It is a user-space NVDLA integration layer that splits graphs, builds a loadable, binds input/output tensors, and submits work through the NVDLA runtime.
+
+| Aspect | NVDLA KMD (`opendla.ko`) | Tengine OpenDLA backend | RKNPU Driver (`rknpu.ko`) |
+|--------|--------------------------|--------------------------|---------------------------|
+| **Layer** | Kernel driver + firmware | User-space backend | Kernel driver + UMD command buffer |
+| **Primary role** | Program NVDLA HW from op descriptors | Translate Tengine graphs into NVDLA runtime objects | Program RK NPU PC / job engine |
+| **Execution model** | `dla_execute_task()` + scheduler + ISR | `odla_split_graph()` -> `odla_describe()` -> `runtime->load()` -> `bindInputTensor()` / `bindOutputTensor()` -> `runtime->submit()` | UMD-prepared register command buffer |
+| **Operator scope** | Full NVDLA op set handled by firmware | Limited backend support; `odla_describe()` publishes allowed ops and blocks the rest | Whatever the RK compiler emits |
+| **Precision** | Hardware-dependent | `odla_describe()` advertises int8 for the small config | Compiler-defined |
+| **Control surface** | Kernel IOCTLs, MMIO, ISR | C++ runtime objects, no direct register access | Kernel IOCTLs + PC interface registers |
+| **Best mental model** | "Kernel-side NVDLA firmware" | "Tengine's NVDLA frontend/backend bridge" | "Command-buffer NPU driver" |
+
+The practical distinction is that Tengine OpenDLA sits above the NVDLA driver stack. It does not replace `opendla.ko`; it prepares and submits graphs through the NVDLA runtime API, while the kernel driver still owns HW programming and interrupt handling.
