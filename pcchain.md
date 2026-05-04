@@ -235,6 +235,34 @@ Raw nonzero-core or multicore elementwise submits have locked up this kernel in
 earlier experiments. Keep the guard in place unless testing with physical reset
 access.
 
+## Conv PC-Chain
+
+Conv rawbuf bring-up now follows the same staged pattern as GEMM:
+
+```bash
+python3 experimental/conv_rawbuf_small.py --mode core0 --alloc-mode official --flags 0x7
+python3 experimental/conv_rawbuf_big.py --mode core0 --alloc-mode official --flags 0x7
+python3 experimental/conv_rawbuf_pcchain.py --mode core0 --alloc-mode official --flags 0x7
+python3 experimental/conv_pcchain.py --mode core0 --alloc-mode official --flags 0x7 --decoded
+```
+
+These scripts capture the RKNN conv task/regcmd buffers from
+`~/npu/ops_rknn/conv2d_dump_regs`, patch the DMA addresses, and replay them
+through the raw `/dev/dri/card1` submit path. `conv_pcchain.py --decoded`
+rebuilds each register command from decoded `(target, register, value)` fields
+before submit instead of patching an opaque qword blob.
+
+The conv multi-task replay needs:
+
+```text
+flags = RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG = 0x7
+mode  = core0
+task descriptors from the captured RKNN task buffer
+```
+
+Without `RKNPU_JOB_BLOCK`, the captured 11-task conv stream timed out even when
+the same buffers and PC tails were used.
+
 ## Debug Checklist
 
 1. Generate a dry regcmd buffer and decode every qword as target/register/value.

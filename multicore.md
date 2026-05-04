@@ -21,6 +21,14 @@ Tomeu Vizoso's Rocket/Mesa path uses a different UAPI:
 
 That means our local raw ioctl experiments should treat downstream `subcore_task[]` as a driver-specific ABI. Safe work still stays on core 0 by default. Risky multicore experiments must explicitly choose a layout and remain behind `--allow-unsafe-submit`.
 
+Local working references to use before more risky probes:
+
+- `examples/pool_pcchain.py` dry-runs a known-good PC-tail layout and can submit a chained PPU workload only with `--submit`.
+- `examples/pool_multicore.py` dry-runs an independent-task multicore layout and can submit only with `--submit`.
+- `experimental/add_pcchain.py` / `experimental/add_rawbuf_pcchain.py` are the ADD/elementwise PC-chain references.
+- `experimental/gemm_pcchain.py` is the strongest decoded RKNN-style PC-chain reference because it was matched against a captured GEMM stream.
+- For conv capture refresh, use `experimental/conv_rawbuf_common.py` preflight helpers before updating inline blobs. The normal `conv_rawbuf_small.py`, `conv_rawbuf_big.py`, `conv_rawbuf_pcchain.py`, and `conv_pcchain.py` entrypoints are standalone and do not load runtime dump files.
+
 Current raw experiment layouts:
 - `direct`: maps core 0/1/2 to `subcore_task[0]`, `[1]`, `[2]`; this was our original guessed layout.
 - `rk3588-tricore-tail`: maps core 0/1/2 to `subcore_task[2]`, `[3]`, `[4]`; this matches the `allbilly/rknpu_driver` analysis for `use_core_num == 3`.
@@ -33,8 +41,17 @@ Confirmed unsafe patterns on the current downstream driver:
 - Single downstream `rknpu_submit` with multiple nonzero `subcore_task[]` entries.
 - Raw `core_mask=0x2` / `0x4` experiments without official runtime setup.
 - Shifting `task_obj_addr` into the middle of the task BO.
+- Launching two target NPU replay commands in parallel. A 2026-05-04 parallel run of `experimental/conv_rawbuf_small.py` and `experimental/conv_rawbuf_big.py` crashed the board; target submits must be serialized.
 
 These crashes do not disprove multicore. They show that the downstream ABI is not the same abstraction as Rocket and should not be guessed into shape.
+
+DeepWiki check on `allbilly/rknpu_driver` for the parallel-target crash:
+
+- The driver has per-core scheduling queues plus IRQ, reset, power, and IOMMU-domain locks.
+- Job submission is queued per core rather than globally serialized for all userspace processes.
+- Reset/action paths are separate from submit/wait paths, so two replay processes can still interfere if one resets or times out while another is preparing or waiting on a job.
+- User-space replay tools should take a process lock around the whole target path: open `/dev/dri/card1`, allocate/map BOs, reset, submit, wait, and read back.
+- Kernel-side fixes would be stricter task/regcmd validation and stronger reset-vs-submit serialization, but the immediate local rule is one target NPU command at a time.
 
 ## Ground Truth From allbilly/rknpu_driver
 
