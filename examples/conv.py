@@ -42,7 +42,7 @@ CORE_RESERVED_ZERO_ADDR = 0x3030
 DPU_RESERVED_ZERO_ADDR = 0x40c4
 PC_OPERATION_ENABLE_VALUE = 0xD
 
-DRY_RUN = "--submit" not in sys.argv
+DRY_RUN = "--dry" in sys.argv
 VALIDATE = "--validate" in sys.argv
 
 fd = None
@@ -730,7 +730,7 @@ if __name__ == "__main__":
     try:
         result, inp, wt = run_conv2d(in_c, out_c, kh, kw, (4, 4))
         if result is None:
-            print("DRY RUN complete. Pass --submit to run on NPU.")
+            print("DRY RUN complete.")
             sys.exit(0)
         batch, oc, oh, ow = result.shape
         expected = np.zeros((batch, oc, oh, ow), dtype=np.float16)

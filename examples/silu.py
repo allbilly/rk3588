@@ -331,12 +331,12 @@ def run_silu(n):
 
 
 def main():
-  parser = argparse.ArgumentParser(description="Dry-run RK3588 NPU SiLU LUT register stream")
+  parser = argparse.ArgumentParser(description="RK3588 NPU SiLU LUT register stream")
   parser.add_argument("--n", type=int, default=8, help="number of fp16 elements")
-  parser.add_argument("--submit", action="store_true", help="run the register stream on the NPU")
+  parser.add_argument("--dry", action="store_true", help="print the register stream without submitting")
   args = parser.parse_args()
 
-  if args.submit:
+  if not args.dry:
     return run_silu(args.n)
 
   x = np.linspace(-3.0, 3.0, args.n, dtype=np.float16)

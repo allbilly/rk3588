@@ -44,7 +44,7 @@ PC_OPERATION_ENABLE_VALUE = 0xD
 PC_TASK_COUNT_CLEAR = 1 << 12
 PC_TASK_NUMBER_MASK = 0xFFF
 
-DRY_RUN = "--submit" not in sys.argv
+DRY_RUN = "--dry" in sys.argv
 VALIDATE = "--validate" in sys.argv
 DIRECT_SPATIAL = os.environ.get('CONV_MESA_DIRECT') == '1'
 DIRECT_SPATIAL_ALL = os.environ.get('CONV_MESA_DIRECT_ALL') == '1'
@@ -1145,7 +1145,7 @@ if __name__ == "__main__":
     try:
         result, inp, wt = run_conv2d(in_c, out_c, kh, kw, (4, 4))
         if result is None:
-            print("DRY RUN complete. Pass --submit to run on NPU.")
+            print("DRY RUN complete.")
             sys.exit(0)
         batch, oc, oh, ow = result.shape
         expected = np.zeros((batch, oc, oh, ow), dtype=np.float16)

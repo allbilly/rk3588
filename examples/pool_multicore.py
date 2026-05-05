@@ -83,12 +83,12 @@ def main():
   parser.add_argument("--width", type=int, default=4)
   parser.add_argument("--core-ranges", default="split3")
   parser.add_argument("--core-mask", type=lambda x: int(x, 0), default=0x7)
-  parser.add_argument("--submit", action="store_true")
+  parser.add_argument("--dry", action="store_true")
   args = parser.parse_args()
 
   ops = parse_ops(args.ops)
   core_ranges = parse_core_ranges(args.core_ranges, len(ops))
-  if not args.submit:
+  if args.dry:
     for task_idx, op in enumerate(ops):
       regs = pool.pooling_regs(op, 0x11110000 + task_idx * 0x10000, 0x22220000 + task_idx * 0x10000,
                                args.height, args.width)

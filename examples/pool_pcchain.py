@@ -74,11 +74,11 @@ def main():
   parser.add_argument("--ops", default="max,avg,globalmax")
   parser.add_argument("--height", type=int, default=4)
   parser.add_argument("--width", type=int, default=4)
-  parser.add_argument("--submit", action="store_true")
+  parser.add_argument("--dry", action="store_true")
   args = parser.parse_args()
 
   ops = parse_ops(args.ops)
-  if not args.submit:
+  if args.dry:
     for i, op in enumerate(ops):
       regs = pool_segment(op, 0x11110000 + i * 0x10000, 0x22220000 + i * 0x10000, 0, 0, args.height, args.width)
       print(f"task={i} op={op} regs={len(regs)} first=0x{regs[0]:016x} last=0x{regs[-1]:016x}")

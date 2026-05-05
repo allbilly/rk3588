@@ -368,7 +368,7 @@ def run_pool_fresh_process(op, in_h=4, in_w=4, attempts=POOL_SUBMIT_ATTEMPTS):
   env[POOL_RETRY_ENV] = "1"
   results = []
   for _ in range(attempts):
-    proc = subprocess.run([sys.executable, __file__, "--submit", "--op", op,
+    proc = subprocess.run([sys.executable, __file__, "--op", op,
                            "--height", str(in_h), "--width", str(in_w)],
                           env=env, check=False, text=True, capture_output=True)
     results.append(proc)
@@ -387,34 +387,34 @@ def run_pool_fresh_process(op, in_h=4, in_w=4, attempts=POOL_SUBMIT_ATTEMPTS):
 
 
 def main():
-  parser = argparse.ArgumentParser(description="Dry-run RK3588 PPU pool register streams from experimental/rknnops.h")
+  parser = argparse.ArgumentParser(description="RK3588 PPU pool register streams from experimental/rknnops.h")
   parser.add_argument("--op", choices=POOL_OPS + ("all",), default="all")
   parser.add_argument("--height", type=int, default=4)
   parser.add_argument("--width", type=int, default=4)
-  parser.add_argument("--submit", action="store_true", help="run one pool register stream on the NPU")
+  parser.add_argument("--dry", action="store_true", help="print register streams without submitting")
   args = parser.parse_args()
 
-  if args.submit:
-    if os.environ.get(POOL_RETRY_ENV) == "1":
-      return run_pool(args.op, args.height, args.width)
-    if args.op == "all":
-      rc = 0
-      for op in POOL_OPS:
-        rc |= run_pool_fresh_process(op, args.height, args.width)
-      return rc
-    return run_pool_fresh_process(args.op, args.height, args.width)
+  if args.dry:
+    ops = POOL_OPS if args.op == "all" else (args.op,)
+    print("Pool dry run only: no /dev/dri open, no ioctl, no submit")
+    for op in ops:
+      regs = pooling_regs(op, in_h=args.height, in_w=args.width)
+      print(f"op={op} reg_count={len(regs)}")
+      print("first_regs:")
+      for value in regs[:6]: print(f"  0x{value:016x}")
+      print("last_regs:")
+      for value in regs[-6:]: print(f"  0x{value:016x}")
+    print("POOL DRY RUN PASS")
+    return 0
 
-  ops = POOL_OPS if args.op == "all" else (args.op,)
-  print("Pool dry run only: no /dev/dri open, no ioctl, no submit")
-  for op in ops:
-    regs = pooling_regs(op, in_h=args.height, in_w=args.width)
-    print(f"op={op} reg_count={len(regs)}")
-    print("first_regs:")
-    for value in regs[:6]: print(f"  0x{value:016x}")
-    print("last_regs:")
-    for value in regs[-6:]: print(f"  0x{value:016x}")
-  print("POOL DRY RUN PASS")
-  return 0
+  if os.environ.get(POOL_RETRY_ENV) == "1":
+    return run_pool(args.op, args.height, args.width)
+  if args.op == "all":
+    rc = 0
+    for op in POOL_OPS:
+      rc |= run_pool_fresh_process(op, args.height, args.width)
+    return rc
+  return run_pool_fresh_process(args.op, args.height, args.width)
 
 
 if __name__ == "__main__":

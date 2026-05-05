@@ -210,7 +210,7 @@ def pack_input_c2_8(m, n, k, a_matrix, in_pack, align_in):
     in_pack[:] = a_matrix[:, :k].reshape(m, -1, 8).transpose(1, 0, 2).ravel()
 
 def pack_weight_tile_16x32(m, n, k, b_matrix, wt_pack, align_in, align_out):
-    wt = np.zeros((align_out, align_in), dtype=np.float16)
+    wt = np.zeros((align_out, align_in), dtype=np.int16)
     wt[:n, :k] = b_matrix.T[:n, :k]
     # FP16 weights are consumed in 16-kernel groups and 32-input-channel atoms:
     # NVDLA uses KERNEL_PER_GROUP_FP16=16 and ATOM_CUBE_SIZE=32B=16 FP16.
@@ -408,7 +408,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     def E(target, reg_addr, value):
         return (target << 48) | ((value & 0xFFFFFFFF) << 16) | reg_addr
 
-    conv_con1 = (2 << 7) | (2 << 4)
+    conv_con1 = (1 << 7) | (1 << 4)
     if not no_group_line_off:
         conv_con1 |= 1 << 29
 
@@ -426,7 +426,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
         E(reg.TARGET_CNA,  reg.CNA_WEIGHT_SIZE2, (1 << 24) | (1 << 16) | align_out),
         E(reg.TARGET_CNA,  reg.CNA_CBUF_CON0,    ((RK_CBUF_BANKS - data_bank) << 4) | data_bank),
         E(reg.TARGET_CNA,  reg.CNA_CBUF_CON1,    data_entries),
-        E(reg.TARGET_CNA,  reg.CNA_CVT_CON0,     (1 << 3) | (1 << 1) | 1),
+        E(reg.TARGET_CNA,  reg.CNA_CVT_CON0,     1),
         E(reg.TARGET_CNA,  reg.CNA_CVT_CON1,     1 << 16),
         E(reg.TARGET_CNA,  reg.CNA_CVT_CON2,     1 << 16),
         E(reg.TARGET_CNA,  reg.CNA_CVT_CON3,     1 << 16),
@@ -439,12 +439,12 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
         E(reg.TARGET_CNA,  reg.CNA_FC_DATA_SIZE1, align_in),
         # No REGCMD_RESERVED offset — regcmds in separate buffer, weights start at offset 0
         E(reg.TARGET_CNA,  reg.CNA_DCOMP_ADDR0,  wt_dma & 0xFFFFFFFF),
-        E(reg.TARGET_CORE, reg.CORE_MISC_CFG,       (2 << 8) | 1),
+        E(reg.TARGET_CORE, reg.CORE_MISC_CFG,       (1 << 8) | 1),
         E(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_0, ((m - 1) << 16) | 0),
         E(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_1, align_out - 1),
         E(reg.TARGET_CORE, reg.CORE_RESERVED_3030,  0),
         E(reg.TARGET_DPU,  reg.FEATURE_MODE_CFG,  (15 << 5) | (2 << 1)),
-        E(reg.TARGET_DPU,  reg.DATA_FORMAT,       (5 << 29) | (2 << 26) | 2),
+        E(reg.TARGET_DPU,  reg.DATA_FORMAT,       (4 << 29) | (1 << 26) | 1),
         E(reg.TARGET_DPU,  reg.DST_BASE_ADDR,     out_dma & 0xFFFFFFFF),
         E(reg.TARGET_DPU,  reg.DST_SURF_STRIDE,   dst_surf_stride << 4),
         E(reg.TARGET_DPU,  reg.DATA_CUBE_WIDTH,   0),
@@ -458,6 +458,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
         E(reg.TARGET_DPU,  reg.WDMA_SIZE_1,       ((m - 1) << 16) | 0),
         E(reg.TARGET_DPU,  reg.BN_CFG,            0x00000053),
         E(reg.TARGET_DPU,  reg.EW_CFG,            0x00000383),
+        E(reg.TARGET_DPU,  reg.OUT_CVT_SCALE,     1),
         E(reg.TARGET_DPU,  reg.SURFACE_ADD,       (dst_surf_stride * 4) << 4),
         E(reg.TARGET_PC,   reg.OPERATION_ENABLE,  0x0000000d),
     ]
@@ -470,8 +471,10 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
 def run_gemm(m, n, k, a_matrix, b_matrix):
     align_in, align_out, _, pad_k = _gemm_layout(m, n, k)
 
-    in_pack = np.zeros(align_in * m, dtype=np.float16)
-    wt_pack = np.zeros(align_in * align_out, dtype=np.float16)
+    a_matrix = np.asarray(a_matrix, dtype=np.int16, order="C").reshape(m, k)
+    b_matrix = np.asarray(b_matrix, dtype=np.int16, order="C").reshape(k, n)
+    in_pack = np.zeros(align_in * m, dtype=np.int16)
+    wt_pack = np.zeros(align_in * align_out, dtype=np.int16)
 
     pack_input = get_input_packer(m, n, k, align_in)
     pack_weight = get_weight_packer(m, n, k, align_in)
@@ -482,10 +485,10 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
     pack_input(m, n, k, a_matrix, in_pack, align_in)
     pack_weight(m, n, k, b_matrix, wt_pack, align_in, align_out)
 
-    ct_inputs = (ctypes.c_uint16 * len(in_pack)).from_buffer(input_map)
-    ct_weights = (ctypes.c_uint16 * len(wt_pack)).from_buffer(weight_map)
-    ct_inputs[:] = in_pack.view(np.uint16).tolist()
-    ct_weights[:] = wt_pack.view(np.uint16).tolist()
+    ct_inputs = (ctypes.c_int16 * len(in_pack)).from_buffer(input_map)
+    ct_weights = (ctypes.c_int16 * len(wt_pack)).from_buffer(weight_map)
+    ct_inputs[:] = in_pack.tolist()
+    ct_weights[:] = wt_pack.tolist()
 
     # Keep at least one 256B cache/DMA-sized read window for tiny outputs, then
     # size the FP32 buffer by the last decoded row and real N columns.
@@ -494,7 +497,7 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
         input_mem_create.dma_addr, weight_mem_create.dma_addr, output_mem_create.dma_addr)
 
     if "--dry" in sys.argv:
-        print(f"\n=== GEMM {m}x{n}x{k} DRY RUN ===")
+        print(f"\n=== GEMM INT16 {m}x{n}x{k} DRY RUN ===")
         target_names = {0x0201: "CNA", 0x0801: "CORE", 0x1001: "DPU", 0x2001: "RDMA", 0x0081: "PC"}
         for i, v in enumerate(npu_regs):
             tgt = (v >> 48) & 0xFFFF
@@ -513,7 +516,7 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
     reset_npu(fd)
     ret = submit(tasks_mem_create.obj_addr)
 
-    raw = np.frombuffer(output_map, dtype=np.float32, count=out_nbytes // 4).copy()
+    raw = np.frombuffer(output_map, dtype=np.int32, count=out_nbytes // 4).copy()
 
     decode_output = get_output_decoder(m, n, k, align_out)
     out = decode_output(m, n, k, raw, align_out)
