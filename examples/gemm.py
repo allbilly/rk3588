@@ -522,8 +522,8 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
 if __name__ == "__main__":
     test_cases = [
         (2, 2, 1,
-        np.array([[1, 2], [3, 4]], dtype=np.float16),
-        np.array([[5, 6], [7, 8]], dtype=np.float16)),
+        np.array([[1], [3]], dtype=np.float16),
+        np.array([[5, 6]], dtype=np.float16)),
     ]
     np.random.seed(42)
     square_sizes = (8, 9) + tuple(1 << exp for exp in (6, 8))

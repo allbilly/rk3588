@@ -39,7 +39,7 @@ class reg:
     RDMA_DATA_CUBE_CHANNEL= 0x5014   # RDMA data cube channel
     RDMA_ERDMA_CFG        = 0x5034   # RDMA ERDMA config
     RDMA_SRC_BASE_ADDR    = 0x5018   # RDMA source base address (input)
-    RDMA_EW_BASE_ADDR    = 0x5038   # RDMA EW base address (weight)
+    RDMA_EW_BASE_ADDR     = 0x5038   # RDMA EW base address (weight)
     RDMA_FEATURE_MODE_CFG = 0x5044   # RDMA feature mode config
 
     # --- CNA (0x1000) ---
@@ -153,7 +153,7 @@ def mem_allocate(fd, size, flags=0):
     )
     ret = ioctl(fd, DRM_IOCTL_RKNPU_MEM_CREATE, mem_create)
     print(f"ret={ret}, handle={mem_create.handle}, obj_addr={mem_create.obj_addr:#x}, dma_addr={mem_create.dma_addr:#x}")
-    
+
     # Map memory to access from userspace
     mem_map = rknpu_mem_map(handle=mem_create.handle)
     ioctl(fd, DRM_IOCTL_RKNPU_MEM_MAP, mem_map)
@@ -182,7 +182,7 @@ def submit(task_obj_addr):
     submit_struct.subcore_task[2] = rknpu_subcore_task(task_start=2, task_number=0)
     submit_struct.subcore_task[3] = rknpu_subcore_task(task_start=0, task_number=0)
     submit_struct.subcore_task[4] = rknpu_subcore_task(task_start=0, task_number=0)
-    
+
     return ioctl(fd, DRM_IOCTL_RKNPU_SUBMIT, submit_struct)
 
 def reset_npu(fd):
@@ -209,6 +209,23 @@ output_map, output_mem_create = mem_allocate(fd, size=4194304, flags=RKNPU_MEM_N
 tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
 regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
 
+def write_regs(npu_regs, clear_count):
+    for i in range(clear_count):
+        regcmd[i] = 0
+    for i in range(len(npu_regs)):
+        regcmd[i] = npu_regs[i]
+
+def setup_task(op_idx, enable_mask, reg_count):
+    tasks[0].flags  = 0;
+    tasks[0].op_idx = op_idx;
+    tasks[0].enable_mask = enable_mask;
+    tasks[0].int_mask = 0x300;
+    tasks[0].int_clear = 0x1ffff;
+    tasks[0].int_status = 0;
+    tasks[0].regcfg_amount = reg_count
+    tasks[0].regcfg_offset = 0;
+    tasks[0].regcmd_addr = regcmd_mem_create.dma_addr
+
 
 def run_op(ew_cfg_val, a_vals, b_vals, neg_op=False, fdiv_op=False):
     n = len(a_vals)
@@ -234,10 +251,7 @@ def run_op(ew_cfg_val, a_vals, b_vals, neg_op=False, fdiv_op=False):
         (reg.TARGET_PC   << 48) | (0x00000018 << 16) | reg.OPERATION_ENABLE,
     ]
 
-    for i in range(16):
-        regcmd[i] = 0
-    for i in range(len(npu_regs)):
-        regcmd[i] = npu_regs[i]
+    write_regs(npu_regs, 16)
 
     a_packed = np.array(a_vals, dtype=np.float16).view(np.uint16)
     ct_inputs = (ctypes.c_uint16 * n).from_buffer(input_map)
@@ -248,15 +262,7 @@ def run_op(ew_cfg_val, a_vals, b_vals, neg_op=False, fdiv_op=False):
     ct_weights = (ctypes.c_uint16 * n).from_buffer(weight_map)
     ct_weights[:] = w_packed.tolist()
 
-    tasks[0].flags  = 0;
-    tasks[0].op_idx = 4;
-    tasks[0].enable_mask = 0x18;
-    tasks[0].int_mask = 0x300;
-    tasks[0].int_clear = 0x1ffff;
-    tasks[0].int_status = 0;
-    tasks[0].regcfg_amount = len(npu_regs)
-    tasks[0].regcfg_offset = 0;
-    tasks[0].regcmd_addr = regcmd_mem_create.dma_addr
+    setup_task(4, 0x18, len(npu_regs))
 
     reset_npu(fd)
     ret = submit(tasks_mem_create.obj_addr)

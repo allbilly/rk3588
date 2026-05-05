@@ -21,11 +21,8 @@ RKNPU_JOB_PINGPONG = 0x4
 RKNPU_ACT_RESET = 1
 LOCK_PATH = "/tmp/rk3588_npu_submit.lock"
 
-TASKS = 11
-TASK_AMOUNTS = [108, 104, 26, 104, 26, 104, 26, 104, 26, 104, 26]
-TASK_ENABLES = [0x0D, 0x0D, 0x60, 0x0D, 0x60, 0x0D, 0x60, 0x0D, 0x60, 0x0D, 0x60]
-TASK_INT_MASKS = [0x300, 0x300, 0xC00, 0x300, 0xC00, 0x300, 0xC00, 0x300, 0xC00, 0x300, 0xC00]
-PC_NEXT_AMOUNTS = [0, 0x1000E, 0, 0x1000E, 0, 0x2000E, 0, 0x2000E, 0, 0x2000E, 0]
+TASK_ENABLE = 0x0D
+TASK_INT_MASK = 0x300
 
 
 class R:
@@ -36,8 +33,6 @@ class R:
     CNA = 0x0201
     CORE = 0x0801
     DPU = 0x1001
-    PPU = 0x4001
-    PPU_RDMA = 0x8001
 
     OPERATION_ENABLE = 0x0008
     PC_BASE_ADDRESS = 0x0010
@@ -150,34 +145,6 @@ class R:
     DPU_LUT_LO_SLOPE_SCALE = 0x4128
     DPU_LUT_LO_SLOPE_SHIFT = 0x412C
 
-    PPU_S_POINTER = 0x6004
-    PPU_DATA_CUBE_IN_WIDTH = 0x600C
-    PPU_DATA_CUBE_IN_HEIGHT = 0x6010
-    PPU_DATA_CUBE_IN_CHANNEL = 0x6014
-    PPU_DATA_CUBE_OUT_WIDTH = 0x6018
-    PPU_DATA_CUBE_OUT_HEIGHT = 0x601C
-    PPU_DATA_CUBE_OUT_CHANNEL = 0x6020
-    PPU_OPERATION_MODE_CFG = 0x6024
-    PPU_POOLING_KERNEL_CFG = 0x6034
-    PPU_RECIP_KERNEL_WIDTH = 0x6038
-    PPU_RECIP_KERNEL_HEIGHT = 0x603C
-    PPU_POOLING_PADDING_CFG = 0x6040
-    PPU_PADDING_VALUE_1_CFG = 0x6044
-    PPU_PADDING_VALUE_2_CFG = 0x6048
-    PPU_DST_BASE_ADDR = 0x6070
-    PPU_DST_SURF_STRIDE = 0x607C
-    PPU_DATA_FORMAT = 0x6084
-    PPU_MISC_CTRL = 0x60DC
-
-    PPU_RDMA_S_POINTER = 0x7004
-    PPU_RDMA_CUBE_IN_WIDTH = 0x700C
-    PPU_RDMA_CUBE_IN_HEIGHT = 0x7010
-    PPU_RDMA_CUBE_IN_CHANNEL = 0x7014
-    PPU_RDMA_SRC_BASE_ADDR = 0x701C
-    PPU_RDMA_SRC_LINE_STRIDE = 0x7024
-    PPU_RDMA_SRC_SURF_STRIDE = 0x7028
-    PPU_RDMA_DATA_FORMAT = 0x7030
-
 
 REG_NAMES = {value: name for name, value in vars(R).items() if name.isupper() and isinstance(value, int)}
 TARGET_NAMES = {
@@ -188,8 +155,6 @@ TARGET_NAMES = {
     R.CNA: "CNA",
     R.CORE: "CORE",
     R.DPU: "DPU",
-    R.PPU: "PPU",
-    R.PPU_RDMA: "PPU_RDMA",
 }
 
 
@@ -231,8 +196,7 @@ class CaseSpec:
     output_size: int
     check_offset: int
     check_size: int
-    ppu_dst_weight_offset: int
-    ppu_src_weight_offset: int
+    check_ranges: tuple[tuple[int, int], ...]
     cna_dma_con1: int
     cna_dma_con2: int
     dpu_bs_ow_cfg: int
@@ -242,38 +206,31 @@ class CaseSpec:
 CASES = {
     1: CaseSpec(
         name="small 1x3 RKNN conv pcchain",
-        task_offsets=(0x940, 0xCC0, 0x1040, 0x1140, 0x14C0, 0x15C0, 0x1940, 0x1A40, 0x1DC0, 0x1EC0, 0x2240),
+        task_offsets=(0x940,),
         input_size=0x50,
         weight_size=0x2500,
         internal_size=0x380,
         output_size=0x300,
         check_offset=0,
-        check_size=0x300,
-        ppu_dst_weight_offset=0x140,
-        ppu_src_weight_offset=0x540,
+        check_size=0x2A0,
+        check_ranges=((0x000, 0x150), (0x180, 0x150)),
         cna_dma_con1=0x08,
         cna_dma_con2=0x20,
         dpu_bs_ow_cfg=0x126,
         conv_tasks=(
             ConvTask(0, 0x00000080, 0x00080005, 8, 7, 0x15, 0x120, 0x30, 0x01030006, 0x28, 0, 0x00070005, 8, 0, 0x00020006, 0x0F, 0, 0x180, 6, 2, 0x0005000F, 0x0F, 0x00020006, 0x300),
-            ConvTask(1, 0x10000070, 0x00080004, 8, 7, 0x0E, 0x120, 0x30, 0x01030006, 0x20, 0, 0x00070004, 8, 0, 0x00010006, 0x0F, 0, 0x180, 6, 1, 0x0005000F, 0x0F, 0x00010006, 0x300),
-            ConvTask(3, 0x10000060, 0x00080003, 8, 7, 0x07, 0x120, 0x30, 0x01030006, 0x18, 0x20, 0x00070003, 8, 0, 0x00000006, 0x0F, 0xE0, 0x180, 6, 0, 0x0005000F, 0x0F, 0x00000006, 0x300),
-            ConvTask(5, 0x20000060, 0x00080003, 8, 7, 0x07, 0x120, 0x30, 0x01030006, 0x18, 0, 0x00070003, 8, 0, 0x00000006, 0x0F, 0, 0x180, 6, 0, 0x0005000F, 0x0F, 0x00000006, 0x300),
-            ConvTask(7, 0x20000060, 0x00080003, 8, 7, 0x07, 0x120, 0x30, 0x01030006, 0x18, 0x10, 0x00070003, 8, 0, 0x00000006, 0x0F, 0x70, 0x180, 6, 0, 0x0005000F, 0x0F, 0x00000006, 0x300),
-            ConvTask(9, 0x20000060, 0x00080003, 8, 7, 0x07, 0x120, 0x30, 0x01030006, 0x18, 0x20, 0x00070003, 8, 0, 0x00000006, 0x0F, 0xE0, 0x180, 6, 0, 0x0005000F, 0x0F, 0x00000006, 0x300),
         ),
     ),
     4: CaseSpec(
         name="large 5x5 RKNN conv pcchain",
-        task_offsets=(0x3A00, 0x3D80, 0x4100, 0x4200, 0x4580, 0x4680, 0x4A00, 0x4B00, 0x4E80, 0x4F80, 0x5300),
+        task_offsets=(0x3A00, 0x3D80, 0x4200, 0x4680, 0x4B00, 0x4F80),
         input_size=0x140,
         weight_size=0x55C0,
         internal_size=0xA40,
         output_size=0x900,
         check_offset=0,
         check_size=0x900,
-        ppu_dst_weight_offset=0x3200,
-        ppu_src_weight_offset=0x3600,
+        check_ranges=((0x000, 0x900),),
         cna_dma_con1=0x10,
         cna_dma_con2=0x90,
         dpu_bs_ow_cfg=0x126,
@@ -356,6 +313,14 @@ DRM_IOCTL_RKNPU_SUBMIT = _iowr("d", 0x41, ctypes.sizeof(rknpu_submit))
 
 def align_up(value, align):
     return ((value + align - 1) // align) * align
+
+
+def task_amount(task: ConvTask):
+    return 108 if task.idx == 0 else 104
+
+
+def task_amounts(spec: CaseSpec):
+    return [task_amount(task) for task in spec.conv_tasks]
 
 
 def E(target, addr, value):
@@ -481,66 +446,37 @@ def conv_body(spec: CaseSpec, task: ConvTask, input_dma, weight_dma, output_dma)
     return regs
 
 
-def ppu_body(spec: CaseSpec, weight_dma):
-    return [
-        E(R.PPU, R.PPU_S_POINTER, 0x0000000E),
-        E(R.PPU_RDMA, R.PPU_RDMA_S_POINTER, 0x0000000E),
-        E(R.PPU, R.PPU_DATA_CUBE_IN_WIDTH, 0),
-        E(R.PPU, R.PPU_DATA_CUBE_IN_HEIGHT, 0),
-        E(R.PPU, R.PPU_DATA_CUBE_IN_CHANNEL, 0x1F),
-        E(R.PPU, R.PPU_DATA_CUBE_OUT_WIDTH, 0),
-        E(R.PPU, R.PPU_DATA_CUBE_OUT_HEIGHT, 0),
-        E(R.PPU, R.PPU_DATA_CUBE_OUT_CHANNEL, 0x1F),
-        E(R.PPU, R.PPU_OPERATION_MODE_CFG, 0x11),
-        E(R.PPU, R.PPU_POOLING_KERNEL_CFG, 0),
-        E(R.PPU, R.PPU_RECIP_KERNEL_WIDTH, 0),
-        E(R.PPU, R.PPU_RECIP_KERNEL_HEIGHT, 0),
-        E(R.PPU, R.PPU_POOLING_PADDING_CFG, 0),
-        E(R.PPU, R.PPU_PADDING_VALUE_1_CFG, 0),
-        E(R.PPU, R.PPU_PADDING_VALUE_2_CFG, 0),
-        E(R.PPU, R.PPU_DST_BASE_ADDR, weight_dma + spec.ppu_dst_weight_offset),
-        E(R.PPU, R.PPU_DST_SURF_STRIDE, 0x10),
-        E(R.PPU, R.PPU_DATA_FORMAT, 0x10),
-        E(R.PPU, R.PPU_MISC_CTRL, 0x03),
-        E(R.PPU_RDMA, R.PPU_RDMA_CUBE_IN_WIDTH, 0),
-        E(R.PPU_RDMA, R.PPU_RDMA_CUBE_IN_HEIGHT, 0),
-        E(R.PPU_RDMA, R.PPU_RDMA_CUBE_IN_CHANNEL, 0x1F),
-        E(R.PPU_RDMA, R.PPU_RDMA_SRC_BASE_ADDR, weight_dma + spec.ppu_src_weight_offset),
-        E(R.PPU_RDMA, R.PPU_RDMA_SRC_LINE_STRIDE, 0x10),
-        E(R.PPU_RDMA, R.PPU_RDMA_SRC_SURF_STRIDE, 0x10),
-        E(R.PPU_RDMA, R.PPU_RDMA_DATA_FORMAT, 0x01),
-    ]
-
-
 def pc_tail(task_idx, spec: CaseSpec, regcmd_dma):
-    if PC_NEXT_AMOUNTS[task_idx]:
+    amounts = task_amounts(spec)
+    if task_idx + 1 < len(amounts):
         return [
             E(R.PC_REG, R.PC_BASE_ADDRESS, (regcmd_dma + spec.task_offsets[task_idx + 1]) & 0xFFFFFFF0),
-            E(R.PC_REG, R.PC_REGISTER_AMOUNTS, PC_NEXT_AMOUNTS[task_idx]),
+            E(R.PC_REG, R.PC_REGISTER_AMOUNTS, (amounts[task_idx + 1] + 2) // 2),
             E(R.VERSION, R.ZERO, 0),
-            E(R.PC, R.OPERATION_ENABLE, TASK_ENABLES[task_idx]),
+            E(R.PC, R.OPERATION_ENABLE, TASK_ENABLE),
         ]
     return [
         0,
         E(R.PC_REG, R.PC_REGISTER_AMOUNTS, 0),
         E(R.VERSION, R.ZERO, 0),
-        E(R.PC, R.OPERATION_ENABLE, TASK_ENABLES[task_idx]),
+        E(R.PC, R.OPERATION_ENABLE, TASK_ENABLE),
     ]
 
 
 def build_task_regs(spec: CaseSpec, input_dma, weight_dma, output_dma):
-    conv_by_idx = {task.idx: task for task in spec.conv_tasks}
     regs = []
-    for idx in range(TASKS):
-        body = conv_body(spec, conv_by_idx[idx], input_dma, weight_dma, output_dma) if idx in conv_by_idx else ppu_body(spec, weight_dma)
-        if len(body) != TASK_AMOUNTS[idx]:
-            raise RuntimeError(f"task {idx} has {len(body)} regs, expected {TASK_AMOUNTS[idx]}")
+    for idx, task in enumerate(spec.conv_tasks):
+        body = conv_body(spec, task, input_dma, weight_dma, output_dma)
+        amount = task_amount(task)
+        if len(body) != amount:
+            raise RuntimeError(f"task {idx} has {len(body)} regs, expected {amount}")
         regs.append(body)
     return regs
 
 
 def regcmd_bytes(spec: CaseSpec):
-    return align_up(max(offset + (TASK_AMOUNTS[idx] + 4) * 8 for idx, offset in enumerate(spec.task_offsets)), 4096)
+    amounts = task_amounts(spec)
+    return align_up(max(offset + (amounts[idx] + 4) * 8 for idx, offset in enumerate(spec.task_offsets)), 4096)
 
 
 def write_regcmd(regcmd_map, spec: CaseSpec, regcmd_dma, task_regs):
@@ -552,16 +488,25 @@ def write_regcmd(regcmd_map, spec: CaseSpec, regcmd_dma, task_regs):
         words[base + len(regs):base + len(regs) + 4] = pc_tail(task_idx, spec, regcmd_dma)
 
 
+def checked_output(output_map, spec: CaseSpec):
+    parts = [
+        np.frombuffer(output_map, dtype=np.float16, count=size // 2, offset=offset).copy()
+        for offset, size in spec.check_ranges
+    ]
+    return np.concatenate(parts) if len(parts) > 1 else parts[0]
+
+
 def fill_tasks(task_map, spec: CaseSpec, regcmd_dma):
     tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(rknpu_task))
+    amounts = task_amounts(spec)
     for idx, offset in enumerate(spec.task_offsets):
         tasks[idx].flags = 0
         tasks[idx].op_idx = 1
-        tasks[idx].enable_mask = TASK_ENABLES[idx]
-        tasks[idx].int_mask = TASK_INT_MASKS[idx]
+        tasks[idx].enable_mask = TASK_ENABLE
+        tasks[idx].int_mask = TASK_INT_MASK
         tasks[idx].int_clear = 0x1FFFF
         tasks[idx].int_status = 0
-        tasks[idx].regcfg_amount = TASK_AMOUNTS[idx]
+        tasks[idx].regcfg_amount = amounts[idx]
         tasks[idx].regcfg_offset = 0
         tasks[idx].regcmd_addr = regcmd_dma + offset
 
@@ -595,8 +540,9 @@ def reset_npu(fd):
 
 
 def print_dry_run(spec: CaseSpec, task_regs, regcmd_dma):
+    amounts = task_amounts(spec)
     for task_idx, regs in enumerate(task_regs):
-        print(f"task[{task_idx}] offset=0x{spec.task_offsets[task_idx]:04x} amount={TASK_AMOUNTS[task_idx]} enable=0x{TASK_ENABLES[task_idx]:x}")
+        print(f"task[{task_idx}] offset=0x{spec.task_offsets[task_idx]:04x} amount={amounts[task_idx]} enable=0x{TASK_ENABLE:x}")
         for i, qword in enumerate(regs + pc_tail(task_idx, spec, regcmd_dma)):
             target, addr, value = reg_value(qword)
             target_name = TARGET_NAMES.get(target, f"0x{target:04x}")
@@ -604,22 +550,13 @@ def print_dry_run(spec: CaseSpec, task_regs, regcmd_dma):
             print(f"  [{i:3d}] {target_name}.{reg_name} = 0x{value:08x}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Standalone decoded RKNN conv PC-chain replay. No rawbuf import or runtime dump files.")
-    parser.add_argument("--case", type=int, choices=sorted(CASES), default=1)
-    parser.add_argument("--mode", choices=("core0", "official"), default="core0")
-    parser.add_argument("--timeout", type=int, default=6000)
-    parser.add_argument("--alloc-mode", choices=("raw", "official"), default="official")
-    parser.add_argument("--flags", type=lambda x: int(x, 0), default=RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG)
-    parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--dry", action="store_true")
-    args = parser.parse_args()
-
-    spec = CASES[args.case]
+def run_case(case_id, args):
+    spec = CASES[case_id]
+    task_count = len(spec.conv_tasks)
     dry_input, dry_weight, dry_output, dry_regcmd = 0xFFF10000, 0xFFF20000, 0xFFF30000, 0xFFF40000
     if args.dry:
         task_regs = build_task_regs(spec, dry_input, dry_weight, dry_output)
-        print(f"case={args.case} {spec.name} regcmd_bytes=0x{regcmd_bytes(spec):x}")
+        print(f"case={case_id} {spec.name} regcmd_bytes=0x{regcmd_bytes(spec):x}")
         print_dry_run(spec, task_regs, dry_regcmd)
         return 0
 
@@ -634,34 +571,57 @@ def main():
         try:
             task_flags = RKNPU_MEM_OFFICIAL_TASK if args.alloc_mode == "official" else RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE
             tensor_flags = RKNPU_MEM_OFFICIAL_TENSOR if args.alloc_mode == "official" else RKNPU_MEM_NON_CACHEABLE
-            task_map, task_mc = mem_allocate(fd, TASKS * ctypes.sizeof(rknpu_task), task_flags)
+            task_map, task_mc = mem_allocate(fd, task_count * ctypes.sizeof(rknpu_task), task_flags)
             regcmd_map, regcmd_mc = mem_allocate(fd, regcmd_bytes(spec), tensor_flags)
             input_map, input_mc = mem_allocate(fd, align_up(spec.input_size, 4096), tensor_flags)
             weight_map, weight_mc = mem_allocate(fd, align_up(spec.weight_size, 4096), tensor_flags)
             internal_map, _internal_mc = mem_allocate(fd, align_up(spec.internal_size, 4096), tensor_flags)
             output_map, output_mc = mem_allocate(fd, align_up(spec.output_size, 4096), tensor_flags)
 
-            for buf in (input_map, weight_map, internal_map, output_map):
+            for buf in (input_map, weight_map, internal_map):
                 np.frombuffer(buf, dtype=np.uint8)[:] = 0
+            np.frombuffer(output_map, dtype=np.float16)[:] = np.float16(7.0)
 
             task_regs = build_task_regs(spec, input_mc.dma_addr, weight_mc.dma_addr, output_mc.dma_addr)
             write_regcmd(regcmd_map, spec, regcmd_mc.dma_addr, task_regs)
             fill_tasks(task_map, spec, regcmd_mc.dma_addr)
 
             reset_npu(fd)
-            ret = submit(fd, task_mc.obj_addr, TASKS, args.mode, args.timeout, args.flags)
-            out = np.frombuffer(output_map, dtype=np.float16, count=spec.check_size // 2, offset=spec.check_offset).copy()
+            ret = submit(fd, task_mc.obj_addr, task_count, args.mode, args.timeout, args.flags)
+            out = checked_output(output_map, spec)
             max_abs = float(np.max(np.abs(out)))
-            ok = ret == 0 and np.all(np.isfinite(out)) and max_abs == 0.0
-            print(f"case={args.case} mode={args.mode} tasks={TASKS} submit ret={ret}")
-            print(f"output offset=0x{spec.check_offset:x} size=0x{spec.check_size:x} max_abs={max_abs:.6f}")
-            print(f"conv pcchain decoded case {args.case} {'PASS' if ok else 'FAIL'}")
+            sentinel_left = int(np.count_nonzero(out == np.float16(7.0)))
+            ok = ret == 0 and np.all(np.isfinite(out)) and max_abs == 0.0 and sentinel_left == 0
+            print(f"case={case_id} mode={args.mode} tasks={task_count} submit ret={ret}")
+            checked_size = sum(size for _offset, size in spec.check_ranges)
+            print(f"output checked_size=0x{checked_size:x} max_abs={max_abs:.6f} sentinel_left={sentinel_left}")
+            print(f"conv pcchain decoded case {case_id} {'PASS' if ok else 'FAIL'}")
             return 0 if ok else 1
         finally:
             os.close(fd)
     finally:
         flock(lock_fd, LOCK_UN)
         os.close(lock_fd)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Standalone decoded RKNN conv PC-chain replay. No rawbuf import or runtime dump files.")
+    parser.add_argument("--case", type=int, choices=sorted(CASES), default=None, help="run one case; omit to run all cases")
+    parser.add_argument("--mode", choices=("core0", "official"), default="core0")
+    parser.add_argument("--timeout", type=int, default=6000)
+    parser.add_argument("--alloc-mode", choices=("raw", "official"), default="raw")
+    parser.add_argument("--flags", type=lambda x: int(x, 0), default=RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG)
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--dry", action="store_true")
+    args = parser.parse_args()
+
+    case_ids = [args.case] if args.case is not None else sorted(CASES)
+    rc = 0
+    for idx, case_id in enumerate(case_ids):
+        if idx:
+            print()
+        rc |= run_case(case_id, args)
+    return rc
 
 
 if __name__ == "__main__":

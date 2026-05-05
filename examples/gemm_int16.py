@@ -493,6 +493,7 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
     # Keep at least one 256B cache/DMA-sized read window for tiny outputs, then
     # size the FP32 buffer by the last decoded row and real N columns.
     out_nbytes = max(256, ((m - 1) * align_out + n) * FP32_BYTES)
+    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, out_nbytes)
     npu_regs = make_gemm_regs(m, n, k,
         input_mem_create.dma_addr, weight_mem_create.dma_addr, output_mem_create.dma_addr)
 
@@ -525,15 +526,15 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
 if __name__ == "__main__":
     test_cases = [
         (2, 2, 1,
-        np.array([[1, 2], [3, 4]], dtype=np.float16),
-        np.array([[5, 6], [7, 8]], dtype=np.float16)),
+        np.array([[1], [3]], dtype=np.int16),
+        np.array([[5, 6]], dtype=np.int16)),
     ]
     np.random.seed(42)
     square_sizes = (8, 9) + tuple(1 << exp for exp in (6, 8))
     for size in square_sizes:
         m = n = k = size
-        a = np.random.randn(m, k).astype(np.float16)
-        b = np.random.randn(k, n).astype(np.float16)
+        a = np.random.randint(-16, 16, size=(m, k), dtype=np.int16)
+        b = np.random.randint(-16, 16, size=(k, n), dtype=np.int16)
         test_cases.append((m, n, k, a, b))
 
     for m, n, k, a, b in test_cases:
@@ -541,9 +542,9 @@ if __name__ == "__main__":
         r = run_gemm(m, n, k, a, b)
         if r is None:
             continue
-        expected = a @ b
-        ok = np.allclose(r, expected, atol=0.1)
-        md = np.max(np.abs(r - expected))
-        print(f"  {'PASS' if ok else 'FAIL'} (max_diff={md:.4f})")
+        expected = a.astype(np.int32) @ b.astype(np.int32)
+        ok = np.array_equal(r, expected)
+        md = int(np.max(np.abs(r - expected))) if r.size else 0
+        print(f"  {'PASS' if ok else 'FAIL'} (max_diff={md})")
 
     os.close(fd)
