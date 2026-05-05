@@ -1,5 +1,5 @@
 ⚠️ Documentations still WIP. 
-- For now u can read the code at examples/elementwise.py or [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/allbilly/rk3588) (it has up to 1 week delay)
+- For now u can read the code at examples/elementwise.py or [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/allbilly/rk3588)
 
 # RK3588 
 
@@ -13,9 +13,9 @@ TODO
 # For Normal user
 
 Tested on
-✅ Hardware: OrangePi 5 16GB
-✅ [OrangePi Ubuntu 1.2.2 Jammy](http://www.orangepi.org/html/hardWare/computerAndMicrocontrollers/service-and-support/Orange-pi-5.html)  Linux 6.1.99-rockchip-rk3588 OrangePi 5 
-✅ [Armbian Ubuntu 24.04](https://www.armbian.com/boards/orangepi5) 6.18.24-current-rockchip64
+- ✅ Hardware: OrangePi 5 16GB
+- ✅ [OrangePi Ubuntu 1.2.2 Jammy](http://www.orangepi.org/html/hardWare/computerAndMicrocontrollers/service-and-support/Orange-pi-5.html)  Linux 6.1.99-rockchip-rk3588 OrangePi 5 
+- ✅ [Armbian Ubuntu 24.04](https://www.armbian.com/boards/orangepi5) 6.18.24-current-rockchip64
 
 ## What is rk3588
 
