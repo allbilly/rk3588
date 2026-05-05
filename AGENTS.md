@@ -81,4 +81,7 @@ When investigating:
 3. Cross-reference with the local `nvdla/` docs (ARCHITECTURE.md, REGISTER_MAP.md, NC1HWC2_FORMAT.md, WEIGHT_PACKING.md)
 
 folder structure
-- examples/*.py , each op example py file shd be standalone and contain only decoded registers, no hex blob. coding style shd reference to elementwise.py and each op.py shd have min line diff comparing to elementwise.py as the golden reference.
+- *rawbuf*.py is keeping its hexblob intentionally
+- examples/*.py , each op example py file shd be standalone and contain only decoded registers, no hex blob. coding style shd reference to elementwise.py and each op.py shd have min line diff comparing to elementwise.py as the golden reference, compare with command diff ops.py elementwise.py
+
+Dont edit files in examples/mainline6-18/ unless specified

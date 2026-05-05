@@ -1,14 +1,29 @@
 ⚠️ Documentations still WIP. 
-- For now u can read the code at examples/elementwise.py or [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/allbilly/rk3588)
 
 # RK3588 
 
-This repo run ops on RK3588 NPU with pure python and NPU register programming. No RKNN, no ONNX, no compiler, nothing.
+This repo run ops on RK3588 NPU (NVDLA based) with pure python and NPU register programming. No RKNN, no compiler, nothing.
+
+Thanks to prior effort by [mtx512](https://github.com/mtx512/rk3588-npu), [Tomeu Vizoso](https://gitlab.freedesktop.org/mesa/mesa/-/tree/main/src/gallium/drivers/rocket), [liej6799](https://github.com/liej6799/rk3588)
+
+The NPU can be desribe as 4 stage CNA -> CORE -> DPU -> PPU ->PC in sequence, the ouput of earlier stage passes to next stage. With this in mind, it will be much easier to understand the registers.
+
+┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐  
+│   CNA   │───▶│  CORE   │───▶│   DPU   │───▶│   PC    │  
+│(Conv    │    │(Compute│    │(Data    │    │(Process │  
+│ Neural  │    │ Engine) │    │Process) │    │ Control)│  
+│ Accel)  │    │         │    │         │    │         │  
+└─────────┘    └─────────┘    └─────────┘    └─────────┘  
+     │              │              │              │  
+     │              │              │              │  
+     ▼              ▼              ▼              ▼  
+Weight/Feature   MAC Array      Post-Proc      Operation  
+   Data          Accumulation   (BS/BN/EW)     Enable  
 
 TODO
-- Aim to write details documentation as my [ane](https://github.com/allbilly/ane) repo
 - fork and add more regsiters to [mesa rocket](https://gitlab.freedesktop.org/mesa/mesa/-/tree/main/src/gallium/drivers/rocket)
-- can [NVDLA/vp](https://github.com/nvdla/vp) helps 
+- check [NVDLA/vp](https://github.com/nvdla/vp)  
+- op fusing examples
 
 # For Normal user
 
@@ -17,16 +32,20 @@ Tested on
 - ✅ [OrangePi Ubuntu 1.2.2 Jammy](http://www.orangepi.org/html/hardWare/computerAndMicrocontrollers/service-and-support/Orange-pi-5.html)  Linux 6.1.99-rockchip-rk3588 OrangePi 5 
 - ✅ [Armbian Ubuntu 24.04](https://www.armbian.com/boards/orangepi5) 6.18.24-current-rockchip64
 
-## What is rk3588
+## 1. Running simple examples 
 
-rk3588 is a NVDLA like NPU designed for convulution.
-You can send op to npu with pure python.
+The python files in examples are self-contained. Zero dependency.
+Simply run with python.
 
 For OrangePi Ubuntu with RKNPU driver preinstalled,
 ```bash
+pip install numpy
 python examples/elementwise.py
 python examples/gemm.py
+python examples/gemm_int8.py
+python examples/gemm_int16.py
 python examples/conv.py
+python examples/pool.py
 ```
 
 For Armbian Ubuntu with mainline rocket driver preinstalled,
@@ -34,13 +53,332 @@ For Armbian Ubuntu with mainline rocket driver preinstalled,
 python examples/mainline6_18/elementwise.py
 python examples/mainline6_18/gemm.py
 python examples/mainline6_18/conv.py
+python examples/mainline6_18/pool.py
+```
+
+## 2. PC chaining 
+
+The examples above just contain one op per submit, simple but overhead will be large for many ops.
+Program counter chaining is needed to run multiple ops in one submit.
+
+mainline support will be added later.
+```bash
+python exampels/pool_pcchain.py
+```
+
+What if the mamtul size is too large
+- You can just split and pc chain it to one submit
+- When mamtul size > 1x8192x8192, it splited by N, such that C[:, j] = A × B[:, j]
+- C[:, :8144] = A × B[:, :8144]
+- C[:, 8144:8144+48] = A × B[:, 8144:8144+48]
+
+## 3. Multicore 
+
+The NPU comes with 3 core. You can run different op on different core at the same time.
+Or split GEMM at the N dimension and run at 3 cores at the same time.
+
+I will add examples of ADD/SUB/MUL running at the same time, GEMM split and mainline.
+For now, test run pool_multicore.py first.
+```bash
+python exampels/pool_multicore.py
+```
+
+## 4. How to do matmul in RK3588
+
+RK3588 NPU is NVDLA based NPU designed for Convulution workload.
+So how can we run matmul on it?
+
+Please view the below carefully crafted ascii diagram on a wide screen.
+```
+In matmul, we have C(M,N) = A(M,K) * B(K,N)
+c[m][n] = Σₖ A[m][k] · B[k][n]
+                                                <----------- N columns ----------->
+                                          ^   ┌────────────────────────────────────────┐
+                                          |   │ b[0][0] b[0][1] ... b[0][N-1]          │
+                                          |   │ b[1][0] b[1][1] ... b[1][N-1]          │
+                                   K rows |   │ b[2][0] b[2][1] ... b[2][N-1]          │
+                                          |   │     .        .        .                │
+                                          |   │ b[K-1][0] b[K-1][1] ... b[K-1][N-1]    │
+                                          V   └────────────────────────────────────────┘
+        <----------- K columns ----------->
+^      ┌────────────────────────────────────┐ ┌────────────────────────────────────────┐      
+|      │ a[0][0] a[0][1] ... a[0][K-1]      │ │ c[0][0] c[0][1] ... c[0][N-1]          │
+|      │ a[1][0] a[1][1] ... a[1][K-1]      │ │ c[1][0] c[1][1] ... c[1][N-1]          │
+M rows │ a[2][0] a[2][1] ... a[2][K-1]      │ │ c[2][0] c[2][1] ... c[2][N-1]          │
+|      │     .        .        .            │ │     .        .        .                │
+|      │ a[M-1][0] a[M-1][1] ... a[M-1][K-1]│ | c[M-1][0] c[M-1][1] ... c[M-1][N-1]    │
+V      └────────────────────────────────────┘ └────────────────────────────────────────┘
+
+As RK3588 is a NVDLA-based NPU which designed for convulution, we can use a special convulution config to do matmul.
+For normal 2d conv, 
+
+        Feature Data (H,W=1)   Kernel(R=1,S=1)
+        ┌────────────┐         ┌─────┐
+        │ a[0][0]    │         │  k  │
+        │ a[2][0]    │         └─────┘
+        │   ...      │
+        │ a[H-1][0]  │
+        └────────────┘
+
+We need 3d conv to do matmul, and N kernels
+                                                                       Kernel (N=N, R=1, S=1, C=K)
+        Feature Map A  (H=M, W=1, C=K)                                  kernel 0
+                  +───────── front-face channels C ─────────────+.         +───────── front-face channels C ──────+
+        W=1      /                                             /|     S=1 /                                      /|                    
+                +─────────────────────────────────────────────+ |        +──────────────────────────────────────+ |
+        ^       | a[0][0][0]   a[0][0][1]   ... a[0][0][N-1]  | |   R=1  | b[0][0][0]   b[0][1]   ... b[0][K-1] | |
+        |       | a[1][0][0]   a[1][0][1]   ... a[1][0][N-1]  | |        +──────────────────────────────────────+/
+        |       | a[2][0][0]   a[2][0][1]   ... a[2][0][N-1]  | |       kernel 1
+        H rows  |        .        .           .               | |          +───────── front-face channels C ──────+
+        |       | a[H-1][0][0] a[H-1][1] ... a[H-1][0][N-1]   | /     S=1 /                                      /|
+        V       +─────────────────────────────────────────────+/        +──────────────────────────────────────+ |
+                                                                    R=1 | b[0][0][0]   b[0][1]   ... b[0][K-1] | |
+                                                                        +──────────────────────────────────────+/
+                                                                        .
+                                                                        .
+
+                                                                        kernel N-1
+                                                                          +───────── front-face channels C ──────+
+                                                                     S=1 /                                      /|
+                                                                        +──────────────────────────────────────+ |
+                                                                    R=1 | b[0][0][0]   b[0][1]   ... b[0][K-1] | |
+                                                                        +──────────────────────────────────────+/
+
+Input vector:  A[h, :]
+Kernel n:      B[:, n]
+out[h][n] = Σ_k A[h][k] * B[k][n]
+
+        Output Feature Map C  (H=M, W=1, C=N)                                  
+                  +───────── front-face channels C=N ───────────+.  
+        W=1      /                                             /|                
+                +─────────────────────────────────────────────+ |    
+        ^       | a[0][0][0]   a[0][0][1]   ... a[0][0][N-1]  | |  
+        |       | a[1][0][0]   a[1][0][1]   ... a[1][0][N-1]  | |   
+        |       | a[2][0][0]   a[2][0][1]   ... a[2][0][N-1]  | |     
+        M rows  |        .        .           .               | |   
+        |       | a[M-1][0][0] a[M-1][1] ... a[M-1][0][N-1]   | /    
+        V       +─────────────────────────────────────────────+/     
 ```
 
 # For Developer
 
-## rknpu (vendor) → rocket (upstream mainline)
+## 0. Known issue and FAQ
+- Do not launch two NPU target commands in parallel. It crashed the kerenel and need replug power to reboot. For parallel workload, checkout exampels/pool_multicore.py
 
-### What changes
+How to convert onnx to rknn
+- python3 -m rknn.api.rknn_convert -t rk3588 -i /home/orangepi/npu/models/8_add.onnx -o /home/orangepi/npu/models/
+
+failed to allocate handle, ret: -1, errno: 14, errstr: Bad address and need reboot after 32 times mem_create and destroy for 8165x8165
+- 100 times on rknn no problem
+- mem_destroy was called with input_dma instead of the required input_obj, so the input buffer never got destroyed.
+- munmap was given non‑page‑aligned sizes (e.g., 133,350,848 bytes), which typically fails silently and leaves VMAs mapped; over many loops this leaks address space/resources. mem_create/mmap also used unaligned sizes.
+
+
+## 1. Registers
+
+checkout experimental/rockchip.py
+
+Common target IDs:
+```text
+0x0201  CNA / convolution front-end
+0x0801  CORE / MAC array
+0x1001  DPU / output and elementwise
+0x2001  RDMA
+0x0081  PC / operation enable
+```
+
+Here's my registers note, still need cleanup
+
+## CNA registers - diemsion
+
+Feature Map A  (H=M, W=1, C=K) 
+```
+datain_height = M
+datain_width = 1
+datain_channel = K
+```
+
+Kernel (N=N, R=1, S=1, C=K)
+```
+weight_width = 1
+weight_height = 1
+weight_kernels = N
+```
+
+Stride value in x and y direction
+```
+conv_x_stride = 1
+conv_y_stride = 1
+```
+
+Output Feature Map C  (H=M, W=1, C=N)
+```
+dataout_height = M
+dataout_width = 1
+```
+
+for CONV should use formula but our MATMUL case just need H=M, W=1, C=N
+H_out = floor((H + pad_top + pad_bottom - k_h) / stride_y) + 1
+W_out = floor((W + pad_left + pad_right - k_w) / stride_x) + 1
+
+dma_width = datain_width
+dma_height = cna_desc.datain_height
+dma_channel = cna_desc.datain_channel
+RKNN: dma_channel = align_in
+
+## CNA registers - non-diemsion
+
+Dataout Atomics 
+TRM: Data atomics after convolution which is data out total pixels number.
+I think its like CUDA atomicAdd for each output pixel 
+```
+dataout_atomics = dataout_width * dataout_height
+```
+
+Feature Grains
+TRM: Feature data rows needs to be buffered before convolution start. Its suggested to set this field as y_stride+weight_height+1.
+In matmul mode this over-buffers rows so the whole MxK block fits, which is why M+1 is used instead of the TRM minimum.
+```
+feature_grains = M + 1
+```
+
+weight_bytes_per_kernel
+Jasbir: weight_bytes_per_kernel = weight_width * weight_height * datain_channel * sizeof(__fp16);
+RKNN:   weight_bytes_per_kernel = align_in * sizeof(__fp16);
+
+weight_bytes_total
+Jasbir: weight_bytes = weight_bytes_per_kernel * cna_desc.weight_kernels;
+RKNN:   weight_bytes_total = weight_bytes_per_kernel * align_out;
+
+CBUF Weight Bank and Data Bank
+CBUF is Multi-bank SRAM, shared for feature and weight
+```
+fd_bytes = M × K × sizeof(type)
+fd_banks = ceil(fd_bytes / CBUF_BANK_SIZE)
+weight_bytes_total = K x N x sizeof(type)
+weight_bank = ceil(weight_bytes_total / NPU_CBUF_BANK_SIZE)
+```
+
+Data Entries
+TRM: How many banks space needed to store one feature map row.
+
+in matmul, datain_width=dataout_width=1
+```
+data_entries = ceil((datain_width * datain_channel) / 32);
+RKNN: 
+int cbuf_entries = ((dataout_width * align_in) + 31) / 32;
+if (cbuf_entries <= 0) cbuf_entries = 1;
+```
+
+weight_burst_len and data_burst_len
+AXI burst length for weight/feature data DMA.
+```
+weight_burst_len = 15
+data_burst_len = 15
+```
+
+line_stride
+line_stride = datain_width * 4
+
+// TODO fully fix RKNN hardcode
+surf_stride
+
+Maths:
+lane_span_bytes = rows_per_lane * line_stride
+surf_stride = lane_span_bytes - line_stride
+           = (rows_per_lane - 1) * line_stride
+           = (H/4 - 1) * line_stride
+
+```
+surf_stride = (line_stride * ((datain_height / 4) - 1));
+```
+
+RKNN: hardcoded 
+surf_stride = 268435453 if is_matmul_768 || is_matmul_768_2048 || is_matmul_2048
+
+
+NVDLA SW CONV: treats a surface as the full plane
+lineStride = W * channelsPerGroup * bytesPerElement
+surf_stride = lineStride * H
+
+ONNC CONV: 
+lineStride = align(W * FEATURE_ATOM_CUBE_SIZE, 32)
+stride_surface = lineStride * H
+
+GROUP_LINE_OFF
+TRM: Group line fetch, 0: enable, 1:disable. This setting only influence line fetch efficiency.
+But it does affect result correctness
+
+RKNN: CNA_CONV_CON1_GROUP_LINE_OFF(1) if (!is_matmul_64 && !is_matmul_256 && !is_matmul_768 && !is_matmul_768_2048 && !is_matmul_2048)
+
+DATA_CUBE_NOTCH_ADDR
+notch_val
+TRM: notch_addr_1, How many pixels from the end of width to the end of the shape line end.
+TRM: notch_addr_0, How many pixels from the end of width to the end of the shape line end.
+
+surface_add
+TRM: How many surfaces in a row.
+```
+surface_add = dst_surf_stride * (align_out / 8u);
+surface_add = dst_surf_stride * 4u if (is_matmul_64 || is_matmul_256 || is_matmul_768 || is_matmul_768_2048 || is_matmul_2048) 
+```
+
+
+# other config registers
+
+qd_en
+TRM: Quantify feature data calculate enable
+```
+qd_en=1
+```
+
+data_sign
+Feature data is signed or not.  0:unsigned
+```
+data_sign = 1
+```
+
+cvt_type
+Cal type of the input convert. 0: Multiply first then add,  1: revesr
+```
+cvt_type = 1
+```
+
+cvt_bypass
+Bypass input convert.
+```
+cvt_bypass = 1 
+```
+
+cvt_scale0123
+Multiplier operand for 1st/2nd/3rd/4th channel.
+```
+cvt_scale0=1
+```
+
+feature_base_addr
+```
+feature_base_addr = input_dma
+```
+
+decompress_addr0
+```
+decompress_addr0 = params->weights_dma
+
+
+```
+we have input in fp16 and process in fp16
+```
+cna_desc.in_precision = precision_float16;
+cna_desc.proc_precision = precision_float16;
+``
+
+```
+EMIT(REG_DPU_S_POINTER, DPU_S_POINTER_POINTER_PP_MODE(1) | DPU_S_POINTER_EXECUTER_PP_EN(1) | DPU_S_POINTER_POINTER_PP_EN(1));
+
+```
+
+## 2. RKNPU vs rocket mainline driver
 
 | Aspect | rknpu (vendor) | rocket (upstream) | Effort |
 |--------|----------------|-------------------|--------|
@@ -51,21 +389,15 @@ python examples/mainline6_18/conv.py
 | Fence | `fence_fd = -1` (none) | `dma_fence` + `sync_file` | Low (ignore) |
 | Multi-core | Core mask in submit struct | `drm_sched` per-core entities | Low (same capability) |
 
-### What stays the same
+What stays the same
+- The **register-level hardware programming** — NC1HWC2 format, weight packing, conv/gemm register setup, ALU ops, DPU config — is purely hardware-defined and **identical** across both drivers. All the reverse-engineering work in `rknnops.h`, `rockchip.py`, `conv.c`, `gemm.c` transfers unchanged.
 
-The **register-level hardware programming** — NC1HWC2 format, weight packing, conv/gemm register setup, ALU ops, DPU config — is purely hardware-defined and **identical** across both drivers. All the reverse-engineering work in `rknnops.h`, `rockchip.py`, `conv.c`, `gemm.c` transfers unchanged.
+Recommended approach
+- **Option A** (pragmatic): Stick with the vendor rknpu driver (already in your kernel). Focus on math/format correctness. The driver works fine for research.
+- **Option B** (shim): Add an abstraction layer in `rknnops.h` over the IOCTL calls. Implement two backends — `DRM_IOCTL_RKNPU_*` and `DRM_IOCTL_ROCKET_*` — with compile-time or runtime selection.
+- **Option C** (full port): Rewrite the IOCTL layer for the `rocket` API. Hardware math stays; kernel communication changes. Estimated ~500-800 lines in `rknnops.h` need updating (all `rknpu_mem_*` and `rknpu_submit` calls).
 
-### Recommended approach
-
-**Option A** (pragmatic): Stick with the vendor rknpu driver (already in your kernel). Focus on math/format correctness. The driver works fine for research.
-
-**Option B** (shim): Add an abstraction layer in `rknnops.h` over the IOCTL calls. Implement two backends — `DRM_IOCTL_RKNPU_*` and `DRM_IOCTL_ROCKET_*` — with compile-time or runtime selection.
-
-**Option C** (full port): Rewrite the IOCTL layer for the `rocket` API. Hardware math stays; kernel communication changes. Estimated ~500-800 lines in `rknnops.h` need updating (all `rknpu_mem_*` and `rknpu_submit` calls).
-
-
-
-## Driver Comparison: rknpu (0.9.8) vs rocket (Linux 6.18)
+### Driver Comparison: rknpu (0.9.8) vs rocket (Linux 6.18)
 
 | Feature | rknpu 0.9.8 (stock OrangePi 6.1.99) | rocket (upstream Linux 6.18) |
 |---|---|---|
@@ -81,7 +413,7 @@ The **register-level hardware programming** — NC1HWC2 format, weight packing, 
 
 **Key takeaway:** rknpu 0.9.8 is builtin with no escape hatch — when the NPU hangs hard enough to survive soft reset, reboot is the only option. The rocket driver uses the DRM scheduler's proper timeout framework (kernel-enforced, not userspace), has a cleaner reset path with scheduler restart, and supports module unload as a last resort.
 
-## How to submit task to NPU with IOCTL
+## 2. How to submit task to NPU with IOCTL
 
 To submit a compute job to the NPU using ioctl
 ```C
@@ -231,7 +563,12 @@ int submitTask(int fd, uint64_t tasks_obj, size_t task_count){
 ```
 
 # Reference
-
+- https://github.com/liej6799/rk3588
+- https://github.com/nvdla/hw
+- https://github.com/nvdla/sw
+- https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/drivers/accel/rocket
+- https://gitlab.freedesktop.org/mesa/mesa/-/tree/main/src/gallium/drivers/rocket>
+- https://github.com/nvdla/vp
 - https://clehaxze.tw/gemlog/2023/08-26-benchmarking-rk3588-npu-matrix-multiplcation-performance.gmi
 - https://clehaxze.tw/gemlog/2023/09-02-benchmarking-rk3588-npu-matrix-multiplcation-performance-ep2.gmi
 - https://clehaxze.tw/gemlog/2024/02-14-benchmarking-rk3588-npu-matrix-multiplcation-performance-ep2.gmi
