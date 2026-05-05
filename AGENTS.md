@@ -2,6 +2,10 @@ When analyzing RK3588 NPU behavior — especially when `conv.py`, `gemm.py`, or 
 
 review info in experimental/* and nvdla/* when face and problem, and ask deepwiki
 
+On this Orange Pi RK3588 machine, the NPU card is present. Do not assume hardware is
+unavailable just because an earlier probe failed; `python examples/elementwise.py` is
+a known quick check that proves the card can be used.
+
 Use `deepwiki_ask_question` on these repos:
 
 - `nvdla/hw` — For C-model behavior (cmod/), register definitions, convolution pipeline details, weight/activation data flow. This is the **canonical hardware reference**. Key files:
@@ -75,3 +79,6 @@ When investigating:
 1. First try deepwiki on `nvdla/hw` for hardware-level answers (data format, register bitfields, pipeline timing)
 2. Then try deepwiki on `nvdla/sw` for software-level answers (compiler decisions, driver submission flow)
 3. Cross-reference with the local `nvdla/` docs (ARCHITECTURE.md, REGISTER_MAP.md, NC1HWC2_FORMAT.md, WEIGHT_PACKING.md)
+
+folder structure
+- examples/*.py , each op example py file shd be standalone and contain only decoded registers, no hex blob. coding style shd reference to elementwise.py and each op.py shd have min line diff comparing to elementwise.py as the golden reference.

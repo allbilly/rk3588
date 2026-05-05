@@ -1,41 +1,44 @@
 ⚠️ Documentations still WIP. 
 - For now u can read the code at examples/elementwise.py or [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/allbilly/rk3588) (it has up to 1 week delay)
 
-
 # RK3588 
 
 This repo run ops on RK3588 NPU with pure python and NPU register programming. No RKNN, no ONNX, no compiler, nothing.
 
 TODO
 - Aim to write details documentation as my [ane](https://github.com/allbilly/ane) repo
-- test openrockchip kernel driver merged in kernel 6.18 thanks to [Tomeu Vizoso](https://blog.tomeuvizoso.net/2025/07/rockchip-npu-update-6-we-are-in-mainline.html)
-- PR my rk3588 npu knowledge to [mesa](https://gitlab.freedesktop.org/mesa/mesa)
-- NVDLA docker simulation
-- multi op in one submit
-- check nvdla/hw source code or ghidra rknn to find solution to too many magic in conv matmul input packing and too much magic if
-
+- fork and add more regsiters to [mesa rocket](https://gitlab.freedesktop.org/mesa/mesa/-/tree/main/src/gallium/drivers/rocket)
+- can [NVDLA/vp](https://github.com/nvdla/vp) helps 
 
 # For Normal user
 
-✅ Tested on Official Ubuntu image Orange Pi 1.2.2 Jammy with Linux 6.1.99-rockchip-rk3588 OrangePi 5
-http://www.orangepi.org/html/hardWare/computerAndMicrocontrollers/service-and-support/Orange-pi-5.html
+Tested on
+✅ Hardware: OrangePi 5 16GB
+✅ [OrangePi Ubuntu 1.2.2 Jammy](http://www.orangepi.org/html/hardWare/computerAndMicrocontrollers/service-and-support/Orange-pi-5.html)  Linux 6.1.99-rockchip-rk3588 OrangePi 5 
+✅ [Armbian Ubuntu 24.04](https://www.armbian.com/boards/orangepi5) 6.18.24-current-rockchip64
 
 ## What is rk3588
 
 rk3588 is a NVDLA like NPU designed for convulution.
 You can send op to npu with pure python.
 
+For OrangePi Ubuntu with RKNPU driver preinstalled,
 ```bash
 python examples/elementwise.py
 python examples/gemm.py
 python examples/conv.py
 ```
 
+For Armbian Ubuntu with mainline rocket driver preinstalled,
+```bash
+python examples/mainline6_18/elementwise.py
+python examples/mainline6_18/gemm.py
+python examples/mainline6_18/conv.py
+```
+
 # For Developer
 
-## Adapting This Codebase: rknpu (vendor) → rocket (upstream mainline)
-
-The upstream [`rocket` driver](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/drivers/accel/rocket) (`drivers/accel/rocket/`, merged in **v6.10-rc1**) already supports RK3588 via `compatible = "rockchip,rk3588-rknn-core"`. It is authored by Tomeu Vizoso (Collabora) and uses the proper DRM accel framework.
+## rknpu (vendor) → rocket (upstream mainline)
 
 ### What changes
 
