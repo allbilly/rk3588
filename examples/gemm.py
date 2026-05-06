@@ -18,13 +18,13 @@ RK_KN_LINE_STRIDE_START = 512
 
 class reg:
     # --- Stream/Target IDs (shifted into bits 48-63) ---
-    TARGET_CNA  = 0x0201   # CNA (Convolution/Matrix unit)
-    TARGET_CORE = 0x0801   # CORE (Matrix compute engine)
-    TARGET_DPU  = 0x1001   # DPU (Elementwise/DPU unit)
-    TARGET_RDMA = 0x2001   # RDMA (Read DMA for inputs/weights)
-    TARGET_PC   = 0x0081   # PC (Program Control / operation enable)
-    TARGET_PC_REG = 0x0101 # PC chain registers
-    TARGET_VERSION = 0x0041
+    CNA  = 0x0201   # CNA (Convolution/Matrix unit)
+    CORE = 0x0801   # CORE (Matrix compute engine)
+    DPU  = 0x1001   # DPU (Elementwise/DPU unit)
+    RDMA = 0x2001   # RDMA (Read DMA for inputs/weights)
+    PC   = 0x0081   # PC (Program Control / operation enable)
+    PC_REG = 0x0101 # PC chain registers
+    VERSION = 0x0041
 
     # --- PC (0x0000) ---
     OPERATION_ENABLE    = 0x0008   # PC operation enable
@@ -239,140 +239,140 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
     notch_val = 8 * min(align_out // MIN_CHANNEL_TILE, RK_LINE_STRIDE_GROUP_CAP) - 1
     
     npu_regs = [
-        E(reg.TARGET_DPU,  reg.S_POINTER,
+        E(reg.DPU,  reg.S_POINTER,
                 ((1 << 3) |                           # DPU_S_POINTER_POINTER_PP_MODE
                 (1 << 2)  |                           # DPU_S_POINTER_EXECUTER_PP_EN
                 (1 << 1))                             # DPU_S_POINTER_POINTER_PP_EN
         ),
-        E(reg.TARGET_CNA,  reg.CNA_CONV_CON1, 
+        E(reg.CNA,  reg.CNA_CONV_CON1, 
                 ((2 << 4) |                           # CNA_CONV_CON1_IN_PRECISION(2)=fp16
                 (2 << 7)  |                           # CNA_CONV_CON1_PROC_PRECISION(2)=fp16
                 (1 << 29) )                           # CNA_CONV_CON1_GROUP_LINE_OFF
         ),
-        E(reg.TARGET_CNA,  reg.CNA_CONV_CON2,
+        E(reg.CNA,  reg.CNA_CONV_CON2,
                 ((feature_grains << 4))              # CNA_CONV_CON2_FEATURE_GRAINS
         ),
-        E(reg.TARGET_CNA,  reg.CNA_CONV_CON3,
+        E(reg.CNA,  reg.CNA_CONV_CON3,
                 ((1 << 3) |                           # CNA_CONV_CON3_OPERATION_ENABLE
                 1)                                    # CNA_CONV_CON3_WEIGHT_REUSE
         ),
-        E(reg.TARGET_CNA,  reg.CNA_DATA_SIZE0,
+        E(reg.CNA,  reg.CNA_DATA_SIZE0,
                 ((1 << 16) |                          # CNA_DATA_SIZE0_WIDTH
                 m)                                    # CNA_DATA_SIZE0_HEIGHT
         ),
-        E(reg.TARGET_CNA,  reg.CNA_DATA_SIZE1,
+        E(reg.CNA,  reg.CNA_DATA_SIZE1,
                 (((align_in - 1) << 16) |             # CNA_DATA_SIZE1_CHANNEL
                 align_in)                             # CNA_DATA_SIZE1_ATOMICS
         ),
-        E(reg.TARGET_CNA,  reg.CNA_DATA_SIZE2,   1),
-        E(reg.TARGET_CNA,  reg.CNA_DATA_SIZE3,   m),
-        E(reg.TARGET_CNA,  reg.CNA_WEIGHT_SIZE0, input_row_bytes * align_out),
-        E(reg.TARGET_CNA,  reg.CNA_WEIGHT_SIZE1, input_row_bytes),
-        E(reg.TARGET_CNA,  reg.CNA_WEIGHT_SIZE2,
+        E(reg.CNA,  reg.CNA_DATA_SIZE2,   1),
+        E(reg.CNA,  reg.CNA_DATA_SIZE3,   m),
+        E(reg.CNA,  reg.CNA_WEIGHT_SIZE0, input_row_bytes * align_out),
+        E(reg.CNA,  reg.CNA_WEIGHT_SIZE1, input_row_bytes),
+        E(reg.CNA,  reg.CNA_WEIGHT_SIZE2,
                 ((1 << 24) |                          # CNA_WEIGHT_SIZE2_KERNEL_WIDTH
                 (1 << 16) |                           # CNA_WEIGHT_SIZE2_KERNEL_HEIGHT
                 align_out)                            # CNA_WEIGHT_SIZE2_KERNELS
         ),
-        E(reg.TARGET_CNA,  reg.CNA_CBUF_CON0,
+        E(reg.CNA,  reg.CNA_CBUF_CON0,
                 (((RK_CBUF_BANKS - data_banks) << 4) | # CNA_CBUF_CON0_WEIGHT_BANK
                 data_banks)                            # CNA_CBUF_CON0_DATA_BANK
         ),
-        E(reg.TARGET_CNA,  reg.CNA_CBUF_CON1, _ceil_div(align_in, MIN_CHANNEL_TILE)),
-        E(reg.TARGET_CNA,  reg.CNA_CVT_CON0,
+        E(reg.CNA,  reg.CNA_CBUF_CON1, _ceil_div(align_in, MIN_CHANNEL_TILE)),
+        E(reg.CNA,  reg.CNA_CVT_CON0,
                 ((1 << 3) |                           # CNA_CVT_CON0_TRUNCATE
                 (1 << 1) |                            # CNA_CVT_CON0_SCALE
                 1)                                    # CNA_CVT_CON0_ENABLE
         ),
-        E(reg.TARGET_CNA,  reg.CNA_CVT_CON1,
+        E(reg.CNA,  reg.CNA_CVT_CON1,
                 (1 << 16)                             # CNA_CVT_CON1_SCALE
         ),
-        E(reg.TARGET_CNA,  reg.CNA_CVT_CON2,
+        E(reg.CNA,  reg.CNA_CVT_CON2,
                 (1 << 16)                             # CNA_CVT_CON2_SCALE
         ),
-        E(reg.TARGET_CNA,  reg.CNA_CVT_CON3,
+        E(reg.CNA,  reg.CNA_CVT_CON3,
                 (1 << 16)                             # CNA_CVT_CON3_SCALE
         ),
-        E(reg.TARGET_CNA,  reg.CNA_CVT_CON4,
+        E(reg.CNA,  reg.CNA_CVT_CON4,
                 (1 << 16)                             # CNA_CVT_CON4_SCALE
         ),
-        E(reg.TARGET_CNA,  reg.CNA_FEATURE_DATA_ADDR, in_dma & 0xFFFFFFFF),
-        E(reg.TARGET_CNA,  reg.CNA_DMA_CON0,
+        E(reg.CNA,  reg.CNA_FEATURE_DATA_ADDR, in_dma & 0xFFFFFFFF),
+        E(reg.CNA,  reg.CNA_DMA_CON0,
                 ((15 << 16) |                         # CNA_DMA_CON0_READ_BURST
                 15)                                   # CNA_DMA_CON0_WEIGHT_BURST
         ),
-        E(reg.TARGET_CNA,  reg.CNA_DMA_CON1,     line_stride),
-        E(reg.TARGET_CNA,  reg.CNA_DMA_CON2,     0),  # surf_stride = 0 , cannot skip
-        E(reg.TARGET_CNA,  reg.CNA_FC_DATA_SIZE0,
+        E(reg.CNA,  reg.CNA_DMA_CON1,     line_stride),
+        E(reg.CNA,  reg.CNA_DMA_CON2,     0),  # surf_stride = 0 , cannot skip
+        E(reg.CNA,  reg.CNA_FC_DATA_SIZE0,
                 ((1 << 16) |                          # CNA_FC_DATA_SIZE0_WIDTH
                 m)                                    # CNA_FC_DATA_SIZE0_HEIGHT
         ),
-        E(reg.TARGET_CNA,  reg.CNA_FC_DATA_SIZE1, align_in),
-        E(reg.TARGET_CNA,  reg.CNA_DCOMP_ADDR0,  wt_dma & 0xFFFFFFFF),
-        E(reg.TARGET_CORE, reg.CORE_MISC_CFG,
+        E(reg.CNA,  reg.CNA_FC_DATA_SIZE1, align_in),
+        E(reg.CNA,  reg.CNA_DCOMP_ADDR0,  wt_dma & 0xFFFFFFFF),
+        E(reg.CORE, reg.CORE_MISC_CFG,
                 ((2 << 8) |                           # CORE_MISC_CFG_PROC_PRECISION
                 1)                                    # CORE_MISC_CFG_OPERATION_ENABLE
         ),
-        E(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_0,
+        E(reg.CORE, reg.CORE_DATAOUT_SIZE_0,
                 (((m - 1) << 16) |                    # CORE_DATAOUT_SIZE_0_HEIGHT
                 0)                                    # CORE_DATAOUT_SIZE_0_WIDTH
         ),
-        E(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_1, align_out - 1),
-        E(reg.TARGET_CORE, reg.CORE_RESERVED_3030,  0),
-        E(reg.TARGET_DPU,  reg.FEATURE_MODE_CFG,
+        E(reg.CORE, reg.CORE_DATAOUT_SIZE_1, align_out - 1),
+        E(reg.CORE, reg.CORE_RESERVED_3030,  0),
+        E(reg.DPU,  reg.FEATURE_MODE_CFG,
                 ((15 << 5) |                          # DPU_FEATURE_MODE_CFG_BYPASS
                 (2 << 1))                             # DPU_FEATURE_MODE_CFG_MODE
         ),
-        E(reg.TARGET_DPU,  reg.DATA_FORMAT,
+        E(reg.DPU,  reg.DATA_FORMAT,
                 ((5 << 29) |                          # DPU_DATA_FORMAT_OUT_PRECISION
                 (2 << 26) |                           # DPU_DATA_FORMAT_PROC_PRECISION
                 2)                                    # DPU_DATA_FORMAT_IN_PRECISION
         ),
-        E(reg.TARGET_DPU,  reg.DST_BASE_ADDR,     out_dma & 0xFFFFFFFF),
-        E(reg.TARGET_DPU,  reg.DST_SURF_STRIDE,
+        E(reg.DPU,  reg.DST_BASE_ADDR,     out_dma & 0xFFFFFFFF),
+        E(reg.DPU,  reg.DST_SURF_STRIDE,
                 (1 << 4)                              # DPU_DST_SURF_STRIDE
         ),
-        E(reg.TARGET_DPU,  reg.DATA_CUBE_WIDTH,   0),
-        E(reg.TARGET_DPU,  reg.DATA_CUBE_HEIGHT,  m - 1),
-        E(reg.TARGET_DPU,  reg.DATA_CUBE_NOTCH,
+        E(reg.DPU,  reg.DATA_CUBE_WIDTH,   0),
+        E(reg.DPU,  reg.DATA_CUBE_HEIGHT,  m - 1),
+        E(reg.DPU,  reg.DATA_CUBE_NOTCH,
                 ((notch_val << 16) |                  # DPU_DATA_CUBE_NOTCH_SURF
                 notch_val)                            # DPU_DATA_CUBE_NOTCH_LINE
         ),
-        E(reg.TARGET_DPU,  reg.DATA_CUBE_CHANNEL,
+        E(reg.DPU,  reg.DATA_CUBE_CHANNEL,
                 (((align_out - 1) << 16) |            # DPU_DATA_CUBE_CHANNEL_CUBE
                 (align_out - 1))                      # DPU_DATA_CUBE_CHANNEL_ATOMICS
         ),
-        E(reg.TARGET_DPU,  reg.BS_CFG,
+        E(reg.DPU,  reg.BS_CFG,
                 ((1 << 6) |                           # DPU_BS_CFG_BS_RELU_BYPASS
                 (1 << 4)  |                           # DPU_BS_CFG_BS_MUL_BYPASS
                 (1 << 1)  |                           # DPU_BS_CFG_BS_ALU_BYPASS
                 1)                                    # DPU_BS_CFG_BS_BYPASS
         ),
-        E(reg.TARGET_DPU,  reg.BS_OW_CFG,
+        E(reg.DPU,  reg.BS_OW_CFG,
                 ((3 << 8) |                           # DPU_BS_OW_CFG_SIZE_E_2
                 (3 << 5)  |                           # DPU_BS_OW_CFG_SIZE_E_1
                 (3 << 2)  |                           # DPU_BS_OW_CFG_SIZE_E_0
                 (1 << 1))                             # DPU_BS_OW_CFG_OD_BYPASS
         ),
-        E(reg.TARGET_DPU,  reg.WDMA_SIZE_0,       align_out - 1),
-        E(reg.TARGET_DPU,  reg.WDMA_SIZE_1,
+        E(reg.DPU,  reg.WDMA_SIZE_0,       align_out - 1),
+        E(reg.DPU,  reg.WDMA_SIZE_1,
                 (((m - 1) << 16) |                    # DPU_WDMA_SIZE_1_HEIGHT
                 0)                                    # DPU_WDMA_SIZE_1_WIDTH
         ),
-        E(reg.TARGET_DPU,  reg.BN_CFG,
+        E(reg.DPU,  reg.BN_CFG,
                 ((1 << 6) |                           # DPU_BN_CFG_BN_RELU_BYPASS
                 (1 << 4)  |                           # DPU_BN_CFG_BN_MUL_BYPASS
                 (1 << 1)  |                           # DPU_BN_CFG_BN_ALU_BYPASS
                 1)                                    # DPU_BN_CFG_BN_BYPASS
         ),
         # emit with default bypass?
-        E(reg.TARGET_DPU,  reg.EW_CFG,
+        E(reg.DPU,  reg.EW_CFG,
                 ((1 << 9) |                           # DPU_EW_CFG_EW_RELU_BYPASS
                 (1 << 8)  |                           # DPU_EW_CFG_EW_OP_CVT_BYPASS
                 (1 << 7)  |                           # DPU_EW_CFG_EW_LUT_BYPASS
                 (1 << 1)  |                           # DPU_EW_CFG_EW_OP_BYPASS
                 1)                                    # DPU_EW_CFG_EW_BYPASS
         ),
-        E(reg.TARGET_DPU,  reg.SURFACE_ADD,
+        E(reg.DPU,  reg.SURFACE_ADD,
                 ((1 * 4) << 4)                        # DPU_SURFACE_ADD = DPU_DST_SURF_STRIDE*4
                 # TODO is times 4 really needed
         ),
@@ -381,16 +381,16 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
 
 def write_regs_to_npu_task(task_regs):
     def enable_npu_units_and_set_next_pc_addr(next_offset, next_task_regs_len):
-        enable_npu_units = E(reg.TARGET_PC, reg.OPERATION_ENABLE,
+        enable_npu_units = E(reg.PC, reg.OPERATION_ENABLE,
                             (6 << 1) |                           # PC_OPERATION_ENABLE_RESERVED_0 = units to enable(DPU/CNA/PPU), info not in TRM
                             1)                                   # PC_OPERATION_ENABLE_OP_EN
 
         if next_offset is None: return [ enable_npu_units ]
         next_addr = regcmd_mem_create.dma_addr + next_offset* ctypes.sizeof(ctypes.c_uint64)
         return [
-            E(reg.TARGET_PC_REG, reg.PC_BASE_ADDRESS, next_addr & 0xFFFFFFF0),
-            E(reg.TARGET_PC_REG, reg.PC_REGISTER_AMOUNTS, _ceil_div(next_task_regs_len, 2) + 1),
-            E(reg.TARGET_VERSION, 0, 0),
+            E(reg.PC_REG, reg.PC_BASE_ADDRESS, next_addr & 0xFFFFFFF0),
+            E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, _ceil_div(next_task_regs_len, 2) + 1),
+            E(reg.VERSION, 0, 0),
             enable_npu_units
         ]
 
