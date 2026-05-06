@@ -39,7 +39,7 @@ Tested on
 The python files in examples are self-contained. Zero dependency.
 Simply run with python.
 
-For OrangePi Ubuntu with RKNPU driver preinstalled,
+🍊 OrangePi Ubuntu with RKNPU driver preinstalled,
 ```bash
 pip install numpy
 python examples/elementwise.py
@@ -51,7 +51,7 @@ python experimental/conv.py
 python experimental/pool.py
 ```
 
-For Armbian Ubuntu with mainline rocket driver preinstalled,
+🐧 Armbian Ubuntu with mainline rocket driver preinstalled,
 ```bash
 python experimental/mainline6_18/elementwise.py
 python experimental/mainline6_18/gemm.py
