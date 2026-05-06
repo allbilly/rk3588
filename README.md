@@ -373,11 +373,10 @@ we have input in fp16 and process in fp16
 ```
 cna_desc.in_precision = precision_float16;
 cna_desc.proc_precision = precision_float16;
-``
+```
 
 ```
 EMIT(REG_DPU_S_POINTER, DPU_S_POINTER_POINTER_PP_MODE(1) | DPU_S_POINTER_EXECUTER_PP_EN(1) | DPU_S_POINTER_POINTER_PP_EN(1));
-
 ```
 
 ## 2. RKNPU vs rocket mainline driver
