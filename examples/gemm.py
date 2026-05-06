@@ -339,64 +339,127 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
 
     input_bytes = m * align_in * FP16_BYTES
     data_bank = _rk_data_bank_count(input_bytes)
-    data_entries = _rk_cbuf_data_entries(align_in)
-
     dst_surf_stride = align_out if no_group_line_off else 1
-    feature_grains = _rk_feature_grains(m, align_in, eff_k)
     notch_val = _rk_notch_value(m, k, n, align_out, eff_k)
 
     def E(target, reg_addr, value):
         return (target << 48) | ((value & 0xFFFFFFFF) << 16) | reg_addr
 
-    conv_con1 = (2 << 7) | (2 << 4)
-    if not no_group_line_off:
-        conv_con1 |= 1 << 29
-
     npu_regs = [
-        E(reg.TARGET_DPU,  reg.S_POINTER,       (1 << 3) | (1 << 2) | (1 << 1)),
-        E(reg.TARGET_CNA,  reg.CNA_CONV_CON1,    conv_con1),
-        E(reg.TARGET_CNA,  reg.CNA_CONV_CON2,    feature_grains << 4),
-        E(reg.TARGET_CNA,  reg.CNA_CONV_CON3,    (1 << 3) | 1),
-        E(reg.TARGET_CNA,  reg.CNA_DATA_SIZE0,   (1 << 16) | m),
-        E(reg.TARGET_CNA,  reg.CNA_DATA_SIZE1,   ((align_in - 1) << 16) | align_in),
+        E(reg.TARGET_DPU,  reg.S_POINTER,
+                ((1 << 3) |                           # DPU_S_POINTER_POINTER_PP_MODE
+                (1 << 2)  |                           # DPU_S_POINTER_EXECUTER_PP_EN
+                (1 << 1))                             # DPU_S_POINTER_POINTER_PP_EN
+        ),
+        E(reg.TARGET_CNA,  reg.CNA_CONV_CON1, 
+                ((2 << 4) |                           # CNA_CONV_CON1_IN_PRECISION(2)=fp16
+                (2 << 7)  |                           # CNA_CONV_CON1_PROC_PRECISION(2)=fp16
+                (int)(not no_group_line_off) << 29 )  # CNA_CONV_CON1_GROUP_LINE_OFF
+        ),
+        E(reg.TARGET_CNA,  reg.CNA_CONV_CON2,
+                (_rk_feature_grains(m, align_in, eff_k) << 4)                 # CNA_CONV_CON2_FEATURE_GRAINS
+        ),
+        E(reg.TARGET_CNA,  reg.CNA_CONV_CON3,
+                ((1 << 3) |                           # CNA_CONV_CON3_OPERATION_ENABLE
+                1)                                    # CNA_CONV_CON3_WEIGHT_REUSE
+        ),
+        E(reg.TARGET_CNA,  reg.CNA_DATA_SIZE0,
+                ((1 << 16) |                          # CNA_DATA_SIZE0_WIDTH
+                m)                                    # CNA_DATA_SIZE0_HEIGHT
+        ),
+        E(reg.TARGET_CNA,  reg.CNA_DATA_SIZE1,
+                (((align_in - 1) << 16) |             # CNA_DATA_SIZE1_CHANNEL
+                align_in)                             # CNA_DATA_SIZE1_ATOMICS
+        ),
         E(reg.TARGET_CNA,  reg.CNA_DATA_SIZE2,   1),
         E(reg.TARGET_CNA,  reg.CNA_DATA_SIZE3,   m),
         E(reg.TARGET_CNA,  reg.CNA_WEIGHT_SIZE0, align_in * FP16_BYTES * align_out),
         E(reg.TARGET_CNA,  reg.CNA_WEIGHT_SIZE1, align_in * FP16_BYTES),
-        E(reg.TARGET_CNA,  reg.CNA_WEIGHT_SIZE2, (1 << 24) | (1 << 16) | align_out),
-        E(reg.TARGET_CNA,  reg.CNA_CBUF_CON0,    ((RK_CBUF_BANKS - data_bank) << 4) | data_bank),
-        E(reg.TARGET_CNA,  reg.CNA_CBUF_CON1,    data_entries),
-        E(reg.TARGET_CNA,  reg.CNA_CVT_CON0,     (1 << 3) | (1 << 1) | 1),
-        E(reg.TARGET_CNA,  reg.CNA_CVT_CON1,     1 << 16),
-        E(reg.TARGET_CNA,  reg.CNA_CVT_CON2,     1 << 16),
-        E(reg.TARGET_CNA,  reg.CNA_CVT_CON3,     1 << 16),
-        E(reg.TARGET_CNA,  reg.CNA_CVT_CON4,     1 << 16),
+        E(reg.TARGET_CNA,  reg.CNA_WEIGHT_SIZE2,
+                ((1 << 24) |                          # CNA_WEIGHT_SIZE2_KERNEL_WIDTH
+                (1 << 16) |                           # CNA_WEIGHT_SIZE2_KERNEL_HEIGHT
+                align_out)                            # CNA_WEIGHT_SIZE2_KERNELS
+        ),
+        E(reg.TARGET_CNA,  reg.CNA_CBUF_CON0,
+                (((RK_CBUF_BANKS - data_bank) << 4) | # CNA_CBUF_CON0_WEIGHT_BANK
+                data_bank)                            # CNA_CBUF_CON0_DATA_BANK
+        ),
+        E(reg.TARGET_CNA,  reg.CNA_CBUF_CON1, _rk_cbuf_data_entries(align_in)),
+        E(reg.TARGET_CNA,  reg.CNA_CVT_CON0,
+                ((1 << 3) |                           # CNA_CVT_CON0_TRUNCATE
+                (1 << 1) |                            # CNA_CVT_CON0_SCALE
+                1)                                    # CNA_CVT_CON0_ENABLE
+        ),
+        E(reg.TARGET_CNA,  reg.CNA_CVT_CON1,
+                (1 << 16)                             # CNA_CVT_CON1_SCALE
+        ),
+        E(reg.TARGET_CNA,  reg.CNA_CVT_CON2,
+                (1 << 16)                             # CNA_CVT_CON2_SCALE
+        ),
+        E(reg.TARGET_CNA,  reg.CNA_CVT_CON3,
+                (1 << 16)                             # CNA_CVT_CON3_SCALE
+        ),
+        E(reg.TARGET_CNA,  reg.CNA_CVT_CON4,
+                (1 << 16)                             # CNA_CVT_CON4_SCALE
+        ),
         E(reg.TARGET_CNA,  reg.CNA_FEATURE_DATA_ADDR, in_dma & 0xFFFFFFFF),
-        E(reg.TARGET_CNA,  reg.CNA_DMA_CON0,     (15 << 16) | 15),
+        E(reg.TARGET_CNA,  reg.CNA_DMA_CON0,
+                ((15 << 16) |                         # CNA_DMA_CON0_READ_BURST
+                15)                                   # CNA_DMA_CON0_WEIGHT_BURST
+        ),
         E(reg.TARGET_CNA,  reg.CNA_DMA_CON1,     line_stride),
         E(reg.TARGET_CNA,  reg.CNA_DMA_CON2,     surf_stride),
-        E(reg.TARGET_CNA,  reg.CNA_FC_DATA_SIZE0, (1 << 16) | m),
+        E(reg.TARGET_CNA,  reg.CNA_FC_DATA_SIZE0,
+                ((1 << 16) |                          # CNA_FC_DATA_SIZE0_WIDTH
+                m)                                    # CNA_FC_DATA_SIZE0_HEIGHT
+        ),
         E(reg.TARGET_CNA,  reg.CNA_FC_DATA_SIZE1, align_in),
         E(reg.TARGET_CNA,  reg.CNA_DCOMP_ADDR0,  wt_dma & 0xFFFFFFFF),
-        E(reg.TARGET_CORE, reg.CORE_MISC_CFG,       (2 << 8) | 1),
-        E(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_0, ((m - 1) << 16) | 0),
+        E(reg.TARGET_CORE, reg.CORE_MISC_CFG,
+                ((2 << 8) |                           # CORE_MISC_CFG_PROC_PRECISION
+                1)                                    # CORE_MISC_CFG_OPERATION_ENABLE
+        ),
+        E(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_0,
+                (((m - 1) << 16) |                    # CORE_DATAOUT_SIZE_0_HEIGHT
+                0)                                    # CORE_DATAOUT_SIZE_0_WIDTH
+        ),
         E(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_1, align_out - 1),
         E(reg.TARGET_CORE, reg.CORE_RESERVED_3030,  0),
-        E(reg.TARGET_DPU,  reg.FEATURE_MODE_CFG,  (15 << 5) | (2 << 1)),
-        E(reg.TARGET_DPU,  reg.DATA_FORMAT,       (5 << 29) | (2 << 26) | 2),
+        E(reg.TARGET_DPU,  reg.FEATURE_MODE_CFG,
+                ((15 << 5) |                          # DPU_FEATURE_MODE_CFG_BYPASS
+                (2 << 1))                             # DPU_FEATURE_MODE_CFG_MODE
+        ),
+        E(reg.TARGET_DPU,  reg.DATA_FORMAT,
+                ((5 << 29) |                          # DPU_DATA_FORMAT_OUT_PRECISION
+                (2 << 26) |                           # DPU_DATA_FORMAT_PROC_PRECISION
+                2)                                    # DPU_DATA_FORMAT_IN_PRECISION
+        ),
         E(reg.TARGET_DPU,  reg.DST_BASE_ADDR,     out_dma & 0xFFFFFFFF),
-        E(reg.TARGET_DPU,  reg.DST_SURF_STRIDE,   dst_surf_stride << 4),
+        E(reg.TARGET_DPU,  reg.DST_SURF_STRIDE,
+                (dst_surf_stride << 4)                # DPU_DST_SURF_STRIDE
+        ),
         E(reg.TARGET_DPU,  reg.DATA_CUBE_WIDTH,   0),
         E(reg.TARGET_DPU,  reg.DATA_CUBE_HEIGHT,  m - 1),
-        E(reg.TARGET_DPU,  reg.DATA_CUBE_NOTCH,   (notch_val << 16) | notch_val),
-        E(reg.TARGET_DPU,  reg.DATA_CUBE_CHANNEL, ((align_out - 1) << 16) | (align_out - 1)),
+        E(reg.TARGET_DPU,  reg.DATA_CUBE_NOTCH,
+                ((notch_val << 16) |                  # DPU_DATA_CUBE_NOTCH_SURF
+                notch_val)                            # DPU_DATA_CUBE_NOTCH_LINE
+        ),
+        E(reg.TARGET_DPU,  reg.DATA_CUBE_CHANNEL,
+                (((align_out - 1) << 16) |            # DPU_DATA_CUBE_CHANNEL_CUBE
+                (align_out - 1))                      # DPU_DATA_CUBE_CHANNEL_ATOMICS
+        ),
         E(reg.TARGET_DPU,  reg.BS_CFG,            0x00000053),
         E(reg.TARGET_DPU,  reg.BS_OW_CFG,         0x0000036e),
         E(reg.TARGET_DPU,  reg.WDMA_SIZE_0,       align_out - 1),
-        E(reg.TARGET_DPU,  reg.WDMA_SIZE_1,       ((m - 1) << 16) | 0),
+        E(reg.TARGET_DPU,  reg.WDMA_SIZE_1,
+                (((m - 1) << 16) |                    # DPU_WDMA_SIZE_1_HEIGHT
+                0)                                    # DPU_WDMA_SIZE_1_WIDTH
+        ),
         E(reg.TARGET_DPU,  reg.BN_CFG,            0x00000053),
         E(reg.TARGET_DPU,  reg.EW_CFG,            0x00000383),
-        E(reg.TARGET_DPU,  reg.SURFACE_ADD,       (dst_surf_stride * 4) << 4),
+        E(reg.TARGET_DPU,  reg.SURFACE_ADD,
+                ((dst_surf_stride * 4) << 4)          # DPU_SURFACE_ADD
+        ),
         E(reg.TARGET_PC,   reg.OPERATION_ENABLE,  0x0000000d),
     ]
     return npu_regs
