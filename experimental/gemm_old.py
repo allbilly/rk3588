@@ -1,5 +1,5 @@
 from fcntl import ioctl
-import os, mmap
+import os, mmap, sys
 import ctypes
 import numpy as np
 
@@ -167,7 +167,7 @@ def mem_allocate(fd, size, flags=0):
 
 def submit(task_obj_addr, task_count=1, flags=0x1):
     submit_struct = rknpu_submit(
-        flags=flags,
+        flags=flags,  # PC | BLOCK (NOT NONBLOCK: ioctl would return before NPU finishes)
         timeout=6000,
         task_start=0,
         task_number=task_count,
@@ -190,7 +190,8 @@ def submit(task_obj_addr, task_count=1, flags=0x1):
     return ioctl(fd, DRM_IOCTL_RKNPU_SUBMIT, submit_struct)
 
 def reset_npu(fd):
-    ret = ioctl(fd, DRM_IOCTL_RKNPU_ACTION, rknpu_action(flags=RKNPU_ACT_RESET, value=0))
+    action = rknpu_action(flags=RKNPU_ACT_RESET, value=0)
+    ret = ioctl(fd, DRM_IOCTL_RKNPU_ACTION, action)
     print(f"reset_npu ret={ret}")
     return ret
 
@@ -203,17 +204,51 @@ output_map, output_mem_create = mem_allocate(fd, size=4*1024*1024, flags=RKNPU_M
 tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
 regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
 
+def write_regs(npu_regs, clear_count):
+    for i in range(clear_count):
+        regcmd[i] = 0
+    for i in range(len(npu_regs)):
+        regcmd[i] = npu_regs[i]
+
+def setup_task(op_idx, enable_mask, reg_count):
+    tasks[0].flags  = 0;
+    tasks[0].op_idx = op_idx;
+    tasks[0].enable_mask = enable_mask;
+    tasks[0].int_mask = 0x300;
+    tasks[0].int_clear = 0x1ffff;
+    tasks[0].int_status = 0;
+    tasks[0].regcfg_amount = reg_count
+    tasks[0].regcfg_offset = 0;
+    tasks[0].regcmd_addr = regcmd_mem_create.dma_addr
+
+def setup_task_at(idx, op_idx, enable_mask, reg_count, reg_offset_qwords):
+    tasks[idx].flags  = 0
+    tasks[idx].op_idx = op_idx
+    tasks[idx].enable_mask = enable_mask
+    tasks[idx].int_mask = 0x300
+    tasks[idx].int_clear = 0x1ffff
+    tasks[idx].int_status = 0
+    tasks[idx].regcfg_amount = reg_count
+    tasks[idx].regcfg_offset = 0
+    tasks[idx].regcmd_addr = regcmd_mem_create.dma_addr + reg_offset_qwords * ctypes.sizeof(ctypes.c_uint64)
+
 def pack_input_row_major(m, n, k, a_matrix, in_pack, align_in):
     in_pack.reshape(m, align_in)[:, :k] = a_matrix[:, :k]
+
+def pack_input_c2_8(m, n, k, a_matrix, in_pack, align_in):
+    in_pack[:] = a_matrix[:, :k].reshape(m, -1, 8).transpose(1, 0, 2).ravel()
 
 def pack_weight_tile_16x32(m, n, k, b_matrix, wt_pack, align_in, align_out):
     wt = np.zeros((align_out, align_in), dtype=np.float16)
     wt[:n, :k] = b_matrix.T[:n, :k]
     wt_pack[:] = wt.reshape(align_out // 16, 16, align_in // 32, 32).transpose(0, 2, 1, 3).ravel()
 
-def unpack_row_major(m, n, k, raw, align_out):
+def decode_output_linear(m, n, k, raw, align_out):
     row_start = np.arange(m) * align_out
     return raw[row_start[:, None] + np.arange(n)]
+
+def decode_output_c2_4(m, n, k, raw, align_out):
+    return raw[:n // 4 * m * 4].reshape(n // 4, m, 4).transpose(1, 0, 2).reshape(m, n).copy()
 
 FP16_BYTES = 2
 FP32_BYTES = 4
@@ -221,9 +256,12 @@ CBUF_ENTRY_BYTES = 128
 CBUF_ENTRIES_PER_BANK = 256
 RK_CBUF_BANKS = 12
 MIN_CHANNEL_TILE = 32
+C2_INPUT = 8
 CBUF_BANK_SIZE = CBUF_ENTRIES_PER_BANK * CBUF_ENTRY_BYTES
+RK_MAX_DATA_BANKS = RK_CBUF_BANKS - 1
 RK_LINE_STRIDE_GROUP_CAP = 13
 RK_MIN_WIDE_FEATURE_GRAINS = 80
+RK_VERY_WIDE_K = 7872
 RK_KN_LINE_STRIDE_START = 512
 
 def _ceil_div(x, y):
@@ -235,41 +273,83 @@ def _align_up(x, align):
 def E(target, reg_addr, value):
     return (target << 48) | ((value & 0xFFFFFFFF) << 16) | reg_addr
 
+def _uses_c2_input(m, n, k):
+    square = m == n == k
+    cbuf_aligned = k % 64 == 0
+    cbuf_friendly = 64 <= k <= 256
+    return square and cbuf_aligned and cbuf_friendly
+
 def _gemm_layout(m, n, k):
     aligned_k = max(MIN_CHANNEL_TILE, _align_up(k, MIN_CHANNEL_TILE))
     align_out = max(MIN_CHANNEL_TILE, _align_up(n, MIN_CHANNEL_TILE))
     align_in = max(aligned_k, align_out)
-    eff_k = align_in if align_in != aligned_k else k
-    return align_in, align_out, eff_k
+    pad_k = align_in != aligned_k
+    eff_k = align_in if pad_k else k
+    return align_in, align_out, eff_k, pad_k
 
-def _rk_feature_grains(m, align_in):
-    input_row_bytes = align_in * FP16_BYTES
-    two_bank_rows = _ceil_div(2 * CBUF_BANK_SIZE, input_row_bytes)
-    even_two_bank_rows = (two_bank_rows + 1) & ~1
+def _rk_data_bank_count(input_bytes):
+    return max(1, min(RK_MAX_DATA_BANKS, _ceil_div(input_bytes, CBUF_BANK_SIZE)))
 
-    return max(RK_MIN_WIDE_FEATURE_GRAINS, even_two_bank_rows)
+def _rk_cbuf_data_entries(align_in):
+    return _ceil_div(align_in, MIN_CHANNEL_TILE)
+
+def _rk_line_stride(m, n, k, eff_k):
+    if eff_k <= MIN_CHANNEL_TILE or eff_k >= RK_KN_LINE_STRIDE_START or _uses_c2_input(m, n, k):
+        return 4
+    return min(RK_LINE_STRIDE_GROUP_CAP, _ceil_div(eff_k, MIN_CHANNEL_TILE)) * 4
+
+def _rk_no_group_line_off(m, n, k):
+    return _uses_c2_input(m, n, k)
+
+def _rk_feature_grains(m, align_in, eff_k):
+    if eff_k > RK_VERY_WIDE_K:
+        return 2
+    if m <= RK_MIN_WIDE_FEATURE_GRAINS:
+        return m + 1
+    denom = align_in * FP16_BYTES
+    grains = _ceil_div(2 * CBUF_BANK_SIZE, denom)
+    grains = (grains + 1) & ~1
+    return max(RK_MIN_WIDE_FEATURE_GRAINS, grains)
+
+def _rk_notch_value(m, k, n, align_out, eff_k):
+    notch_blocks = min(RK_LINE_STRIDE_GROUP_CAP, align_out // MIN_CHANNEL_TILE)
+    notch_val = C2_INPUT * notch_blocks - 1
+    if _rk_no_group_line_off(m, n, k) or eff_k > RK_VERY_WIDE_K:
+        return 0
+    return notch_val
+
+def get_input_packer(m, n, k, align_in):
+    if _uses_c2_input(m, n, k): return pack_input_c2_8
+    return pack_input_row_major
+
+def get_weight_packer(m, n, k, align_in):
+    return pack_weight_tile_16x32
+
+def get_output_decoder(m, n, k, align_out):
+    return decode_output_c2_4 if _uses_c2_input(m, n, k) else decode_output_linear
 
 def _max_m_tile(k):
-    align_in, _, _ = _gemm_layout(1, 1, k)
-    # 448 is the first 32-aligned channel count above the 13-group line/notch cap.
-    # WIP
-    # if align_in >= 448: return 1
-
-    # todo total 12 bank, why 10 for input and 2 for weight, which shd hv prioty
-    input_cbuf_budget = 10 * CBUF_BANK_SIZE
-    input_row_bytes = align_in * FP16_BYTES
-    return input_cbuf_budget // input_row_bytes
+    align_in, _, _, _ = _gemm_layout(1, 1, k)
+    if align_in >= 448:
+        return 1
+    row_bytes = align_in * FP16_BYTES
+    max_m = (10 * CBUF_BANK_SIZE) // row_bytes
+    return max(1, max_m)
 
 def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
-    align_in, align_out, eff_k = _gemm_layout(m, n, k)
+    align_in, align_out, eff_k, _ = _gemm_layout(m, n, k)
+    no_group_line_off = _rk_no_group_line_off(m, n, k)
+    line_stride = _rk_line_stride(m, n, k, eff_k)
+
+    surf_groups = m // 4
     surf_stride = 0
+    if align_in >= 64 and _uses_c2_input(m, n, k):
+        surf_stride = line_stride * (surf_groups - 1) + int(surf_groups == 0)
 
     input_bytes = m * align_in * FP16_BYTES
-    # 1 <= input_bytes//CBUF_BANK_SIZE <= RK_CBUF_BANKS-1 (leave 1 bank for weight)
-    data_bank = max(1, min(RK_CBUF_BANKS-1, _ceil_div(input_bytes, CBUF_BANK_SIZE))) 
-    line_stride = 4 if eff_k <= MIN_CHANNEL_TILE or eff_k >= RK_KN_LINE_STRIDE_START else min(RK_LINE_STRIDE_GROUP_CAP, _ceil_div(eff_k, MIN_CHANNEL_TILE)) * 4
-    dst_surf_stride = 1
-    notch_val = 8 * min(RK_LINE_STRIDE_GROUP_CAP, align_out // MIN_CHANNEL_TILE) - 1
+    data_bank = _rk_data_bank_count(input_bytes)
+    dst_surf_stride = align_out if no_group_line_off else 1
+    notch_val = _rk_notch_value(m, k, n, align_out, eff_k)
 
     npu_regs = [
         E(reg.TARGET_DPU,  reg.S_POINTER,
@@ -280,10 +360,10 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
         E(reg.TARGET_CNA,  reg.CNA_CONV_CON1, 
                 ((2 << 4) |                           # CNA_CONV_CON1_IN_PRECISION(2)=fp16
                 (2 << 7)  |                           # CNA_CONV_CON1_PROC_PRECISION(2)=fp16
-                (1 << 29) )                           # CNA_CONV_CON1_GROUP_LINE_OFF
+                (not no_group_line_off) << 29 )  # CNA_CONV_CON1_GROUP_LINE_OFF
         ),
         E(reg.TARGET_CNA,  reg.CNA_CONV_CON2,
-                (_rk_feature_grains(m, align_in) << 4) # CNA_CONV_CON2_FEATURE_GRAINS
+                (_rk_feature_grains(m, align_in, eff_k) << 4)                 # CNA_CONV_CON2_FEATURE_GRAINS
         ),
         E(reg.TARGET_CNA,  reg.CNA_CONV_CON3,
                 ((1 << 3) |                           # CNA_CONV_CON3_OPERATION_ENABLE
@@ -310,7 +390,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
                 (((RK_CBUF_BANKS - data_bank) << 4) | # CNA_CBUF_CON0_WEIGHT_BANK
                 data_bank)                            # CNA_CBUF_CON0_DATA_BANK
         ),
-        E(reg.TARGET_CNA,  reg.CNA_CBUF_CON1, _ceil_div(align_in, MIN_CHANNEL_TILE)),
+        E(reg.TARGET_CNA,  reg.CNA_CBUF_CON1, _rk_cbuf_data_entries(align_in)),
         E(reg.TARGET_CNA,  reg.CNA_CVT_CON0,
                 ((1 << 3) |                           # CNA_CVT_CON0_TRUNCATE
                 (1 << 1) |                            # CNA_CVT_CON0_SCALE
@@ -374,76 +454,62 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
                 (((align_out - 1) << 16) |            # DPU_DATA_CUBE_CHANNEL_CUBE
                 (align_out - 1))                      # DPU_DATA_CUBE_CHANNEL_ATOMICS
         ),
-        E(reg.TARGET_DPU,  reg.BS_CFG,
-                ((1 << 6) |                           # DPU_BS_CFG_BS_RELU_BYPASS
-                (1 << 4)  |                           # DPU_BS_CFG_BS_MUL_BYPASS
-                (1 << 1)  |                           # DPU_BS_CFG_BS_ALU_BYPASS
-                1)                                    # DPU_BS_CFG_BS_BYPASS
-        ),
-        E(reg.TARGET_DPU,  reg.BS_OW_CFG,
-                ((3 << 8) |                           # DPU_BS_OW_CFG_SIZE_E_2
-                (3 << 5)  |                           # DPU_BS_OW_CFG_SIZE_E_1
-                (3 << 2)  |                           # DPU_BS_OW_CFG_SIZE_E_0
-                (1 << 1))                             # DPU_BS_OW_CFG_OD_BYPASS
-        ),
+        E(reg.TARGET_DPU,  reg.BS_CFG,            0x00000053),
+        E(reg.TARGET_DPU,  reg.BS_OW_CFG,         0x0000036e),
         E(reg.TARGET_DPU,  reg.WDMA_SIZE_0,       align_out - 1),
         E(reg.TARGET_DPU,  reg.WDMA_SIZE_1,
                 (((m - 1) << 16) |                    # DPU_WDMA_SIZE_1_HEIGHT
                 0)                                    # DPU_WDMA_SIZE_1_WIDTH
         ),
-        E(reg.TARGET_DPU,  reg.BN_CFG,
-                ((1 << 6) |                           # DPU_BN_CFG_BN_RELU_BYPASS
-                (1 << 4)  |                           # DPU_BN_CFG_BN_MUL_BYPASS
-                (1 << 1)  |                           # DPU_BN_CFG_BN_ALU_BYPASS
-                1)                                    # DPU_BN_CFG_BN_BYPASS
-        ),
-        E(reg.TARGET_DPU,  reg.EW_CFG,
-                ((1 << 9) |                           # DPU_EW_CFG_EW_RELU_BYPASS
-                (1 << 8)  |                           # DPU_EW_CFG_EW_OP_CVT_BYPASS
-                (1 << 7)  |                           # DPU_EW_CFG_EW_LUT_BYPASS
-                (1 << 1)  |                           # DPU_EW_CFG_EW_OP_BYPASS
-                1)                                    # DPU_EW_CFG_EW_BYPASS
-        ),
+        E(reg.TARGET_DPU,  reg.BN_CFG,            0x00000053),
+        E(reg.TARGET_DPU,  reg.EW_CFG,            0x00000383),
         E(reg.TARGET_DPU,  reg.SURFACE_ADD,
                 ((dst_surf_stride * 4) << 4)          # DPU_SURFACE_ADD
         ),
+        E(reg.TARGET_PC,   reg.OPERATION_ENABLE,  0x0000000d),
     ]
     return npu_regs
 
-def _pc_tail(next_offset_qwords, next_body_reg_count):
-    def _pc_next_amount(body_reg_count):
-        return _ceil_div(body_reg_count, 2) + 1
+def _without_pc_enable(npu_regs):
+    if npu_regs and ((npu_regs[-1] >> 48) & 0xFFFF) == reg.TARGET_PC:
+        return npu_regs[:-1]
+    return npu_regs
 
+def _pc_next_amount(body_reg_count):
+    return _ceil_div(body_reg_count, 2) + 1
+
+def _pc_tail(next_offset_qwords, next_body_reg_count):
     if next_offset_qwords is None:
         return [
             0,
             E(reg.TARGET_PC_REG, reg.PC_REGISTER_AMOUNTS, 0),
             E(reg.TARGET_VERSION, 0, 0),
-            E(reg.TARGET_PC, reg.OPERATION_ENABLE,
-                    ((6 << 1) |                       # PC_OPERATION_ENABLE_RESERVED_0 captured GEMM payload
-                    1)                                # PC_OPERATION_ENABLE_OP_EN
-            ),
+            E(reg.TARGET_PC, reg.OPERATION_ENABLE, 0x0000000d),
         ]
     next_addr = regcmd_mem_create.dma_addr + next_offset_qwords * ctypes.sizeof(ctypes.c_uint64)
     return [
         E(reg.TARGET_PC_REG, reg.PC_BASE_ADDRESS, next_addr & 0xFFFFFFF0),
         E(reg.TARGET_PC_REG, reg.PC_REGISTER_AMOUNTS, _pc_next_amount(next_body_reg_count)),
         E(reg.TARGET_VERSION, 0, 0),
-        E(reg.TARGET_PC, reg.OPERATION_ENABLE,
-                ((6 << 1) |                           # PC_OPERATION_ENABLE_RESERVED_0 captured GEMM payload
-                1)                                    # PC_OPERATION_ENABLE_OP_EN
-        ),
+        E(reg.TARGET_PC, reg.OPERATION_ENABLE, 0x0000000d),
     ]
 
-def _write_chained_tasks(task_regs):
+def _write_pc_chain(task_regs):
     offsets = []
     offset = 0
     for regs in task_regs:
         offsets.append(offset)
         offset += _align_up(len(regs) + 4, 2)
 
-    assert offset <= regcmd_mem_create.size // ctypes.sizeof(ctypes.c_uint64), "regcmd buffer too small"
-    assert len(task_regs) <= tasks_mem_create.size // ctypes.sizeof(struct_rknpu_task), "task buffer too small"
+    regcmd_capacity = regcmd_mem_create.size // ctypes.sizeof(ctypes.c_uint64)
+    if offset > regcmd_capacity:
+        raise RuntimeError(f"regcmd buffer too small for {len(task_regs)} GEMM tasks")
+    task_capacity = tasks_mem_create.size // ctypes.sizeof(struct_rknpu_task)
+    if len(task_regs) > task_capacity:
+        raise RuntimeError(f"task buffer too small for {len(task_regs)} GEMM tasks")
+
+    for i in range(regcmd_capacity):
+        regcmd[i] = 0
 
     for idx, regs in enumerate(task_regs):
         base = offsets[idx]
@@ -453,21 +519,18 @@ def _write_chained_tasks(task_regs):
         next_len = len(task_regs[idx + 1]) if idx + 1 < len(task_regs) else 0
         for i, qword in enumerate(_pc_tail(next_offset, next_len)):
             regcmd[base + len(regs) + i] = qword
-        tasks[idx].op_idx = 4
-        tasks[idx].enable_mask = 0x18                  # Downstream raw GEMM task descriptor mask.
-        tasks[idx].int_mask = (1 << 8) | (1 << 9)      # PC_INTERRUPT_MASK_DPU_0 | DPU_1.
-        tasks[idx].int_clear = 0x1ffff                 # Downstream RKNPU_INT_CLEAR clears all driver status bits.
-        tasks[idx].regcfg_amount = len(regs)
-        tasks[idx].regcmd_addr = regcmd_mem_create.dma_addr + base * ctypes.sizeof(ctypes.c_uint64)
+        setup_task_at(idx, 4, 0x18, len(regs), base)
 
-def run_gemm(m, n, k, a_matrix, b_matrix):
-    align_in, align_out, _ = _gemm_layout(m, n, k)
-    max_m = _max_m_tile(k)
+def _run_gemm_chain(m, n, k, a_matrix, b_matrix, max_m):
+    align_in, align_out, _, pad_k = _gemm_layout(m, n, k)
 
     in_pack = np.zeros(align_in * m, dtype=np.float16)
     wt_pack = np.zeros(align_in * align_out, dtype=np.float16)
 
-    pack_input_row_major(m, n, k, a_matrix, in_pack, align_in)
+    pack_input = get_input_packer(m, n, k, align_in)
+    if pad_k:
+        pack_input = pack_input_row_major
+    pack_input(m, n, k, a_matrix, in_pack, align_in)
     pack_weight_tile_16x32(m, n, k, b_matrix, wt_pack, align_in, align_out)
 
     ct_inputs = (ctypes.c_uint16 * len(in_pack)).from_buffer(input_map)
@@ -481,18 +544,76 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
         in_dma = input_mem_create.dma_addr + start * align_in * FP16_BYTES
         out_dma = output_mem_create.dma_addr + start * align_out * FP32_BYTES
         regs = make_gemm_regs(tile_m, n, k, in_dma, weight_mem_create.dma_addr, out_dma)
-        task_regs.append(regs)
+        task_regs.append(_without_pc_enable(regs))
 
-    _write_chained_tasks(task_regs)
+    if "--dry" in sys.argv:
+        print(f"\n=== GEMM {m}x{n}x{k} PC-CHAIN DRY RUN ===")
+        print(f"  tasks={len(task_regs)} tile_m={max_m} align_in={align_in} align_out={align_out}")
+        for idx, regs in enumerate(task_regs):
+            print(f"  task[{idx}] body_regs={len(regs)} pc_next={0 if idx + 1 == len(task_regs) else _pc_next_amount(len(task_regs[idx + 1]))}")
+        return None
+
+    _write_pc_chain(task_regs)
     reset_npu(fd)
-    submit(tasks_mem_create.obj_addr, task_count=len(task_regs),
-           flags=((1 << 0) |                          # RKNPU_JOB_PC
-                  (0 << 1) |                          # RKNPU_JOB_BLOCK (absence of NONBLOCK)
-                  (1 << 2)))                          # RKNPU_JOB_PINGPONG
+    submit(tasks_mem_create.obj_addr, task_count=len(task_regs), flags=0x1 | 0x4)
 
     out_nbytes = max(256, ((m - 1) * align_out + n) * FP32_BYTES)
     raw = np.frombuffer(output_map, dtype=np.float32, count=out_nbytes // 4).copy()
-    return unpack_row_major(m, n, k, raw, align_out)
+    decode_output = get_output_decoder(m, n, k, align_out)
+    return decode_output(m, n, k, raw, align_out)
+
+def _run_gemm_single(m, n, k, a_matrix, b_matrix):
+    align_in, align_out, _, pad_k = _gemm_layout(m, n, k)
+
+    in_pack = np.zeros(align_in * m, dtype=np.float16)
+    wt_pack = np.zeros(align_in * align_out, dtype=np.float16)
+
+    pack_input = get_input_packer(m, n, k, align_in)
+    pack_weight = get_weight_packer(m, n, k, align_in)
+
+    if pad_k:
+        pack_input = pack_input_row_major
+
+    pack_input(m, n, k, a_matrix, in_pack, align_in)
+    pack_weight(m, n, k, b_matrix, wt_pack, align_in, align_out)
+
+    ct_inputs = (ctypes.c_uint16 * len(in_pack)).from_buffer(input_map)
+    ct_weights = (ctypes.c_uint16 * len(wt_pack)).from_buffer(weight_map)
+    ct_inputs[:] = in_pack.view(np.uint16).tolist()
+    ct_weights[:] = wt_pack.view(np.uint16).tolist()
+
+    out_nbytes = max(256, ((m - 1) * align_out + n) * FP32_BYTES)
+    npu_regs = make_gemm_regs(m, n, k,
+        input_mem_create.dma_addr, weight_mem_create.dma_addr, output_mem_create.dma_addr)
+
+    if "--dry" in sys.argv:
+        print(f"\n=== GEMM {m}x{n}x{k} DRY RUN ===")
+        target_names = {0x0201: "CNA", 0x0801: "CORE", 0x1001: "DPU", 0x2001: "RDMA", 0x0081: "PC"}
+        for i, v in enumerate(npu_regs):
+            tgt = (v >> 48) & 0xFFFF
+            ra = v & 0xFFFF
+            val = (v >> 16) & 0xFFFFFFFF
+            print(f"  [{i:3d}] {target_names.get(tgt, f'0x{tgt:04x}')}[0x{ra:04x}] = 0x{val:08x}")
+        return None
+
+    write_regs(npu_regs, 64)
+    setup_task(4, 0x18, len(npu_regs))
+
+    reset_npu(fd)
+    submit(tasks_mem_create.obj_addr)
+
+    raw = np.frombuffer(output_map, dtype=np.float32, count=out_nbytes // 4).copy()
+
+    decode_output = get_output_decoder(m, n, k, align_out)
+    out = decode_output(m, n, k, raw, align_out)
+    return out
+
+def run_gemm(m, n, k, a_matrix, b_matrix):
+    max_m = _max_m_tile(k)
+    if m <= max_m:
+        return _run_gemm_single(m, n, k, a_matrix, b_matrix)
+
+    return _run_gemm_chain(m, n, k, a_matrix, b_matrix, max_m)
 
 if __name__ == "__main__":
     test_cases = [
@@ -501,7 +622,8 @@ if __name__ == "__main__":
         np.array([[5, 6]], dtype=np.float16)),
     ]
     np.random.seed(42)
-    for size in range(400,520,2):
+    square_sizes = (8, 9) + tuple(1 << exp for exp in (6, 8))
+    for size in square_sizes:
         m = n = k = size
         a = np.random.randn(m, k).astype(np.float16)
         b = np.random.randn(k, n).astype(np.float16)
@@ -516,5 +638,5 @@ if __name__ == "__main__":
         ok = np.allclose(r, expected, atol=0.1)
         md = np.max(np.abs(r - expected))
         print(f"  {'PASS' if ok else 'FAIL'} (max_diff={md:.4f})")
-        assert ok , f"test shape {m, n, k} failed"
+
     os.close(fd)

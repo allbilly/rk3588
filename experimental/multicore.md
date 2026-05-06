@@ -25,8 +25,9 @@ Local working references to use before more risky probes:
 
 - `examples/pool_pcchain.py` dry-runs a known-good PC-tail layout and can submit a chained PPU workload only with `--submit`.
 - `examples/pool_multicore.py` dry-runs an independent-task multicore layout and can submit only with `--submit`.
+- `examples/gemm.py` is the current cleaned-up GEMM implementation and PC-chain reference.
 - `experimental/add_pcchain.py` / `experimental/add_rawbuf_pcchain.py` are the ADD/elementwise PC-chain references.
-- `experimental/gemm_pcchain.py` is the strongest decoded RKNN-style PC-chain reference because it was matched against a captured GEMM stream.
+- `experimental/gemm_pcchain.py` is only the historical decoded RKNN `394x394x394` capture reference.
 - For conv capture refresh, use `experimental/conv_rawbuf_common.py` preflight helpers before updating inline blobs. The normal `conv_rawbuf_small.py`, `conv_rawbuf_big.py`, `conv_rawbuf_pcchain.py`, and `conv_pcchain.py` entrypoints are standalone and do not load runtime dump files.
 
 Current raw experiment layouts:
@@ -1621,8 +1622,8 @@ Conclusion:
 
 Next GEMM work:
 
-1. Port the working `experimental/gemm_pcchain.py` submit shape into a tiled
-   logical workload.
+1. Use the working `examples/gemm.py` PC-chain path as the tiled logical GEMM
+   baseline.
 2. Validate one logical GEMM split along N on core 0.
 3. Validate the same N tiles as independent sequential core0 submits.
 4. Only then try `rk3588-tricore-tail` split3 for GEMM.
@@ -1753,10 +1754,10 @@ Conclusion:
 
 - `395x395x395` is not covered by the small N-axis tiled GEMM success.
 - It fails before multicore, in the single-task core0 path.
-- This likely needs the specialized GEMM PC-chain split path, not the generic
-  one-descriptor `examples/gemm.py` register stream.
+- This likely needs the cleaned-up tiled PC-chain path in `examples/gemm.py`, not
+  the older one-descriptor GEMM experiments.
 
-Specialized GEMM PC-chain check:
+Historical specialized GEMM PC-chain check:
 
 ```bash
 timeout 25s python3 experimental/gemm_pcchain.py --constant-data --mode core0 --timeout 10000
@@ -1774,15 +1775,12 @@ Results:
 
 Interpretation:
 
-- The hardcoded RKNN-style GEMM PC-chain reproducer works on core0.
+- The hardcoded RKNN-style GEMM PC-chain reproducer worked on core0.
 - The existing `official` mode also passes. It uses the RKNN-style submit shape:
   `task_number = TASKS * 3`, `core_mask = 0`, and duplicate
   `subcore_task[0..2] = (0,TASKS)`.
-- This is useful evidence that the PC-chain path is the right direction for the
-  large GEMM family.
-- It is not yet a generic fix for `395x395x395`; that shape still needs either
-  a generalized version of the PC-chain register generator or a reference dump
-  from RKNN/ops_rknn for that exact shape.
+- This remains useful historical evidence for the captured RKNN layout, but the
+  active GEMM PC-chain implementation is now `examples/gemm.py`.
 
 This should run three independent tile submits on core 0, stitch the output in
 host memory, and verify the full logical vector. This is the Rocket-style model:

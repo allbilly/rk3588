@@ -53,10 +53,10 @@ python experimental/pool.py
 
 For Armbian Ubuntu with mainline rocket driver preinstalled,
 ```bash
-python examples/mainline6_18/elementwise.py
-python examples/mainline6_18/gemm.py
-python examples/mainline6_18/conv.py
-python examples/mainline6_18/pool.py
+python experimental/mainline6_18/elementwise.py
+python experimental/mainline6_18/gemm.py
+python experimental/mainline6_18/conv.py
+python experimental/mainline6_18/pool.py
 ```
 
 ## 2. PC chaining 

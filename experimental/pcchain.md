@@ -4,9 +4,11 @@ PC-chain submission lets one task's register stream point the PC block at the ne
 register stream. This is how RKNN split tasks can run as one submit while each
 task still has a small `regcfg_amount`.
 
-The working reference in this tree is `experimental/gemm_pcchain.py`. It builds
-the same 3072-byte register command buffer as `experimental/gemm_rawbuf_pcchain.py`,
-but from decoded register writes instead of a hex blob.
+The current working GEMM PC-chain reference is `examples/gemm.py`. It builds
+decoded register streams for tiled GEMM tasks, writes PC tails between segments,
+and submits them through the normal GEMM path. The older
+`experimental/gemm_pcchain.py` script is only a historical decoded reproduction of
+one captured RKNN `394x394x394` stream.
 
 ## Register Word Format
 
@@ -301,10 +303,15 @@ stream first, then any PC-chain experiment can be layered on top.
 Verified GEMM:
 
 ```bash
+python3 examples/gemm.py
+```
+
+Historical RKNN `394x394x394` capture reproducer, useful only when comparing
+against the old raw captured PC-chain layout:
+
+```bash
 python3 experimental/gemm_pcchain.py --dry
 python3 experimental/gemm_pcchain.py --constant-data
-python3 experimental/gemm_pcchain.py --seed 0
-python3 experimental/gemm_pcchain.py --mode official --constant-data
 ```
 
 Verified minimal ADD/DPU PC-chain:
