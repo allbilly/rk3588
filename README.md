@@ -44,10 +44,11 @@ For OrangePi Ubuntu with RKNPU driver preinstalled,
 pip install numpy
 python examples/elementwise.py
 python examples/gemm.py
-python examples/gemm_int8.py
-python examples/gemm_int16.py
-python examples/conv.py
-python examples/pool.py
+
+python experimental/gemm_int8.py
+python experimental/gemm_int16.py
+python experimental/conv.py
+python experimental/pool.py
 ```
 
 For Armbian Ubuntu with mainline rocket driver preinstalled,
@@ -82,7 +83,7 @@ Or split GEMM at the N dimension and run at 3 cores at the same time.
 I will add examples of ADD/SUB/MUL running at the same time, GEMM split and mainline.
 For now, test run pool_multicore.py first.
 ```bash
-python exampels/pool_multicore.py
+python experimental/pool_multicore.py
 ```
 
 ## 4. How to do matmul in RK3588
