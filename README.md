@@ -8,9 +8,10 @@ Thanks to prior effort by [mtx512](https://github.com/mtx512/rk3588-npu), [Tomeu
 
 The NPU can be desribe as 4 stage CNA -> CORE -> DPU -> PPU ->PC in sequence, the ouput of earlier stage passes to next stage. With this in mind, it will be much easier to understand the registers.
 
+```
 ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐  
 │   CNA   │───▶│  CORE   │───▶│   DPU   │───▶│   PC    │  
-│(Conv    │    │(Compute│    │(Data    │    │(Process │  
+│(Conv    │    │(Compute│     │(Data    │    │(Process │  
 │ Neural  │    │ Engine) │    │Process) │    │ Control)│  
 │ Accel)  │    │         │    │         │    │         │  
 └─────────┘    └─────────┘    └─────────┘    └─────────┘  
@@ -19,6 +20,7 @@ The NPU can be desribe as 4 stage CNA -> CORE -> DPU -> PPU ->PC in sequence, th
      ▼              ▼              ▼              ▼  
 Weight/Feature   MAC Array      Post-Proc      Operation  
    Data          Accumulation   (BS/BN/EW)     Enable  
+```
 
 TODO
 - fork and add more regsiters to [mesa rocket](https://gitlab.freedesktop.org/mesa/mesa/-/tree/main/src/gallium/drivers/rocket)
