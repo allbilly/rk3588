@@ -15,7 +15,7 @@ CBUF_BANK_SIZE = CBUF_ENTRIES_PER_BANK * CBUF_ENTRY_BYTES
 REGCMD_RESERVED = 16384
 # Small-channel 1x1 uses CNA_CONV_CON1_NONALIGN_DMA/ARGB_IN; large flat output
 # strides corrupt the tail, while the regular c16 path is fine at 1024.
-RK_MAX_CONV_FLAT_STRIDE = 1000
+RK_MAX_CONV_FLAT_STRIDE = 992
 
 class reg:
     CNA  = 0x0201
@@ -808,7 +808,7 @@ if __name__ == "__main__":
     ]
     shapes += [
         (f"conv2d_1x3_{n}x{n}_k1", 1, 3, n, n, 6, 3, 1, 1, 1)
-        for n in range(2, 200)
+        for n in range(2, 2000, 2)
     ]
 
     name_width = max(len(shape[0]) for shape in shapes)
