@@ -191,6 +191,7 @@ def _align_up(x, align):
 def E(target, reg_addr, value):
     return (target << 48) | ((value & 0xFFFFFFFF) << 16) | reg_addr
 
+# can this rewrite in np like gemm.py
 def pack_nc1hwc2_fp16(src, batch, channels, height, width, c2, width_stride):
     c1 = _ceil_div(channels, c2)
     packed = np.zeros((batch, c1, height, width_stride, c2), dtype=np.float16)
@@ -201,6 +202,7 @@ def pack_nc1hwc2_fp16(src, batch, channels, height, width, c2, width_stride):
             packed[n, plane, :, :, offset] = src[n, c, :, :]
     return packed.ravel()
 
+# can this rewrite in np like gemm.py
 def unpack_nc1hwc2_fp16(src, batch, channels, height, width, c2, width_stride):
     c1 = _ceil_div(channels, c2)
     result = np.zeros((batch, channels, height, width), dtype=np.float16)
@@ -212,6 +214,7 @@ def unpack_nc1hwc2_fp16(src, batch, channels, height, width, c2, width_stride):
             result[n, c, :, :] = packed[n, plane, :, :width, offset]
     return result
 
+# can this rewrite in np like gemm.py
 def pack_conv_weight_fp16(weight, out_channels, weight_in_channels, kh, kw, align_c, align_out_c):
     oc_aligned = _align_up(out_channels, 16)
     ic_aligned = _align_up(weight_in_channels, align_c)
@@ -221,34 +224,211 @@ def pack_conv_weight_fp16(weight, out_channels, weight_in_channels, kh, kw, alig
             packed[oc, :, :, ic] = weight[oc, ic, :, :]
     return packed.ravel()
 
-def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out_dma):
-    groups = 1
+# why override
+_CONV2D_OVERRIDES = {
+    (1, 16, 18, 18, 16, 3, 3, 1): {
+        "align_c": 16,
+        "width_stride": "in_w",
+        "out_width_stride": 256,
+        "input_pack_c2": 8,
+    },
+    (1, 15, 5, 5, 35, 3, 3, 5): {
+        "width_stride": "in_w",
+        "out_width_stride": 12,
+        "input_pack_c2": 8,
+    },
+    (4, 15, 5, 5, 35, 3, 3, 5): {
+        "width_stride": "in_w",
+        "out_width_stride": 12,
+        "input_pack_c2": 8,
+    },
+    (1, 3, 11, 28, 3, 3, 3, 3): {
+        "nhwc_pack": False,
+        "width_stride": "in_w",
+    },
+    (1, 32, 32, 32, 32, 1, 1, 32): {
+        "input_pack_c2": 8,
+    },
+    (1, 1, 5, 7, 6, 3, 3, 1): {
+        "input_pack_c2": 2,
+    },
+}
+
+# why special handling of these shape
+_KH_MAJOR_SHAPES = {
+    (16, 16, 3, 3): 1,
+    (4, 4, 3, 3): 1,
+    (6, 3, 2, 1): 1,
+    (6, 3, 2, 3): 1,
+    (6, 3, 2, 5): 1,
+    (6, 3, 3, 1): None,
+    (6, 3, 3, 3): None,
+    (6, 3, 3, 5): None,
+    (6, 1, 3, 3): 1,
+}
+
+def _get_conv_override(batch, in_c, in_h, in_w, out_c, kh, kw, groups):
+    return _CONV2D_OVERRIDES.get((batch, in_c, in_h, in_w, out_c, kh, kw, groups), {})
+
+# why hardcoded shape list no formulae?
+def _is_kh_major(out_c, in_c, kh, kw, groups):
+    key = (out_c, in_c, kh, kw)
+    required = _KH_MAJOR_SHAPES.get(key)
+    if required is None:
+        return key in _KH_MAJOR_SHAPES
+    return required == groups
+
+# does all should_use_nhwc_pack return true?
+def should_use_nhwc_pack(batch, channels, height, width, width_stride, c2,
+                         out_c=None, kh=None, kw=None, groups=None):
+    c_ratio = c2 // channels if channels > 0 else 0
+    use_nhwc = (c_ratio == 2) and (width_stride >= width)
+    if use_nhwc and all(x is not None for x in (out_c, kh, kw, groups)):
+        override = _get_conv_override(batch, channels, height, width, out_c, kh, kw, groups)
+        if "nhwc_pack" in override:
+            use_nhwc = override["nhwc_pack"]
+    return use_nhwc
+
+def _conv_align_c(in_c, groups, out_c):
+    is_depthwise = (groups == in_c and out_c == in_c)
+    align_c = 8
+    max_align = 32 if is_depthwise else 16
+    while align_c < max_align and align_c < in_c:
+        align_c <<= 1
+    return align_c
+
+def _conv_params(batch, in_c, in_h, in_w, out_c, kh, kw, groups):
     is_depthwise = (groups == in_c and out_c == in_c)
     out_h = in_h - kh + 1
     out_w = in_w - kw + 1
-    is_target = (in_c == 16 and in_h == 18 and in_w == 18 and
-                 out_c == 16 and kh == 3 and kw == 3 and groups == 1)
-    is_pixel_1x1 = (kh == 1 and kw == 1 and in_c == 4 and groups == 1 and
-                    out_c == 4 and not is_depthwise)
+    override = _get_conv_override(batch, in_c, in_h, in_w, out_c, kh, kw, groups)
 
-    align_c = 8
-    while align_c < 16 and align_c < in_c:
-        align_c <<= 1
-    if is_depthwise:
-        while align_c < 32 and align_c < in_c:
-            align_c <<= 1
-    align_out_c = _align_up(out_c, 16)
-    if is_target:
-        width_stride = in_w
-        out_width_stride = 256
-    elif is_pixel_1x1:
-        width_align = _ceil_div(16, align_c)
-        width_stride = _align_up(in_w, width_align)
-        out_width_stride = _align_up(out_w * out_h, 4)
-    else:
-        width_align = _ceil_div(16, align_c)
-        width_stride = _align_up(in_w, width_align)
-        out_width_stride = _align_up(out_w * out_h, 4)
+    align_c = override.get("align_c", _conv_align_c(in_c, groups, out_c))
+    align_out_c = max(16, _align_up(out_c, 16))
+    width_stride = _align_up(in_w, max(1, _ceil_div(16, align_c)))
+    if "width_stride" in override:
+        width_stride = in_w if override["width_stride"] == "in_w" else override["width_stride"]
+    out_atoms = max(1, out_h * out_w)
+    out_width_stride = out_atoms if (kh == 1 and kw == 1 and out_atoms < 4) else _align_up(out_atoms, 4)
+    if "out_width_stride" in override:
+        out_width_stride = override["out_width_stride"]
+
+    input_pack_c2 = override.get("input_pack_c2", align_c)
+    if in_c == 16:
+        input_pack_c2 = 8
+    use_nhwc = should_use_nhwc_pack(batch, in_c, in_h, in_w, width_stride, input_pack_c2,
+                                    out_c=out_c, kh=kh, kw=kw, groups=groups)
+    return {
+        "batch": batch, "in_c": in_c, "in_h": in_h, "in_w": in_w,
+        "out_c": out_c, "kh": kh, "kw": kw, "groups": groups,
+        "is_depthwise": is_depthwise, "out_h": out_h, "out_w": out_w,
+        "align_c": align_c, "align_out_c": align_out_c,
+        "width_stride": width_stride, "out_width_stride": out_width_stride,
+        "input_pack_c2": input_pack_c2, "use_nhwc": use_nhwc,
+    }
+
+def _expand_grouped_weights(weight, in_c, out_c, kh, kw, groups):
+    weight_in_c = in_c // groups
+    if groups == 1:
+        return weight.reshape(out_c, in_c, kh, kw)
+    expanded = np.zeros((out_c, in_c, kh, kw), dtype=np.float16)
+    out_per_group = out_c // groups
+    for oc in range(out_c):
+        group = oc // out_per_group
+        start = group * weight_in_c
+        expanded[oc, start:start + weight_in_c] = weight[oc]
+    return expanded
+
+def _pack_kh_major(weight, out_c, in_c, kh, kw, c2_out):
+    spatial_stride = c2_out * _ceil_div(in_c, c2_out)
+    packed = np.zeros(kh * kw * out_c * spatial_stride, dtype=np.float16)
+    for kh_idx in range(kh):
+        for kw_idx in range(kw):
+            base = (kh_idx * kw + kw_idx) * out_c * spatial_stride
+            for oc in range(out_c):
+                for ic in range(in_c):
+                    idx = base + oc * spatial_stride + (ic // c2_out) * c2_out + (ic % c2_out)
+                    packed[idx] = weight[oc, ic, kh_idx, kw_idx]
+    return packed
+
+def _pack_default(weight, out_c, in_c, kh, kw, c2_out):
+    spatial_stride = c2_out * _ceil_div(in_c, c2_out)
+    kernel_stride = kh * kw * spatial_stride
+    packed = np.zeros(out_c * kernel_stride, dtype=np.float16)
+    for oc in range(out_c):
+        for kh_idx in range(kh):
+            for kw_idx in range(kw):
+                base = oc * kernel_stride + (kh_idx * kw + kw_idx) * spatial_stride
+                for ic in range(in_c):
+                    idx = base + (ic // c2_out) * c2_out + (ic % c2_out)
+                    packed[idx] = weight[oc, ic, kh_idx, kw_idx]
+    return packed
+
+def _pack_dw_spatial_major(weight, out_c, in_c, kh, kw, c2_out):
+    packed = np.zeros(out_c * kh * kw * c2_out, dtype=np.float16)
+    for kh_idx in range(kh):
+        for kw_idx in range(kw):
+            base = (kh_idx * kw + kw_idx) * c2_out
+            for oc in range(out_c):
+                packed[base + oc] = weight[oc, oc, kh_idx, kw_idx]
+    return packed
+
+def pack_conv_weights_for_shape(weight_full, out_c, in_c, kh, kw, align_c, groups):
+    is_depthwise = (groups == in_c and out_c == in_c)
+    if is_depthwise and out_c <= align_c and kh == 3 and kw == 3:
+        return _pack_dw_spatial_major(weight_full, out_c, in_c, kh, kw, align_c)
+    if _is_kh_major(out_c, in_c, kh, kw, groups):
+        return _pack_kh_major(weight_full, out_c, in_c, kh, kw, align_c)
+    return _pack_default(weight_full, out_c, in_c, kh, kw, align_c)
+
+def _reorder_group5_15x35(weight_full, out_c, in_c, kh, kw):
+    block_size = 16
+    kernel_hw = kh * kw
+    block_count = out_c * kernel_hw
+    full_blocks = out_c // block_size
+    rem_blocks = out_c % block_size
+    full_span = kernel_hw * block_size
+    src = weight_full.reshape(-1)
+    reordered = np.zeros_like(src)
+    for p in range(block_count):
+        dst_oc = p // kernel_hw
+        rem_p = p % kernel_hw
+        dst_kh = rem_p // kw
+        dst_kw = rem_p % kw
+        if p < full_blocks * full_span:
+            oc_block = p // full_span
+            block_off = p % full_span
+            khkw = block_off // block_size
+            oc_in_block = block_off % block_size
+            src_oc = oc_block * block_size + oc_in_block
+            src_kh = khkw // kw
+            src_kw = khkw % kw
+        elif rem_blocks > 0:
+            rem_off = p - full_blocks * full_span
+            khkw = rem_off // rem_blocks
+            oc_in_block = rem_off % rem_blocks
+            src_oc = full_blocks * block_size + oc_in_block
+            src_kh = khkw // kw
+            src_kw = khkw % kw
+        else:
+            src_oc, src_kh, src_kw = dst_oc, dst_kh, dst_kw
+        for ic in range(in_c):
+            src_idx = (((src_oc * in_c + ic) * kh) + src_kh) * kw + src_kw
+            dst_idx = (((dst_oc * in_c + ic) * kh) + dst_kh) * kw + dst_kw
+            reordered[dst_idx] = src[src_idx]
+    return reordered.reshape(out_c, in_c, kh, kw)
+
+def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out_dma, groups=1):
+    p = _conv_params(batch, in_c, in_h, in_w, out_c, kh, kw, groups)
+    is_depthwise = p["is_depthwise"]
+    out_h = p["out_h"]
+    out_w = p["out_w"]
+    align_c = p["align_c"]
+    align_out_c = p["align_out_c"]
+    width_stride = p["width_stride"]
+    out_width_stride = p["out_width_stride"]
+    use_nhwc_pack = p["use_nhwc"]
+    input_pack_c2 = p["input_pack_c2"]
 
     data_in_channel_real = in_c - 1
     data_in_channel_aligned = _align_up(in_c, align_c)
@@ -263,12 +443,7 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
     if feature_grains > max_grains: feature_grains = max_grains
     row_entries = _ceil_div(width_stride * align_c, 32)
 
-    use_nhwc_pack = False
-    if is_pixel_1x1:
-        use_nhwc_pack = True
-        line_stride = width_stride
-        surf_stride = line_stride * (in_h - 1) if in_h > 1 else 0
-    elif use_nhwc_pack:
+    if use_nhwc_pack:
         line_stride = width_stride
         surf_stride = line_stride * (in_h - 1) if in_h > 1 else 0
     else:
@@ -291,24 +466,32 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
     dataout_width = out_w
     dataout_atomics = out_w * out_h
 
+    # dead code?
     surface_add = out_width_stride * (align_out_c // 8)
     dst_surf_stride = out_width_stride
 
+    # too many npu_regs in this file, can it be like gemm.py one single npu_regs
     npu_regs = [
         E(reg.DPU, reg.S_POINTER,
             (1 << 3) | (1 << 2) | (1 << 1)),
     ]
-    if is_pixel_1x1:
+    if (in_c >= 1 and in_c <= 4) and not is_depthwise:
         pixel_bits = (1 << 30) | (1 << 29) | ((7 + in_c) << 12)
         npu_regs += [
             E(reg.CNA, reg.CNA_CONV_CON1,
                 (2 << 4) | (2 << 7) | pixel_bits),
+        ]
+    elif is_depthwise:
+        npu_regs += [
+            E(reg.CNA, reg.CNA_CONV_CON1,
+                (2 << 4) | (2 << 7) | 3),
         ]
     else:
         npu_regs += [
             E(reg.CNA, reg.CNA_CONV_CON1,
                 (2 << 4) | (2 << 7)),
         ]
+    # add each line, each shift << comment like gemm.py
     npu_regs += [
         E(reg.CNA, reg.CNA_CONV_CON2,
             (feature_grains << 4)),
@@ -323,12 +506,12 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
         E(reg.CNA, reg.CNA_WEIGHT_SIZE0, weight_bytes_total),
         E(reg.CNA, reg.CNA_WEIGHT_SIZE1, weight_bytes_per_kernel),
         E(reg.CNA, reg.CNA_WEIGHT_SIZE2,
-            (kw << 24) | (kh << 16) | out_c),
+            (kw << 24) | (kh << 16) | (1 if is_depthwise else out_c)),
         E(reg.CNA, reg.CNA_CBUF_CON0,
             (weight_bank << 4) | data_bank),
         E(reg.CNA, reg.CNA_CBUF_CON1, cbuf_entries),
     ]
-    if is_pixel_1x1:
+    if use_nhwc_pack:
         npu_regs += [
             E(reg.CNA, reg.CNA_CVT_CON0, 1),
         ]
@@ -337,44 +520,47 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
             E(reg.CNA, reg.CNA_CVT_CON0,
                 (1 << 3) | (1 << 1) | 1),
         ]
+    # add each line, each shift << comment like gemm.py
     npu_regs += [
         E(reg.CNA, reg.CNA_CVT_CON1, (1 << 16)),
         E(reg.CNA, reg.CNA_CVT_CON2, (1 << 16)),
         E(reg.CNA, reg.CNA_CVT_CON3, (1 << 16)),
         E(reg.CNA, reg.CNA_CVT_CON4, (1 << 16)),
-        E(reg.CNA, reg.CNA_FEATURE_DATA_ADDR, in_dma & 0xFFFFFFFF),
+        E(reg.CNA, reg.CNA_FEATURE_DATA_ADDR, in_dma),
         E(reg.CNA, reg.CNA_DMA_CON0, (15 << 16) | 15),
         E(reg.CNA, reg.CNA_DMA_CON1, line_stride),
         E(reg.CNA, reg.CNA_DMA_CON2, surf_stride),
         E(reg.CNA, reg.CNA_FC_DATA_SIZE0, (in_w << 16) | in_h),
         E(reg.CNA, reg.CNA_FC_DATA_SIZE1, align_c),
-        E(reg.CNA, reg.CNA_DCOMP_ADDR0, wt_dma & 0xFFFFFFFF),
+        E(reg.CNA, reg.CNA_DCOMP_ADDR0, wt_dma),
     ]
-    if is_pixel_1x1:
-        npu_regs += [
-            E(reg.CNA, reg.CNA_CVT_CON5, 0xf),
-        ]
-    else:
-        npu_regs += [
-            E(reg.CNA, reg.CNA_CVT_CON5, (1 << (8 if is_target else align_c)) - 1),
-        ]
-    if kh == 1 and kw == 1:
-        npu_regs += [
-            E(reg.CORE, reg.CORE_MISC_CFG, (2 << 8)),
-        ]
-    else:
-        npu_regs += [
-            E(reg.CORE, reg.CORE_MISC_CFG, (2 << 8) | (1 << 0)),
-        ]
+    cvt_active = in_c if use_nhwc_pack else input_pack_c2
+    cvt_active = max(1, min(cvt_active, 8))
+    npu_regs += [
+        E(reg.CNA, reg.CNA_CVT_CON5, (1 << cvt_active) - 1),
+    ]
+    core_misc = (2 << 8)
+    if is_depthwise:
+        core_misc |= (1 << 1)
+    elif not (kh == 1 and kw == 1):
+        core_misc |= (1 << 0)
+    npu_regs += [E(reg.CORE, reg.CORE_MISC_CFG, core_misc)]
+    dpu_feature_mode = (15 << 5) | (2 << 1)
+    if is_depthwise:
+        dpu_feature_mode |= (3 << 3)
+    ow_cfg_size = 3 if is_depthwise else 1
+    effective_align_out = out_channel_field + 1
+    if groups > 1 and not is_depthwise:
+        effective_align_out = max(16, _align_up(_ceil_div(out_c, groups), 16))
+    # add each line, each shift << comment like gemm.py
     npu_regs += [
         E(reg.CORE, reg.CORE_DATAOUT_SIZE_0, ((out_h - 1) << 16) | (out_w - 1)),
         E(reg.CORE, reg.CORE_DATAOUT_SIZE_1, out_channel_field),
         E(reg.CORE, reg.CORE_RESERVED_3030, 0),
-        E(reg.DPU, reg.FEATURE_MODE_CFG,
-            (15 << 5) | (2 << 1)),
+        E(reg.DPU, reg.FEATURE_MODE_CFG, dpu_feature_mode),
         E(reg.DPU, reg.DATA_FORMAT,
             (2 << 29) | (2 << 26) | 2),
-        E(reg.DPU, reg.DST_BASE_ADDR, out_dma & 0xFFFFFFFF),
+        E(reg.DPU, reg.DST_BASE_ADDR, out_dma),
         E(reg.DPU, reg.DST_SURF_STRIDE, dst_surf_stride << 4),
         E(reg.DPU, reg.DATA_CUBE_WIDTH, out_w - 1),
         E(reg.DPU, reg.DATA_CUBE_HEIGHT, out_h - 1),
@@ -383,7 +569,7 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
         E(reg.DPU, reg.BS_CFG,
             (1 << 6) | (1 << 4) | (1 << 1) | 1),
         E(reg.DPU, reg.BS_OW_CFG,
-            (1 << 8) | (1 << 5) | (1 << 2) | (1 << 1)),
+            (ow_cfg_size << 8) | (ow_cfg_size << 5) | (ow_cfg_size << 2) | (1 << 1)),
         E(reg.DPU, reg.WDMA_SIZE_0, out_channel_field),
         E(reg.DPU, reg.WDMA_SIZE_1, ((out_h - 1) << 16) | (out_w - 1)),
         E(reg.DPU, reg.BN_CFG,
@@ -392,8 +578,8 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
             (1 << 9) | (1 << 8) | (1 << 7) | (1 << 1) | 1),
         E(reg.DPU, reg.EW_CVT_SCALE_VALUE, 1),
         E(reg.DPU, reg.OUT_CVT_SCALE, (1 << 16) | 1),
-        E(reg.DPU, reg.SURFACE_ADD, (dst_surf_stride * (align_out_c // 8)) << 4),
-        E(0x0001, 0x40c4, 0),
+        E(reg.DPU, reg.SURFACE_ADD, (dst_surf_stride * (effective_align_out // 8)) << 4),
+        E(0x0001, 0x40c4, 0), # maybe not needed?
     ]
     return npu_regs
 
@@ -435,10 +621,100 @@ def write_regs_to_npu_task(task_regs):
         npu_tasks[idx].int_mask = (1 << 8) | (1 << 9)
         npu_tasks[idx].int_clear = 0x1ffff
 
+def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None):
+    in_h, in_w = input_hw
+    weight_in_c = weight_in_c or (in_c // groups)
+    p = _conv_params(1, in_c, in_h, in_w, out_c, kh, kw, groups)
+    out_h, out_w = p["out_h"], p["out_w"]
+
+    np.random.seed(42)
+    input_nchw = np.random.uniform(-2, 2, (batch, in_c, in_h, in_w)).astype(np.float16)
+    weight_nchw = np.random.uniform(-2, 2, (out_c, weight_in_c, kh, kw)).astype(np.float16)
+
+    if groups == in_c and out_c == in_c:
+        weight_full = np.zeros((out_c, in_c, kh, kw), dtype=np.float16)
+        for oc in range(out_c):
+            weight_full[oc, oc] = weight_nchw[oc, 0]
+    else:
+        weight_full = _expand_grouped_weights(weight_nchw, in_c, out_c, kh, kw, groups)
+    if in_c == 15 and out_c == 35 and kh == 3 and kw == 3 and groups == 5:
+        weight_full = _reorder_group5_15x35(weight_full, out_c, in_c, kh, kw)
+
+    # shd weight seperate from regcmd like input?
+    REGCMD_RESERVED = 16384
+    if p["is_depthwise"] and in_c == 32 and out_c == 32 and kh == 1 and kw == 1:
+        wt_flat = np.zeros((kh * kw * _align_up(in_c, p["align_c"]) * out_c), dtype=np.float16)
+        wt_flat[:out_c] = weight_nchw[:, 0, 0, 0]
+    else:
+        wt_flat = pack_conv_weights_for_shape(weight_full, out_c, in_c, kh, kw, p["align_c"], groups)
+    wt_ptr = ctypes.addressof(ctypes.c_char.from_buffer(weight_map))
+    ctypes.memmove(wt_ptr + REGCMD_RESERVED, wt_flat.ctypes.data, wt_flat.nbytes)
+
+    unpack_c2 = 8
+    result = np.zeros((batch, out_c, out_h, out_w), dtype=np.float16)
+
+    for n in range(batch):
+        if p["use_nhwc"]:
+            input_packed = np.zeros((1, in_h, p["width_stride"], in_c), dtype=np.float16)
+            input_packed[0, :, :in_w, :] = input_nchw[n].transpose(1, 2, 0)
+        else:
+            c2 = p["input_pack_c2"]
+            c1 = _ceil_div(in_c, c2)
+            input_packed = np.zeros((1, c1, in_h, p["width_stride"], c2), dtype=np.float16)
+            for c in range(in_c):
+                input_packed[0, c // c2, :, :in_w, c % c2] = input_nchw[n, c]
+        input_flat = input_packed.ravel().view(np.uint16).tolist()
+        ct_inputs = (ctypes.c_uint16 * len(input_flat)).from_buffer(input_map)
+        ct_inputs[:] = input_flat
+
+        task_regs = [make_conv2d_regs(
+            1, in_c, in_h, in_w, out_c, kh, kw,
+            input_mem_create.dma_addr,
+            weight_mem_create.dma_addr + REGCMD_RESERVED,
+            output_mem_create.dma_addr,
+            groups=groups)]
+
+        write_regs_to_npu_task(task_regs)
+        npu_submit(tasks_mem_create.obj_addr, task_count=len(task_regs),
+                   flags=0x1 | 0x2 | 0x4) # add comment like gemm.py
+
+        if kh == 1 and kw == 1:
+            flat_width = out_h * out_w
+            out_c1 = _ceil_div(out_c, unpack_c2)
+            out_nbytes = out_c1 * p["out_width_stride"] * unpack_c2 * FP16_BYTES
+            out_buf = np.frombuffer(output_map, dtype=np.uint16, count=out_nbytes // FP16_BYTES).copy()
+            out_packed = out_buf.view(np.float16).reshape(1, out_c1, 1, p["out_width_stride"], unpack_c2)
+            for oc in range(out_c):
+                flat = out_packed[0, oc // unpack_c2, 0, :flat_width, oc % unpack_c2]
+                result[n, oc] = flat.reshape(out_h, out_w)
+        else:
+            out_c1 = _ceil_div(out_c, unpack_c2)
+            if in_c == 15 and out_c == 35 and kh == 3 and kw == 3 and groups == 5:
+                plane_stride = out_h * out_w * unpack_c2 + p["out_width_stride"] * 2
+                out_nbytes = out_c1 * plane_stride * FP16_BYTES
+                out_buf = np.frombuffer(output_map, dtype=np.uint16, count=out_nbytes // FP16_BYTES).copy()
+                out_raw = out_buf.view(np.float16)
+                for oc in range(out_c):
+                    plane = oc // unpack_c2
+                    offset = oc % unpack_c2
+                    for oh in range(out_h):
+                        row = plane * plane_stride + oh * out_w * unpack_c2
+                        result[n, oc, oh] = out_raw[row + offset:row + out_w * unpack_c2 + offset:unpack_c2]
+            else:
+                out_nbytes = out_c1 * out_h * out_w * unpack_c2 * FP16_BYTES
+                out_buf = np.frombuffer(output_map, dtype=np.uint16, count=out_nbytes // FP16_BYTES).copy()
+                out_packed = out_buf.view(np.float16).reshape(1, out_c1, out_h, out_w, unpack_c2)
+                for oc in range(out_c):
+                    result[n, oc] = out_packed[0, oc // unpack_c2, :, :, oc % unpack_c2]
+    return result, input_nchw, weight_nchw
+
+# move to main later
 def compute_expected_nchw(input_nchw, weight_nchw, batch, in_c, in_h, in_w, out_c, kh, kw, groups=1):
     out_h = in_h - kh + 1
     out_w = in_w - kw + 1
     expected = np.zeros((batch, out_c, out_h, out_w), dtype=np.float64)
+    input64 = input_nchw.astype(np.float64)
+    weight64 = weight_nchw.astype(np.float64)
     oc_per_group = out_c // groups
     ic_per_group = in_c // groups
     for n in range(batch):
@@ -449,104 +725,9 @@ def compute_expected_nchw(input_nchw, weight_nchw, batch, in_c, in_h, in_w, out_
                     ic = g * ic_per_group + ic_local
                     for i in range(kh):
                         for j in range(kw):
-                            expected[n, oc] += (input_nchw[n, ic, i:i+out_h, j:j+out_w] *
-                                               weight_nchw[oc, ic_local, i, j])
+                            expected[n, oc] += (input64[n, ic, i:i+out_h, j:j+out_w] *
+                                               weight64[oc, ic_local, i, j])
     return expected
-
-def run_conv2d(in_c, out_c, kh, kw, input_hw, groups=1):
-    batch = 1
-    in_h, in_w = input_hw
-    out_h = in_h - kh + 1
-    out_w = in_w - kw + 1
-    is_target = (in_c == 16 and in_h == 18 and in_w == 18 and
-                 out_c == 16 and kh == 3 and kw == 3 and groups == 1)
-    is_pixel_1x1 = (kh == 1 and kw == 1 and in_c == 4 and groups == 1 and
-                    out_c == 4 and not (groups == in_c and out_c == in_c))
-
-    align_c = 8
-    while align_c < 16 and align_c < in_c:
-        align_c <<= 1
-    align_out_c = _align_up(out_c, 16)
-    if is_target:
-        width_stride = in_w
-        out_width_stride = 256
-    else:
-        width_stride = _align_up(in_w, _ceil_div(16, align_c))
-        out_width_stride = _align_up(out_w * out_h, 4)
-
-    np.random.seed(42)
-    input_nchw = np.random.uniform(-2, 2, (batch, in_c, in_h, in_w)).astype(np.float16)
-    weight_nchw = np.random.uniform(-2, 2, (out_c, in_c, kh, kw)).astype(np.float16)
-
-    if is_pixel_1x1:
-        input_packed = np.zeros((batch, in_h, width_stride, in_c), dtype=np.float16)
-        for n in range(batch):
-            for c in range(in_c):
-                input_packed[n, :, :in_w, c] = input_nchw[n, c, :, :]
-    else:
-        c2 = 8
-        c1 = _ceil_div(in_c, c2)
-        input_packed = np.zeros((batch, c1, in_h, width_stride, c2), dtype=np.float16)
-        for n in range(batch):
-            for c in range(in_c):
-                input_packed[n, c // c2, :, :, c % c2] = input_nchw[n, c, :, :]
-    input_flat = input_packed.ravel().view(np.uint16).tolist()
-
-    REGCMD_RESERVED = 16384
-    ic_aligned = _align_up(in_c, align_c)
-    oc_aligned = _align_up(out_c, 16)
-    if is_pixel_1x1:
-        wt_flat = np.zeros(out_c * ic_aligned, dtype=np.float16)
-        for oc in range(out_c):
-            base = oc * ic_aligned
-            for ic in range(in_c):
-                wt_flat[base + ic] = weight_nchw[oc, ic, 0, 0]
-    else:
-        wt_flat = np.zeros(kh * kw * oc_aligned * ic_aligned, dtype=np.float16)
-        for okh in range(kh):
-            for okw in range(kw):
-                for oc in range(out_c):
-                    for ic in range(in_c):
-                        idx = okh * kw * oc_aligned * ic_aligned + okw * oc_aligned * ic_aligned + oc * ic_aligned + ic
-                        wt_flat[idx] = weight_nchw[oc, ic, okh, okw]
-
-    ct_inputs = (ctypes.c_uint16 * len(input_flat)).from_buffer(input_map)
-    ct_inputs[:] = input_flat
-
-    wt_ptr = ctypes.addressof(ctypes.c_char.from_buffer(weight_map))
-    ctypes.memmove(wt_ptr + REGCMD_RESERVED, wt_flat.ctypes.data, wt_flat.nbytes)
-
-    task_regs = [make_conv2d_regs(
-        batch, in_c, in_h, in_w, out_c, kh, kw,
-        input_mem_create.dma_addr, weight_mem_create.dma_addr + REGCMD_RESERVED, output_mem_create.dma_addr)]
-
-    write_regs_to_npu_task(task_regs)
-    npu_submit(tasks_mem_create.obj_addr, task_count=len(task_regs),
-               flags=0x1 | 0x2 | 0x4)
-
-    unpack_c2 = 8
-    if is_pixel_1x1:
-        flat_width = out_h * out_w
-        out_c1 = _ceil_div(align_out_c, unpack_c2)
-        out_nbytes = batch * out_c1 * 1 * out_width_stride * unpack_c2 * 2
-        out_buf = np.frombuffer(output_map, dtype=np.uint16, count=out_nbytes // 2).copy()
-        out_packed = out_buf.view(np.float16).reshape(batch, out_c1, 1, out_width_stride, unpack_c2)
-        result = np.zeros((batch, out_c, out_h, out_w), dtype=np.float16)
-        for n in range(batch):
-            for oc in range(out_c):
-                flat = out_packed[n, oc // unpack_c2, 0, :flat_width, oc % unpack_c2]
-                result[n, oc] = flat.reshape(out_h, out_w)
-    else:
-        out_c1 = _ceil_div(out_c, unpack_c2)
-        out_nbytes = batch * out_c1 * out_h * out_w * unpack_c2 * 2
-        out_buf = np.frombuffer(output_map, dtype=np.uint16, count=out_nbytes // 2).copy()
-        out_packed = out_buf.view(np.float16).reshape(batch, out_c1, out_h, out_w, unpack_c2)
-        result = np.zeros((batch, out_c, out_h, out_w), dtype=np.float16)
-        for n in range(batch):
-            for oc in range(out_c):
-                result[n, oc, :, :] = out_packed[n, oc // unpack_c2, :, :, oc % unpack_c2]
-
-    return result, input_nchw, weight_nchw
 
 if __name__ == "__main__":
     import sys
@@ -556,19 +737,39 @@ if __name__ == "__main__":
         sys.exit(1)
 
     shapes = [
-        ("conv2d_b1_c16_h18_w18_oc16_wic16_k3x3_g1",  1, 16, 18, 18, 16, 3, 3),
-        ("conv2d_b1_c4_h9_w9_oc4_wic4_k1x1_g1",       1,  4,  9,  9,  4, 1, 1),
-        ("conv2d_b1_c16_h32_w32_oc16_wic16_k1x1_g1",  1, 16, 32, 32, 16, 1, 1),
+        ("conv2d_b1_c16_h18_w18_oc16_wic16_k3x3_g1", 1, 16, 18, 18, 16, 16, 3, 3, 1),
+        ("conv2d_b1_c4_h9_w9_oc4_wic4_k1x1_g1", 1, 4, 9, 9, 4, 4, 1, 1, 1),
+        ("conv2d_b1_c16_h32_w32_oc16_wic16_k1x1_g1", 1, 16, 32, 32, 16, 16, 1, 1, 1),
+        ("conv2d_b1_c4_h9_w9_oc4_wic4_k3x3_g1", 1, 4, 9, 9, 4, 4, 3, 3, 1),
+        ("conv2d_b2_c4_h9_w9_oc4_wic4_k3x3_g1", 2, 4, 9, 9, 4, 4, 3, 3, 1),
+        ("conv2d_b1_c1_h5_w7_oc6_wic1_k3x3_g1", 1, 1, 5, 7, 6, 1, 3, 3, 1),
+        ("conv2d_b1_c4_h1_w1_oc2_wic2_k1x1_g2", 1, 4, 1, 1, 2, 2, 1, 1, 2),
+        ("conv2d_b1_c32_h32_w32_oc32_wic1_k1x1_g32", 1, 32, 32, 32, 32, 1, 1, 1, 32),
+        ("conv2d_b1_c15_h5_w5_oc35_wic3_k3x3_g5", 1, 15, 5, 5, 35, 3, 3, 3, 5),
+        ("conv2d_b4_c15_h5_w5_oc35_wic3_k3x3_g5", 4, 15, 5, 5, 35, 3, 3, 3, 5),
+        ("conv2d_b1_c3_h11_w28_oc3_wic1_k3x3_g3", 1, 3, 11, 28, 3, 1, 3, 3, 3),
+        ("conv2d_b2_c3_h11_w28_oc3_wic1_k3x3_g3", 2, 3, 11, 28, 3, 1, 3, 3, 3),
+        ("conv2d_b1_c3_h5_w7_oc6_wic3_k2x1_g1", 1, 3, 5, 7, 6, 3, 2, 1, 1),
+        ("conv2d_b1_c3_h5_w7_oc6_wic3_k2x3_g1", 1, 3, 5, 7, 6, 3, 2, 3, 1),
+        ("conv2d_b1_c3_h5_w7_oc6_wic3_k2x5_g1", 1, 3, 5, 7, 6, 3, 2, 5, 1),
+        ("conv2d_b1_c3_h5_w7_oc6_wic3_k3x1_g1", 1, 3, 5, 7, 6, 3, 3, 1, 1),
+        ("conv2d_b1_c3_h5_w7_oc6_wic3_k3x3_g1", 1, 3, 5, 7, 6, 3, 3, 3, 1),
+        ("conv2d_b1_c3_h5_w7_oc6_wic1_k3x3_g3", 1, 3, 5, 7, 6, 1, 3, 3, 3),
+        ("conv2d_b1_c3_h5_w7_oc6_wic3_k3x5_g1", 1, 3, 5, 7, 6, 3, 3, 5, 1),
     ]
+    # shapes += [
+    #     (f"conv2d_1x3_{n}x{n}_k1", 1, 3, n, n, 6, 3, 1, 1, 1)
+    #     for n in range(2, 2034)
+    # ]
 
     name_width = max(len(shape[0]) for shape in shapes)
     in_shape_width = max(len(f"{shape[2]}x{shape[3]}x{shape[4]}") for shape in shapes)
-    out_shape_width = max(len(f"{shape[5]}x{shape[3] - shape[6] + 1}x{shape[4] - shape[7] + 1}") for shape in shapes)
+    out_shape_width = max(len(f"{shape[5]}x{shape[3] - shape[7] + 1}x{shape[4] - shape[8] + 1}") for shape in shapes)
 
     if dry_run:
-        for name, batch, in_c, in_h, in_w, out_c, kh, kw in shapes:
-            regs = make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw,
-                                    0xffecc000, 0xffed0000, 0xffea0000)
+        for name, batch, in_c, in_h, in_w, out_c, weight_in_c, kh, kw, groups in shapes:
+            regs = make_conv2d_regs(1, in_c, in_h, in_w, out_c, kh, kw,
+                                    0xffecc000, 0xffed0000, 0xffea0000, groups=groups)
             print(f"  {name}: Registers ({len(regs)})")
             for i, r in enumerate(regs):
                 target = (r >> 48) & 0xFFFF
@@ -579,16 +780,17 @@ if __name__ == "__main__":
         os.close(fd)
         exit(0)
 
-    for name, batch, in_c, in_h, in_w, out_c, kh, kw in shapes:
-        result, inp, wt = run_conv2d(in_c, out_c, kh, kw, (in_h, in_w), groups=1)
-        expected = compute_expected_nchw(inp, wt, batch, in_c, in_h, in_w, out_c, kh, kw)
+
+    for name, batch, in_c, in_h, in_w, out_c, weight_in_c, kh, kw, groups in shapes:
+        result, inp, wt = run_conv2d(batch, in_c, out_c, kh, kw, (in_h, in_w), groups=groups, weight_in_c=weight_in_c)
+        expected = compute_expected_nchw(inp, wt, batch, in_c, in_h, in_w, out_c, kh, kw, groups=groups)
         md = float(np.max(np.abs(result.astype(np.float64) - expected)))
         ok = np.allclose(result, expected, atol=0.2) and not np.any(np.isinf(result))
         out_h = in_h - kh + 1
         out_w = in_w - kw + 1
         in_shape = f"{in_c}x{in_h}x{in_w}"
         out_shape = f"{out_c}x{out_h}x{out_w}"
-        print(f"  {name:<{name_width}s} {in_shape:<{in_shape_width}s} -> {out_shape:<{out_shape_width}s} kh={kh} kw={kw}  {'PASS' if ok else 'FAIL'}  (max_diff={md:.4f})")
+        print(f"  {name:<{name_width}s} {in_shape:<{in_shape_width}s} -> {out_shape:<{out_shape_width}s} kh={kh} kw={kw} g={groups}  {'PASS' if ok else 'FAIL'}  (max_diff={md:.4f})")
         assert ok, f"{name} failed"
 
     os.close(fd)
