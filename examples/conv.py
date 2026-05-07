@@ -231,7 +231,9 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
     is_pixel_1x1 = (kh == 1 and kw == 1 and in_c == 4 and groups == 1 and
                     out_c == 4 and not is_depthwise)
 
-    align_c = 16 if is_target else 8
+    align_c = 8
+    while align_c < 16 and align_c < in_c:
+        align_c <<= 1
     if is_depthwise:
         while align_c < 32 and align_c < in_c:
             align_c <<= 1
@@ -354,9 +356,9 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
         ]
     else:
         npu_regs += [
-            E(reg.CNA, reg.CNA_CVT_CON5, 0xff),
+            E(reg.CNA, reg.CNA_CVT_CON5, (1 << (8 if is_target else align_c)) - 1),
         ]
-    if is_pixel_1x1:
+    if kh == 1 and kw == 1:
         npu_regs += [
             E(reg.CORE, reg.CORE_MISC_CFG, (2 << 8)),
         ]
@@ -461,7 +463,9 @@ def run_conv2d(in_c, out_c, kh, kw, input_hw, groups=1):
     is_pixel_1x1 = (kh == 1 and kw == 1 and in_c == 4 and groups == 1 and
                     out_c == 4 and not (groups == in_c and out_c == in_c))
 
-    align_c = 16 if is_target else 8
+    align_c = 8
+    while align_c < 16 and align_c < in_c:
+        align_c <<= 1
     align_out_c = _align_up(out_c, 16)
     if is_target:
         width_stride = in_w
@@ -552,9 +556,14 @@ if __name__ == "__main__":
         sys.exit(1)
 
     shapes = [
-        ("3x3", 1, 16, 18, 18, 16, 3, 3),
-        ("1x1", 1, 4, 9, 9, 4, 1, 1),
+        ("conv2d_b1_c16_h18_w18_oc16_wic16_k3x3_g1",  1, 16, 18, 18, 16, 3, 3),
+        ("conv2d_b1_c4_h9_w9_oc4_wic4_k1x1_g1",       1,  4,  9,  9,  4, 1, 1),
+        ("conv2d_b1_c16_h32_w32_oc16_wic16_k1x1_g1",  1, 16, 32, 32, 16, 1, 1),
     ]
+
+    name_width = max(len(shape[0]) for shape in shapes)
+    in_shape_width = max(len(f"{shape[2]}x{shape[3]}x{shape[4]}") for shape in shapes)
+    out_shape_width = max(len(f"{shape[5]}x{shape[3] - shape[6] + 1}x{shape[4] - shape[7] + 1}") for shape in shapes)
 
     if dry_run:
         for name, batch, in_c, in_h, in_w, out_c, kh, kw in shapes:
@@ -577,7 +586,9 @@ if __name__ == "__main__":
         ok = np.allclose(result, expected, atol=0.2) and not np.any(np.isinf(result))
         out_h = in_h - kh + 1
         out_w = in_w - kw + 1
-        print(f"  {name:<4s} {f'{in_c}x{in_h}x{in_w}':<8s} -> {f'{out_c}x{out_h}x{out_w}':<8s} kh={kh} kw={kw}  {'PASS' if ok else 'FAIL'}  (max_diff={md:.4f})")
+        in_shape = f"{in_c}x{in_h}x{in_w}"
+        out_shape = f"{out_c}x{out_h}x{out_w}"
+        print(f"  {name:<{name_width}s} {in_shape:<{in_shape_width}s} -> {out_shape:<{out_shape_width}s} kh={kh} kw={kw}  {'PASS' if ok else 'FAIL'}  (max_diff={md:.4f})")
         assert ok, f"{name} failed"
 
     os.close(fd)
