@@ -357,9 +357,16 @@ def _reorder_grouped_spatial_weights_block16(weight_full, out_c, in_c, kh, kw):
         reordered[block_start:block_end] = pack_order.transpose(0, 2, 1).reshape(block_channels, in_c, kh, kw)
     return reordered
 
-def _feature_grains(row_bytes, floor_grains):
+def _feature_grains(row_bytes, floor_grains, use_nhwc_pack=False, is_spatial=False):
+    if use_nhwc_pack and is_spatial:
+        return floor_grains
     even_rows_per_two_banks = (_ceil_div(2 * CBUF_BANK_SIZE, row_bytes) + 1) & ~1
     return min(floor_grains, even_rows_per_two_banks)
+
+def _data_bank(width_stride, feature_grains, align_c, use_nhwc_pack=False, is_spatial=False):
+    if use_nhwc_pack and is_spatial:
+        return RK_CBUF_BANKS - 1
+    return int(np.clip(_ceil_div(width_stride * feature_grains * align_c * FP16_BYTES, CBUF_BANK_SIZE), 1, RK_CBUF_BANKS - 1))
 
 def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out_dma, groups=1, out_width_stride_override=None):
     p = _conv_params(batch, in_c, in_h, in_w, out_c, kh, kw, groups)
@@ -375,8 +382,8 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
     input_pack_c2 = p["input_pack_c2"]
 
     data_in_channel_aligned = _align_up(in_c, align_c)
-    feature_grains = in_h if (use_nhwc_pack and is_spatial) else _feature_grains(width_stride * align_c * FP16_BYTES, in_h + kh)
-    data_bank = RK_CBUF_BANKS - 1 if (use_nhwc_pack and is_spatial) else int(np.clip(_ceil_div(width_stride * feature_grains * align_c * FP16_BYTES, CBUF_BANK_SIZE), 1, RK_CBUF_BANKS - 1))
+    feature_grains = _feature_grains(width_stride * align_c * FP16_BYTES, in_h + kh, use_nhwc_pack, is_spatial)
+    data_bank = _data_bank(width_stride, feature_grains, align_c, use_nhwc_pack, is_spatial)
     out_channel_field = align_out_c - 1 if not is_depthwise else _align_up(align_out_c, 32) - 1
     effective_align_out = max(16, _align_up(_ceil_div(out_c, groups), 16)) if (groups > 1 and not is_depthwise) else out_channel_field + 1
 
@@ -529,6 +536,13 @@ def write_regs_to_npu_task(task_regs):
         npu_tasks[idx].int_mask = (1 << 8) | (1 << 9) # PC_INTERRUPT_MASK_DPU_0 | DPU_1
         npu_tasks[idx].int_clear = 0x1ffff      # downstream RKNPU_INT_CLEAR clears all status bits
 
+def submit_conv_tasks(task_regs):
+    write_regs_to_npu_task(task_regs)
+    npu_submit(tasks_mem_create.obj_addr, task_count=len(task_regs),
+               flags=(RKNPU_JOB_PC |
+                      RKNPU_JOB_BLOCK |
+                      RKNPU_JOB_PINGPONG))
+
 def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None):
     in_h, in_w = input_hw
     weight_in_c = weight_in_c or (in_c // groups)
@@ -563,27 +577,31 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
         return np.frombuffer(output_map, dtype=np.uint16, count=count).copy().view(np.float16)
 
     for n in range(batch):
+        pc_chain_tiles = False
         if not is_spatial:
             small_chan = in_c <= 4 and not p["is_depthwise"]
             tile_h = max(1, RK_MAX_CONV_FLAT_STRIDE // out_w) if (small_chan and _align_up(out_h * out_w, 4) > RK_MAX_CONV_FLAT_STRIDE) else out_h
             tiles = [(row, min(tile_h, out_h - row)) for row in range(0, out_h, tile_h)]
+        elif not grouped_spatial and out_h > 48:
+            pc_chain_tiles = True
+            tile_out_h = 48
+            tiles = [(row, min(tile_out_h + kh - 1, in_h - row)) for row in range(0, out_h, tile_out_h)]
         else:
             tiles = [(0, in_h)]
 
-        if is_spatial and not grouped_spatial and out_h > 48:
-            tile_out_h = 48
-            tiles = [(row, min(tile_out_h + kh - 1, in_h - row)) for row in range(0, out_h, tile_out_h)]
-
+        if pc_chain_tiles:
             input_ptr = ctypes.addressof(ctypes.c_char.from_buffer(input_map))
-            output_ptr = ctypes.addressof(ctypes.c_char.from_buffer(output_map))
-            ctypes.memset(output_ptr, 0, output_mem_create.size)
+            ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_mem_create.size)
             task_regs = []
             input_offset = 0
 
-            for row_start, tile_in_h in tiles:
-                tile_p = _conv_params(1, in_c, tile_in_h, in_w, out_c, kh, kw, groups)
-                input_tile = input_nchw[n, :, row_start:row_start + tile_in_h, :]
-                input_flat = _pack_conv_input_fp16(input_tile, tile_p).view(np.uint16)
+        for row_start, tile_in_h in tiles:
+            tile_p = p if tile_in_h == in_h else _conv_params(1, in_c, tile_in_h, in_w, out_c, kh, kw, groups)
+            tile_out_h = tile_p["out_h"]
+            input_tile = input_nchw[n, :, row_start:row_start + tile_in_h, :]
+            input_flat = _pack_conv_input_fp16(input_tile, tile_p).view(np.uint16)
+
+            if pc_chain_tiles:
                 input_bytes = input_flat.nbytes
                 assert input_offset + input_bytes <= input_mem_create.size, "input buffer too small"
                 ctypes.memmove(input_ptr + input_offset, input_flat.ctypes.data, input_bytes)
@@ -596,23 +614,9 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
                     groups=groups,
                     out_width_stride_override=p["out_width_stride"]))
                 input_offset = _align_up(input_offset + input_bytes, 16)
+                continue
 
-            write_regs_to_npu_task(task_regs)
-            npu_submit(tasks_mem_create.obj_addr, task_count=len(task_regs),
-                       flags=(RKNPU_JOB_PC |
-                              RKNPU_JOB_BLOCK |
-                              RKNPU_JOB_PINGPONG))
-
-            out_c1 = _ceil_div(p["align_out_c"], UNPACK_C2)
-            out_buf = read_output_fp16(out_c1 * p["out_width_stride"] * UNPACK_C2)
-            result[n] = _unpack_flat_1x1_output(out_buf, out_c, out_h, out_w, p["out_width_stride"], UNPACK_C2)
-            continue
-
-        for row_start, tile_in_h in tiles:
-            tile_p = p if tile_in_h == in_h else _conv_params(1, in_c, tile_in_h, in_w, out_c, kh, kw, groups)
-            tile_out_h = tile_p["out_h"]
-            input_tile = input_nchw[n, :, row_start:row_start + tile_in_h, :]
-            input_flat = _pack_conv_input_fp16(input_tile, tile_p).view(np.uint16).tolist()
+            input_flat = input_flat.tolist()
             ct_inputs = (ctypes.c_uint16 * len(input_flat)).from_buffer(input_map)
             ct_inputs[:] = input_flat
 
@@ -623,11 +627,7 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
                             output_mem_create.dma_addr,
                             groups=groups )]
 
-            write_regs_to_npu_task(task_regs)
-            npu_submit(tasks_mem_create.obj_addr, task_count=len(task_regs),
-                       flags=(RKNPU_JOB_PC |        # use PC register command stream
-                              RKNPU_JOB_BLOCK |     # block until job completion
-                              RKNPU_JOB_PINGPONG))  # use ping-pong task submission
+            submit_conv_tasks(task_regs)
 
             out_c1 = _ceil_div(out_c, UNPACK_C2) if grouped_spatial else _ceil_div(p["align_out_c"], UNPACK_C2)
             if not is_spatial:
@@ -643,6 +643,11 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
             else:
                 out_buf = read_output_fp16(out_c1 * tile_p["out_width_stride"] * UNPACK_C2)
                 result[n] = _unpack_flat_1x1_output(out_buf, out_c, out_h, out_w, tile_p["out_width_stride"], UNPACK_C2)
+        if pc_chain_tiles:
+            submit_conv_tasks(task_regs)
+            out_c1 = _ceil_div(p["align_out_c"], UNPACK_C2)
+            out_buf = read_output_fp16(out_c1 * p["out_width_stride"] * UNPACK_C2)
+            result[n] = _unpack_flat_1x1_output(out_buf, out_c, out_h, out_w, p["out_width_stride"], UNPACK_C2)
     return result, input_nchw, weight_nchw
 
 def compute_expected_nchw(input_nchw, weight_nchw, batch, in_c, in_h, in_w, out_c, kh, kw, groups=1):
