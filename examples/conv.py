@@ -163,7 +163,7 @@ DRM_IOCTL_RKNPU_ACTION = _IOWR('d', 0x40, ctypes.sizeof(rknpu_action))
 
 def mem_allocate(fd, size, flags=0):
     mem_create = rknpu_mem_create(flags=flags, size=size)
-    ret = ioctl(fd, DRM_IOCTL_RKNPU_MEM_CREATE, mem_create)
+    ioctl(fd, DRM_IOCTL_RKNPU_MEM_CREATE, mem_create)
     mem_map = rknpu_mem_map(handle=mem_create.handle)
     ioctl(fd, DRM_IOCTL_RKNPU_MEM_MAP, mem_map)
     buf = mmap.mmap(fd, mem_create.size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=mem_map.offset)
@@ -222,8 +222,9 @@ def should_use_nhwc_pack(channels, c2):
     return channels > 0 and c2 // channels == 2
 
 def _conv_align_c(in_c, groups, out_c):
-    if not _is_depthwise(in_c, out_c, groups) and in_c > 4: return 16
-    return np.clip(1 << (max(1, in_c) - 1).bit_length(), 8, 32)
+    is_depthwise = _is_depthwise(in_c, out_c, groups)
+    if not is_depthwise and (groups > 1 or in_c > 4): return 16
+    return max(8, min(1 << (max(1, in_c) - 1).bit_length(), 32 if is_depthwise else 16))
 
 def _conv_input_pack_c2(in_c, groups, out_c, align_c):
     # C2 selection is RK packing layered on top of 16-value FP16 atoms.
@@ -257,7 +258,8 @@ def _conv_params(batch, in_c, in_h, in_w, out_c, kh, kw, groups):
     out_width_stride = out_atoms if (not is_spatial and out_atoms < 4) else _align_up(out_atoms, 4)
 
     input_pack_c2 = _conv_input_pack_c2(in_c, groups, out_c, align_c)
-    use_nhwc = (not is_depthwise) and (in_c > 0 and input_pack_c2 // in_c == 2)
+    use_nhwc = (not is_depthwise and not (groups > 1 and is_spatial)
+                and should_use_nhwc_pack(in_c, input_pack_c2))
     return {
         "batch": batch, "in_c": in_c, "in_h": in_h, "in_w": in_w,
         "out_c": out_c, "kh": kh, "kw": kw, "groups": groups,
@@ -292,8 +294,8 @@ def _pack_default(weight, out_c, in_c, kh, kw, c2_out):
     return padded.transpose(0, 2, 3, 1).ravel()
 
 def _pack_dw_spatial_major(weight, out_c, in_c, kh, kw, c2_out):
-    packed = np.zeros((kh, kw, c2_out), dtype=np.float16)
-    packed[:, :, :out_c] = weight[range(out_c), range(out_c)].transpose(1, 2, 0)
+    packed = np.zeros((out_c, kh, kw, c2_out), dtype=np.float16)
+    packed[0, :, :, :out_c] = weight[range(out_c), range(out_c)].transpose(1, 2, 0)
     return packed.ravel()
 
 def pack_conv_weights_for_shape(weight_full, out_c, in_c, kh, kw, align_c, groups):
@@ -375,9 +377,10 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
 
     line_stride, surf_stride = _dma_strides(in_h, width_stride, use_nhwc_pack)
     cbuf_entries = _cbuf_entries(width_stride, align_c, in_h, is_depthwise)
-    data_bank = np.clip(_ceil_div(width_stride * feature_grains * align_c * FP16_BYTES, CBUF_BANK_SIZE), 1, RK_CBUF_BANKS - 1)
+    data_bank = int(np.clip(_ceil_div(width_stride * feature_grains * align_c * FP16_BYTES, CBUF_BANK_SIZE), 1, RK_CBUF_BANKS - 1))
     out_channel_field = align_out_c - 1 if not is_depthwise else _align_up(align_out_c, 32) - 1
     effective_align_out = max(16, _align_up(_ceil_div(out_c, groups), 16)) if (groups > 1 and not is_depthwise) else out_channel_field + 1
+    cvt_data_flag = 0 if use_nhwc_pack else 1
 
     npu_regs = [
         E(reg.DPU, reg.S_POINTER,
@@ -387,7 +390,7 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
         E(reg.CNA, reg.CNA_CONV_CON1,
             ((2 << 4) |                    # CNA_CONV_CON1_IN_PRECISION(fp16)
              (2 << 7) |                    # CNA_CONV_CON1_PROC_PRECISION(fp16)
-             (((1 << 30) | (1 << 29) | ((7 + in_c) << 12)) if (in_c <= 4 and not is_depthwise) else 0) |
+             (((1 << 30) | (1 << 29) | ((7 + in_c) << 12)) if (use_nhwc_pack and in_c <= 4 and not is_depthwise) else 0) |
              (3 if is_depthwise else 0))), # CNA_CONV_CON1_CONV_MODE(depthwise when 3)
         E(reg.CNA, reg.CNA_CONV_CON2,
             (feature_grains << 4)           # CNA_CONV_CON2_FEATURE_GRAINS
@@ -415,9 +418,9 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
         E(reg.CNA, reg.CNA_CBUF_CON1, cbuf_entries),      # CNA_CBUF_CON1_DATA_ENTRIES
 
         # CNA conversion and DMA setup.
-        E(reg.CNA, reg.CNA_CVT_CON0, ((not use_nhwc_pack << 3) |          # CNA_CVT_CON0_DATA_SIGN
-                                     (not use_nhwc_pack << 1) |           # CNA_CVT_CON0_CVT_TYPE
-                                        1)),                              # CNA_CVT_CON0_CVT_BYPASS
+        E(reg.CNA, reg.CNA_CVT_CON0, ((cvt_data_flag << 3) |             # CNA_CVT_CON0_DATA_SIGN
+                                      (cvt_data_flag << 1) |             # CNA_CVT_CON0_CVT_TYPE
+                                       1)),                              # CNA_CVT_CON0_CVT_BYPASS
         E(reg.CNA, reg.CNA_CVT_CON1, (1 << 16)),          # CNA_CVT_CON1_CVT_SCALE0
         E(reg.CNA, reg.CNA_CVT_CON2, (1 << 16)),          # CNA_CVT_CON2_CVT_SCALE1
         E(reg.CNA, reg.CNA_CVT_CON3, (1 << 16)),          # CNA_CVT_CON3_CVT_SCALE2
@@ -436,7 +439,7 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
         E(reg.CNA, reg.CNA_CVT_CON5, (1 << in_c if use_nhwc_pack else input_pack_c2) - 1), # CNA_CVT_CON5_PER_CHANNEL_CVT_EN
         E(reg.CORE, reg.CORE_MISC_CFG, ((2 << 8) |             # CORE_MISC_CFG_PROC_PRECISION(fp16)
                                         (is_depthwise << 1) |  # CORE_MISC_CFG_DW_EN
-                                        (is_spatial))),        # CORE_MISC_CFG_OPERATION_ENABLE),
+                                        is_spatial)),          # CORE_MISC_CFG_OPERATION_ENABLE
         E(reg.CORE, reg.CORE_DATAOUT_SIZE_0,
             (((out_h - 1) << 16) |          # CORE_DATAOUT_SIZE_0_DATAOUT_HEIGHT
              (out_w - 1))),                # CORE_DATAOUT_SIZE_0_DATAOUT_WIDTH
