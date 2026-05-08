@@ -680,13 +680,18 @@ if __name__ == "__main__":
         ("conv2d_b1_c15_h5_w5_oc40_wic3_k3x3_g5", 1, 15, 5, 5, 40, 3, 3, 3, 5),
     ]
     shapes += [ (f"conv2d_1x3_{n}x{n}_k1", 1, 3, n, n, 6, 3, 1, 1, 1) for n in range(2, 400, 2)]
-
-    # Known issues
-    # kept for reference: (2,2,1,1,4x4), (8,8,1,1,5x5), (10,20,3,3,9x9),
-    # (16,16,3,3,9x9), (2,4,3,3,6x6), (2,4,2,2,5x5), (1,32,5,5,10x10), (8,4,4,4,10x10)
-    # (256, 512, 3, 3, (64, 64), 1, "test_ops test_sd_big_conv"),
-    # (2048, 1, 3, 3, (3, 3), 1, "test_ops test_large_ic_conv"),
-    # (16, 6, 5, 2, (64, 64), 1, "test_ops test_large_input_conv2d"),
+    # ── Known-issue / reference shapes (non-blocking, report-only) ──
+    known_issue_shapes = [
+        # ("known_2x2_1x1_4x4", 1, 2, 4, 4, 2, 2, 1, 1, 1),
+        # ("known_8x8_1x1_5x5", 1, 8, 5, 5, 8, 8, 1, 1, 1),
+        # ("known_10x20_3x3_9x9", 1, 10, 9, 9, 20, 10, 3, 3, 1),
+        # ("known_16x16_3x3_9x9", 1, 16, 9, 9, 16, 16, 3, 3, 1),
+        # ("known_2x4_3x3_6x6", 1, 2, 6, 6, 4, 2, 3, 3, 1),
+        # ("known_2x4_2x2_5x5", 1, 2, 5, 5, 4, 2, 2, 2, 1),
+        # ("known_1x32_5x5_10x10", 1, 1, 10, 10, 32, 1, 5, 5, 1),
+        # ("known_8x4_4x4_10x10", 1, 8, 10, 10, 4, 8, 4, 4, 1),
+    ]
+    shapes += known_issue_shapes
     
     name_width = max(len(shape[0]) for shape in shapes)
     in_shape_width = max(len(f"{shape[2]}x{shape[3]}x{shape[4]}") for shape in shapes)
