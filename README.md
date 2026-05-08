@@ -6,20 +6,26 @@ This repo run ops on RK3588 NPU (NVDLA based) with pure python and NPU register 
 
 Thanks to prior effort by [mtx512](https://github.com/mtx512/rk3588-npu), [Tomeu Vizoso](https://gitlab.freedesktop.org/mesa/mesa/-/tree/main/src/gallium/drivers/rocket), [liej6799](https://github.com/liej6799/rk3588)
 
-The NPU can be desribe as 4 stage CNA -> CORE -> DPU -> PPU ->PC in sequence, the ouput of earlier stage passes to next stage. With this in mind, it will be much easier to understand the registers.
+The NPU can be described as a 5-stage pipeline: CNA → CORE → DPU → PPU, with PC controlling operation enable and RDMA feeding data in parallel. The output of each stage passes to the next. With this in mind, it will be much easier to understand the registers.
 
 ```
-┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐  
-│   CNA   │───▶│  CORE   │───▶│   DPU   │───▶│   PC    │  
-│(Conv    │    │(Compute│     │(Data    │    │(Process │  
-│ Neural  │    │ Engine) │    │Process) │    │ Control)│  
-│ Accel)  │    │         │    │         │    │         │  
-└─────────┘    └─────────┘    └─────────┘    └─────────┘  
-     │              │              │              │  
-     │              │              │              │  
-     ▼              ▼              ▼              ▼  
-Weight/Feature   MAC Array      Post-Proc      Operation  
-   Data          Accumulation   (BS/BN/EW)     Enable  
+┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐
+│   CNA   │───▶│  CORE   │───▶│   DPU   │───▶│   PPU   │───▶│   PC    │
+│(Conv    │    │(Compute │    │(Data    │    │(Pooling │    │(Process │
+│ Neural  │    │ Engine) │    │Process) │    │Process) │    │ Control)│
+│ Accel)  │    │         │    │         │    │         │    │         │
+└─────────┘    └─────────┘    └─────────┘    └─────────┘    └─────────┘
+     │              │              │              │              │
+     │              │              │              │              │
+     ▼              ▼              ▼              ▼              ▼
+Weight/Feature   MAC Array      Post-Proc      Pooling        Operation
+   Data          Accumulation   (BS/BN/EW)     (AVG/MAX)      Enable
+
+┌─────────┐
+│  RDMA   │  (0x2001, range 0x5000) — separate DMA for
+│(Read    │   elementwise input/weight data, not in the
+│  DMA)   │   CNA→CORE pipeline. Selected by enable_mask
+└─────────┘   in struct_rknpu_task (0xd for conv, 0x18 for gemm).
 ```
 
 TODO
@@ -44,6 +50,8 @@ Simply run with python.
 pip install numpy
 python examples/elementwise.py
 python examples/gemm.py
+python examples/conv.py
+python examples/conv_gemm.py    # matmul is just 1x1 conv, so lets fuse into one file
 
 python experimental/gemm_int8.py
 python experimental/gemm_int16.py
@@ -51,7 +59,7 @@ python experimental/conv.py
 python experimental/pool.py
 ```
 
-🐧 Armbian Ubuntu with mainline rocket driver preinstalled,
+🐧 Armbian Ubuntu with ROCKET driver preinstalled,
 ```bash
 python experimental/mainline6_18/elementwise.py
 python experimental/mainline6_18/gemm.py
@@ -61,12 +69,11 @@ python experimental/mainline6_18/pool.py
 
 ## 2. PC chaining 
 
-The examples above just contain one op per submit, simple but overhead will be large for many ops.
+Some example like elementwise.py above just contain one op per submit, simple but overhead will be large for many ops.
 Program counter chaining is needed to run multiple ops in one submit.
 
-mainline support will be added later.
 ```bash
-python exampels/pool_pcchain.py
+python experimental/pool_pcchain.py
 ```
 
 What if the mamtul size is too large
@@ -75,7 +82,7 @@ What if the mamtul size is too large
 - C[:, :8144] = A × B[:, :8144]
 - C[:, 8144:8144+48] = A × B[:, 8144:8144+48]
 
-## 3. Multicore 
+## 3. Multicore ⚠️ WIP
 
 The NPU comes with 3 core. You can run different op on different core at the same time.
 Or split GEMM at the N dimension and run at 3 cores at the same time.
