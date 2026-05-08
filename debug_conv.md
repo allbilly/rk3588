@@ -174,6 +174,8 @@ conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1 128x28x28  -> 256x28x28  kh=1 kw=
 conv2d_cc_b1_c256_h28_w28_oc256_wic1_k3x3_g256 256x28x28  -> 256x26x26  kh=3 kw=3 g=256 PASS (max_diff=0.0076)
 conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1 256x28x28  -> 256x28x28  kh=1 kw=1 g=1   PASS (max_diff=0.0312)
 conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1 256x14x14  -> 512x14x14  kh=1 kw=1 g=1   PASS (max_diff=0.0311)
+conv2d_cc_b1_c512_h14_w14_oc512_wic1_k3x3_g512 512x14x14  -> 512x12x12  kh=3 kw=3 g=512 PASS (max_diff=0.0076)
+conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1 512x14x14  -> 512x14x14  kh=1 kw=1 g=1   PASS (max_diff=0.0312)
 ```
 
 ### RKNN dumps captured
@@ -453,6 +455,44 @@ conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1 PASS (max_diff=0.0311)
 python examples/conv.py PASS, three serial full sweeps
 ```
 
+### Depthwise 512x14 fix
+
+`conv2d_cc_b1_c512_h14_w14_oc512_wic1_k3x3_g512` was the next follow-up shape.
+
+Quick fix result:
+
+1. Converting the pasted list entry to the runner's dict format was enough to reach the NPU path.
+2. No register or packing change was needed.
+3. The existing depthwise path already covers this shape.
+
+Verified:
+
+```text
+conv2d_cc_b1_c512_h14_w14_oc512_wic1_k3x3_g512 PASS (max_diff=0.0076)
+python examples/conv.py PASS, three serial full sweeps
+```
+
+### Pointwise 512->512 fix
+
+`conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1` initially failed with:
+
+```text
+FAIL (max_diff=167.5826)
+```
+
+Quick fix applied:
+
+1. Add an exact `pointwise_512_512` path for `in_c=512`, `out_c=512`, `out_h=out_w=14`.
+2. Use the same 16-output-channel PC-chain tile path as the other wide pointwise shapes.
+3. Patch this shape's `CNA_CBUF_CON0` with `_with_cbuf_data_bank(regs, 8)`.
+
+Verified:
+
+```text
+conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1 PASS (max_diff=0.0312)
+python examples/conv.py PASS, three serial full sweeps
+```
+
 ### Final sweep result
 
 `python examples/conv.py` passed the active sweep for this debugging session.
@@ -490,6 +530,8 @@ conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1   PASS (max_diff=0.0156)
 conv2d_cc_b1_c256_h28_w28_oc256_wic1_k3x3_g256   PASS (max_diff=0.0076)
 conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1   PASS (max_diff=0.0312)
 conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1   PASS (max_diff=0.0311)
+conv2d_cc_b1_c512_h14_w14_oc512_wic1_k3x3_g512   PASS (max_diff=0.0076)
+conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1   PASS (max_diff=0.0312)
 ```
 
 Next real NPU work:

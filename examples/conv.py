@@ -625,9 +625,10 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
             pointwise_128_256 = (in_c == 128 and out_c == 256 and out_h == 28 and out_w == 28)
             pointwise_256_256 = (in_c == 256 and out_c == 256 and out_h == 28 and out_w == 28)
             pointwise_256_512 = (in_c == 256 and out_c == 512 and out_h == 14 and out_w == 14)
-            if not small_chan and (out_h > 50 or pointwise_128_256 or pointwise_256_256 or pointwise_256_512):
+            pointwise_512_512 = (in_c == 512 and out_c == 512 and out_h == 14 and out_w == 14)
+            if not small_chan and (out_h > 50 or pointwise_128_256 or pointwise_256_256 or pointwise_256_512 or pointwise_512_512):
                 pc_chain_tiles = True
-                tile_out_h = 18 if pointwise_256_256 else (out_h if (pointwise_128_256 or pointwise_256_512) else (25 if (in_c >= 128 and out_c >= 128) else 50))
+                tile_out_h = 18 if pointwise_256_256 else (out_h if (pointwise_128_256 or pointwise_256_512 or pointwise_512_512) else (25 if (in_c >= 128 and out_c >= 128) else 50))
                 tiles = [(row, min(tile_out_h, out_h - row)) for row in range(0, out_h, tile_out_h)]
             else:
                 tile_h = max(1, RK_MAX_CONV_FLAT_STRIDE // out_w) if (small_chan and _align_up(out_h * out_w, 4) > RK_MAX_CONV_FLAT_STRIDE) else out_h
@@ -713,6 +714,8 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
                         elif pointwise_256_256:
                             regs = _with_cbuf_data_bank(regs, 8)
                         elif pointwise_256_512:
+                            regs = _with_cbuf_data_bank(regs, 8)
+                        elif pointwise_512_512:
                             regs = _with_cbuf_data_bank(regs, 8)
                         task_regs.append(regs)
                 else:
@@ -867,8 +870,12 @@ if __name__ == "__main__":
         dict(name="conv2d_cc_b1_c256_h28_w28_oc256_wic1_k3x3_g256", batch=1, in_c=256, in_h=28, in_w=28, out_c=256, weight_in_c=1, kh=3, kw=3, groups=256),
         # Pointwise 256->256
         dict(name="conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1", batch=1, in_c=256, in_h=28, in_w=28, out_c=256, weight_in_c=256, kh=1, kw=1, groups=1),
-        
+        # Pointwise 256->512
         dict(name="conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1", batch=1, in_c=256, in_h=14, in_w=14, out_c=512, weight_in_c=256, kh=1, kw=1, groups=1),
+        # Depthwise 512x14 
+        dict(name="conv2d_cc_b1_c512_h14_w14_oc512_wic1_k3x3_g512", batch=1, in_c=512, in_h=14, in_w=14, out_c=512, weight_in_c=1, kh=3, kw=3, groups=512),
+        # Pointwise 512->512
+        dict(name="conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1", batch=1, in_c=512, in_h=14, in_w=14, out_c=512, weight_in_c=512, kh=1, kw=1, groups=1),
     ]
     shapes_sweep = [dict(name=f"conv2d_1x3_{n}x{n}_k1", batch=1, in_c=3, in_h=n, in_w=n, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1) for n in range(2, 400, 2)]
     # shapes += shapes_sweep
