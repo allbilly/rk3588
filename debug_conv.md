@@ -2,9 +2,7 @@
 
 ## Shape
 
-```
-dict(name="known_2x2_1x1_4x4",  batch=1, in_c=2, in_h=4, in_w=4, out_c=2, weight_in_c=2, kh=1, kw=1, groups=1),
-```
+See the follow-up sections below for the active cc/debug shapes.
 
 Meaning: in_c=2, out_c=2, kernel 1x1, input 4x4, weight_in_c=2 (= in_c). Name `known_2x2_1x1_4x4` = known marker, 2 in-ch × 2 out-ch, 1×1 kernel, 4×4 input.
 
@@ -160,6 +158,159 @@ Result:
 ```text
 conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1 3x224x224 -> 32x222x222 kh=3 kw=3 g=1 PASS (max_diff=0.0151)
 ```
+
+## Follow-up: ResNet-style cc shapes
+
+The new cc shapes listed at the top of this file were added to `known_issue_shapes` in `examples/conv.py` and are being debugged one by one.
+
+### Fixed so far
+
+```text
+conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32  32x112x112 -> 32x110x110  kh=3 kw=3 g=32  PASS (max_diff=0.0075)
+conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1  32x112x112 -> 64x112x112  kh=1 kw=1 g=1   PASS (max_diff=0.0146)
+```
+
+### RKNN dumps captured
+
+```text
+~/npu/ops_rknn/dump/conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32_dump.txt
+~/npu/ops_rknn/dump/conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1_dump.txt
+~/npu/ops_rknn/dump/conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1_dump.txt
+```
+
+### Depthwise 32x112 fix
+
+RKNN schedules `conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32` as a pc-chain, not as a single full-height task. Key register values:
+
+```text
+CNA_CONV_CON2 FEATURE_GRAINS=15
+CNA_CBUF_CON0 DATA_BANK=11, WEIGHT_BANK=1
+CNA_CBUF_CON1 DATA_ENTRIES=112
+CNA_DATA_SIZE0 height=50 for 48-output-row tiles
+DPU_DST_SURF_STRIDE=12100
+DPU_SURFACE_ADD=48400
+```
+
+Fixes applied:
+
+1. Depthwise spatial convs with `out_h > 48` now enter the shared pc-chain height tiling path.
+2. `_feature_grains()` returns `15` for depthwise spatial convs, matching RKNN.
+3. `_data_bank()` returns all 11 data banks for depthwise spatial convs.
+4. The 224 spatial pc-chain shape was moved to the end of the sweep because running it before depthwise pc-chain shapes poisons later chained submissions even after explicit resets.
+
+### Pointwise 32->64 fix
+
+RKNN schedules `conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1` as height-tiled pc-chain tasks. Important findings:
+
+```text
+CNA_CONV_CON2 FEATURE_GRAINS=10
+CNA_CBUF_CON0 DATA_BANK=11
+CNA_CBUF_CON1 DATA_ENTRIES=112
+CNA_FC_DATA_SIZE1 DMA_CHANNEL=32
+```
+
+The raw path also needed output-channel sub-tiling: without it, channels `0..15` were correct and channels `16+` were corrupt.
+
+Fixes applied:
+
+1. Large non-spatial pointwise convs with `out_h > 50` now use pc-chain height tiling.
+2. `FEATURE_GRAINS`, `DATA_BANK`, `CNA_CBUF_CON1`, and `CNA_FC_DATA_SIZE1` now use the aligned real input channel count for wide inputs, not just the CBUF lane width.
+3. The 32->64 pointwise shape uses 16-output-channel block tasks with weight and output-surface offsets.
+
+### Final sweep result
+
+`python examples/conv.py` passed the active sweep for this debugging session.
+
+Additional depthwise fixes applied:
+
+1. Depthwise spatial weight packing now handles all spatial kernels, not just 3x3. This fixed `conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024`.
+2. Large depthwise spatial shapes use 32-channel block execution with per-block input and weight repacking.
+3. The 28x28 depthwise case is split into two 13-output-row tiles because a single 26-output-row tile is unstable.
+4. Depthwise spatial `FEATURE_GRAINS` is capped at `13`, which avoids the unstable 28x28 grain settings while preserving the passing larger/smaller cases.
+
+Known remaining work:
+
+1. Wider non-grouped 1x1 pointwise cc shapes still need a proper NC1HWC2/GEMM-backed NPU path.
+2. The empirical double-submit state warm-ups should be reduced once a register-level reset/isolation sequence is identified.
+
+Representative final output:
+
+```text
+conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1    PASS (max_diff=0.0146)
+conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32    PASS (max_diff=0.0075)
+conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64    PASS (max_diff=0.0075)
+conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1      PASS (max_diff=0.0151)
+```
+
+Next real NPU work:
+
+1. Build the full NC1HWC2/GEMM NPU path for wider pointwise 1x1 cases.
+2. Keep state-transition regressions covered in `examples/conv.py` while reducing empirical double-submit workarounds where possible.
+
+### Known regressions avoided
+
+Do not globally remove or zero `CNA_CVT_CON5`: removing it previously regressed `conv2d_16x16_1x1_8x8`. A later test of zeroing it for wider pointwise shapes did not fix `64->128` and was reverted.
+
+### Intermittent 32->64 pointwise failure fix
+
+`conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1` could fail intermittently, including cold first-run failures in isolation (`max_diff` around `48`) and failures after large depthwise work in the full sweep (`max_diff` around `32`). The issue was stale task/ping-pong state, not `CNA_CVT_CON5` or weight packing.
+
+Fixes applied in `examples/conv.py`:
+
+1. `submit_conv_tasks()` now uses `RKNPU_JOB_PC | RKNPU_JOB_BLOCK`, matching the Mesa-style reference submit path, instead of also setting `RKNPU_JOB_PINGPONG` for every raw conv task.
+2. Depthwise channel-tiled pc-chain blocks are submitted twice, keeping the existing stale-state warm-up strategy local to the depthwise block path.
+3. The 32->64 pointwise case still exercises the NPU path; wider 1x1 pointwise cases remain separate NPU work until the NC1HWC2/GEMM path exists.
+
+Verified:
+
+```text
+python examples/conv.py
+```
+
+The current sweep passes, including the active cc transition coverage. Representative cc results:
+
+```text
+conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1    PASS (max_diff=0.0146)
+conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32    PASS (max_diff=0.0075)
+conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1      PASS (max_diff=0.0151)
+conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64    PASS (max_diff=0.0075)
+```
+
+### 224 spatial pc-chain poisoning following depthwise
+
+`conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1` and `conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32` both passed independently, but running the 112-depthwise case after the 224 spatial pc-chain failed (`max_diff` around `14.67`). This reproduced as a persistent stale PC-chain state failure: subsequent 112-depthwise retries in the same process also failed.
+
+Root cause: the last task in `write_regs_to_npu_task()` only emitted `PC_OPERATION_ENABLE`. RKNN dumps show chain boundaries clearing `REG_PC_REGISTER_AMOUNTS` to `0`, and stale nonzero PC next-task state can survive into the next raw conv despite per-submit reset.
+
+Fix applied:
+
+1. Final PC tails now write `PC_BASE_ADDRESS=0` and `PC_REGISTER_AMOUNTS=0` before `PC_OPERATION_ENABLE`.
+2. The main sweep includes `conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1` immediately before `conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32` so the poisoning order is covered by `python examples/conv.py`.
+
+Verified:
+
+```text
+conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1   PASS (max_diff=0.0151)
+conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32 PASS (max_diff=0.0075)
+```
+
+### 32->64 pointwise intermittent follow-up
+
+`conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1` still showed intermittent first-run/full-sweep failures (`max_diff` around `49`) after the PC tail clear fix. The failing path is the 16-output-channel independent tile loop used by the 32->64 pointwise NPU implementation.
+
+Fix applied:
+
+1. Each independent pointwise output-channel tile is submitted twice before moving to the next output-channel tile.
+2. This was re-tested after final PC tail clearing, so the earlier pointwise-to-depthwise poisoning did not recur.
+
+Verified:
+
+```text
+conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1 PASS (max_diff=0.0146)
+conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64 PASS (max_diff=0.0075)
+```
+
+Also verified `python examples/conv.py` plus three additional full sweeps in a row.
 
 ## Files involved
 
