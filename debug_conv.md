@@ -121,6 +121,46 @@ Fixes derived from that dump:
 4. Read aligned output planes using `align_out_c / 8`, not only `ceil(out_c / 8)`.
 5. Program `DPU_SURFACE_ADD` with 16-channel surface grouping (`max(2, effective_align_out // 16)`).
 
+## Follow-up: large RKNN pc-chain shape
+
+Added and fixed:
+
+```text
+conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1
+input:  1x3x224x224
+weight: 32x3x3x3
+output: 1x32x222x222
+```
+
+`~/npu/ops_reg` is expected to fail this because it does not support the RKNN pc-chain schedule for the large convolution. RKNN was dumped from `~/npu/ops_rknn` using:
+
+```sh
+python3 gen_conv2d_models.py --custom --batch 1 --in-ch 3 --height 224 --width 224 --out-ch 32 --k-h 3 --k-w 3 --groups 1 --name conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1 --force --out-dir models
+gdb -q ./conv2d_multi -ex "set pagination off" -ex "break rknn_outputs_get" -ex "run --case conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1 1 3 224 224 32 3 3 1 conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1" -ex "shell python3 dump.py 1 2 3 4 5 > dump/conv2d_cc_dump.txt" -ex "continue" -ex "quit"
+```
+
+RKNN showed five height tiles: four `50`-input-row tiles producing `48` output rows each, followed by one `32`-input-row tile producing `30` output rows. Important register values from the dump:
+
+```text
+CNA_CONV_CON2 FEATURE_GRAINS=50 for 50-row tiles
+CNA_CBUF_CON0 DATA_BANK=11, WEIGHT_BANK=1
+DPU_DST_SURF_STRIDE=49284 (full output surface stride)
+DPU_SURFACE_ADD=98568
+```
+
+Fixes:
+
+1. Large non-grouped spatial convs now split into 48-output-row tiles and submit those tiles as one PC chain.
+2. Each chained tile gets its own input DMA offset and an output DMA base offset for the tile row.
+3. `make_conv2d_regs()` accepts an output stride override so tiled DPU writes still use the full output surface stride.
+4. NHWC spatial convs now use `FEATURE_GRAINS=in_h` and all 11 data CBUF banks, matching RKNN and avoiding partial-row corruption.
+
+Result:
+
+```text
+conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1 3x224x224 -> 32x222x222 kh=3 kw=3 g=1 PASS (max_diff=0.0151)
+```
+
 ## Files involved
 
 | File | Location |
