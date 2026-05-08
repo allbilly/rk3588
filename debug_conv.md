@@ -168,6 +168,7 @@ The new cc shapes listed at the top of this file were added to `known_issue_shap
 ```text
 conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32  32x112x112 -> 32x110x110  kh=3 kw=3 g=32  PASS (max_diff=0.0075)
 conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1  32x112x112 -> 64x112x112  kh=1 kw=1 g=1   PASS (max_diff=0.0146)
+conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1   64x56x56   -> 128x56x56   kh=1 kw=1 g=1   PASS (max_diff=0.0156)
 ```
 
 ### RKNN dumps captured
@@ -217,6 +218,28 @@ Fixes applied:
 2. `FEATURE_GRAINS`, `DATA_BANK`, `CNA_CBUF_CON1`, and `CNA_FC_DATA_SIZE1` now use the aligned real input channel count for wide inputs, not just the CBUF lane width.
 3. The 32->64 pointwise shape uses 16-output-channel block tasks with weight and output-surface offsets.
 
+### Pointwise 64->128 fix
+
+`conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1` failed with `max_diff` around `74` after enabling the next known-issue shape. The first 16 output channels in each wide tile were close, but later channels were corrupt.
+
+Root cause: the default 1x1 weight pack serialized each output channel with all 64 input channels contiguous. That happens to match the 16x32 hardware order when `in_c == 32`, but not when `in_c >= 64`. The wide pointwise path needs the same 16-output-channel by 32-input-channel chunk order used by the GEMM references:
+
+```text
+weight.reshape(out_c/16, 16, in_c/32, 32).transpose(0, 2, 1, 3)
+```
+
+Fix applied:
+
+1. Added `_pack_pointwise_wide()` for non-grouped 1x1 convolutions with `in_c >= 64`.
+2. Kept the proven 16-output-channel task tiling; switching to 64-output-channel tiles made only the first 16 channels of each tile correct.
+
+Verified:
+
+```text
+conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1 PASS (max_diff=0.0156)
+python examples/conv.py PASS with this known-issue shape enabled
+```
+
 ### Final sweep result
 
 `python examples/conv.py` passed the active sweep for this debugging session.
@@ -230,7 +253,7 @@ Additional depthwise fixes applied:
 
 Known remaining work:
 
-1. Wider non-grouped 1x1 pointwise cc shapes still need a proper NC1HWC2/GEMM-backed NPU path.
+1. Remaining wider non-grouped 1x1 pointwise cc shapes beyond the active 64->128 case still need to be enabled and validated one by one.
 2. The empirical double-submit state warm-ups should be reduced once a register-level reset/isolation sequence is identified.
 
 Representative final output:
@@ -240,11 +263,12 @@ conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1    PASS (max_diff=0.0146)
 conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32    PASS (max_diff=0.0075)
 conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64    PASS (max_diff=0.0075)
 conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1      PASS (max_diff=0.0151)
+conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1     PASS (max_diff=0.0156)
 ```
 
 Next real NPU work:
 
-1. Build the full NC1HWC2/GEMM NPU path for wider pointwise 1x1 cases.
+1. Continue enabling the remaining wider pointwise 1x1 cases and validate whether the 16x32 weight packing generalizes.
 2. Keep state-transition regressions covered in `examples/conv.py` while reducing empirical double-submit workarounds where possible.
 
 ### Known regressions avoided
@@ -259,7 +283,7 @@ Fixes applied in `examples/conv.py`:
 
 1. `submit_conv_tasks()` now uses `RKNPU_JOB_PC | RKNPU_JOB_BLOCK`, matching the Mesa-style reference submit path, instead of also setting `RKNPU_JOB_PINGPONG` for every raw conv task.
 2. Depthwise channel-tiled pc-chain blocks are submitted twice, keeping the existing stale-state warm-up strategy local to the depthwise block path.
-3. The 32->64 pointwise case still exercises the NPU path; wider 1x1 pointwise cases remain separate NPU work until the NC1HWC2/GEMM path exists.
+3. The 32->64 and 64->128 pointwise cases exercise the NPU path; remaining wider 1x1 pointwise cases still need separate validation.
 
 Verified:
 
@@ -274,6 +298,7 @@ conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1    PASS (max_diff=0.0146)
 conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32    PASS (max_diff=0.0075)
 conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1      PASS (max_diff=0.0151)
 conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64    PASS (max_diff=0.0075)
+conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1     PASS (max_diff=0.0156)
 ```
 
 ### 224 spatial pc-chain poisoning following depthwise

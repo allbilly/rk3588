@@ -296,6 +296,13 @@ def _pack_default(weight, out_c, in_c, kh, kw, c2_out):
     padded[:, :in_c] = weight
     return padded.transpose(0, 2, 3, 1).ravel()
 
+def _pack_pointwise_wide(weight, out_c, in_c):
+    aligned_in_c = max(32, _align_up(in_c, 32))
+    aligned_out_c = max(16, _align_up(out_c, 16))
+    padded = np.zeros((aligned_out_c, aligned_in_c), dtype=np.float16)
+    padded[:out_c, :in_c] = weight[:, :in_c, 0, 0]
+    return padded.reshape(aligned_out_c // 16, 16, aligned_in_c // 32, 32).transpose(0, 2, 1, 3).ravel()
+
 def _pack_dw_spatial_major(weight, out_c, in_c, kh, kw, c2_out):
     blocks = _ceil_div(out_c, c2_out)
     packed = np.zeros((blocks, kh, kw, c2_out), dtype=np.float16)
@@ -310,6 +317,8 @@ def pack_conv_weights_for_shape(weight_full, out_c, in_c, kh, kw, align_c, group
     is_depthwise = _is_depthwise(in_c, out_c, groups)
     if is_depthwise and (kh != 1 or kw != 1):
         return _pack_dw_spatial_major(weight_full, out_c, in_c, kh, kw, align_c)
+    if groups == 1 and kh == 1 and kw == 1 and in_c >= 64:
+        return _pack_pointwise_wide(weight_full, out_c, in_c)
     if _is_kh_major(out_c, in_c, kh, kw, groups):
         return _pack_kh_major(weight_full, out_c, in_c, kh, kw, align_c)
     return _pack_default(weight_full, out_c, in_c, kh, kw, align_c)
@@ -832,17 +841,17 @@ if __name__ == "__main__":
         dict(name="conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1", batch=1, in_c=32, in_h=112, in_w=112, out_c=64, weight_in_c=32, kh=1, kw=1, groups=1),
         # depthwise conv (64ch)
         dict(name="conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64", batch=1, in_c=64, in_h=112, in_w=112, out_c=64, weight_in_c=1, kh=3, kw=3, groups=64),
+        # pointwise expansion
+        dict(name="conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1", batch=1, in_c=64, in_h=56, in_w=56, out_c=128, weight_in_c=64, kh=1, kw=1, groups=1),
     ]
     shapes_sweep = [dict(name=f"conv2d_1x3_{n}x{n}_k1", batch=1, in_c=3, in_h=n, in_w=n, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1) for n in range(2, 400, 2)]
     # shapes += shapes_sweep
     # ── Known-issue / reference shapes (non-blocking, report-only) ──
     known_issue_shapes = [
-        # pointwise expansion
-        dict(name="conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1", batch=1, in_c=64, in_h=56, in_w=56, out_c=128, weight_in_c=64, kh=1, kw=1, groups=1),
 
 
     ]
-    # shapes += known_issue_shapes
+    shapes += known_issue_shapes
     
     name_width = max(len(s["name"]) for s in shapes)
     in_shape_width = max(len(f"{s['in_c']}x{s['in_h']}x{s['in_w']}") for s in shapes)
