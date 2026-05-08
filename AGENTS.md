@@ -13,6 +13,7 @@ Use `deepwiki_ask_question` on these repos:
   - `cmod/*/*_reg_model.cpp` — Register field definitions
   - `vmod/nvdla/NV_NVDLA_*_regfile.v` — Verilog register implementation
   - `verif/traces/traceplayer/conv_8x8_fc_int16/input.txn` — Real register write sequences
+- `soDLA-publishment/soDLA`, Chisel implementation of the NVIDIA hw
 
 - `allbilly/rknpu_driver`, official rknpu driver  
 
@@ -25,7 +26,7 @@ Use `deepwiki_ask_question` on these repos:
 
 - `allbilly/mesa` — For the Mesa Gallium driver (`src/gallium/drivers/rocket/`), which includes the `registers.xml` that generates `rocket_registers.h`. Useful for understanding how convolution is compiled for RK3588. Tomu got multicore working with mesa.
 - `ONNC/onnc` — Open Neural Network Compiler, includes NVDLA backend support. Useful for understanding compiler-level convolution partitioning.
-- `allbilly/npu` — Community NPU reverse-engineering efforts, may contain RK3588-specific insights.
+- `allbilly/npu` — my another NPU reverse-engineering repo, contains how to run model in ops_rknn and gdb dump scripts
 
 folder structure
 - *rawbuf*.py is keeping its hexblob intentionally

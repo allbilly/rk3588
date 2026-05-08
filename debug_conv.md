@@ -169,6 +169,7 @@ The new cc shapes listed at the top of this file were added to `known_issue_shap
 conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32  32x112x112 -> 32x110x110  kh=3 kw=3 g=32  PASS (max_diff=0.0075)
 conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1  32x112x112 -> 64x112x112  kh=1 kw=1 g=1   PASS (max_diff=0.0146)
 conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1   64x56x56   -> 128x56x56   kh=1 kw=1 g=1   PASS (max_diff=0.0156)
+conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128 128x56x56  -> 128x54x54  kh=3 kw=3 g=128 PASS (max_diff=0.0078)
 ```
 
 ### RKNN dumps captured
@@ -252,6 +253,13 @@ Additional depthwise fixes applied:
 3. The 28x28 depthwise case is split into two 13-output-row tiles because a single 26-output-row tile is unstable.
 4. Depthwise spatial `FEATURE_GRAINS` is capped at `13`, which avoids the unstable 28x28 grain settings while preserving the passing larger/smaller cases.
 
+`conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128` follow-up:
+
+1. The active `known_issue_shapes` entry was initially added as a positional string list, but the runner expects dict entries; this caused `TypeError: list indices must be integers or slices, not str` before the NPU path ran.
+2. Converting the entry to the normal dict shape format was enough to exercise the existing depthwise channel-tiling path.
+3. No register-generation change was needed for this shape; the existing 32-channel depthwise block execution and 13-row height tiling covers 128 channels at 56x56.
+4. Verified `python examples/conv.py` once, then five repeated full sweeps, then ten targeted single-shape runs.
+
 Known remaining work:
 
 1. Remaining wider non-grouped 1x1 pointwise cc shapes beyond the active 64->128 case still need to be enabled and validated one by one.
@@ -265,6 +273,7 @@ conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32    PASS (max_diff=0.0075)
 conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64    PASS (max_diff=0.0075)
 conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1      PASS (max_diff=0.0151)
 conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1     PASS (max_diff=0.0156)
+conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128   PASS (max_diff=0.0078)
 ```
 
 Next real NPU work:
