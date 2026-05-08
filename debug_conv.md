@@ -181,6 +181,7 @@ conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024 1024x7x7  -> 1024x5x5   kh=3 kw=
 conv2d_cc_b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1 1024x7x7  -> 1024x7x7   kh=1 kw=1 g=1   PASS (max_diff=0.0606)
 conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024 1024x7x7  -> 1024x1x1   kh=7 kw=7 g=1024 PASS (max_diff=0.0078)
 conv2d_cc_b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1 1024x1x1  -> 1001x1x1   kh=1 kw=1 g=1   PASS (max_diff=0.0314)
+conv1d_* known_issue_shapes expressed as conv2d with H=1/KH=1                         PASS
 ```
 
 ### RKNN dumps captured
@@ -547,6 +548,51 @@ targeted final-shape transition sequence PASS
 python examples/conv.py PASS, three serial full sweeps
 ```
 
+### Conv1d known-issue shapes
+
+The newly added `conv1d_*` known-issue entries were names only, so they could not run directly in `examples/conv.py`. Their source configs are in `experimental/main.c` and `~/npu/ops_reg/main.c` as:
+
+```text
+name, batch, in_channels, input_size, out_channels, weight_in_channels, kernel_size, groups
+```
+
+DeepWiki check against the Rocket/RKNPU register model did not show a distinct conv1d register mode. The hardware exposes 2D convolution dimensions (`DATAIN_HEIGHT`, `DATAIN_WIDTH`, kernel height/width), so the quick fix was to express each conv1d as conv2d:
+
+```text
+input:  N x C x 1 x input_size
+weight: OC x weight_in_channels x 1 x kernel_size
+output: N x OC x 1 x (input_size - kernel_size + 1)
+groups: inferred from ops_reg config when groups=0, otherwise explicit
+```
+
+No `ops_reg` register copy or RKNN dump was needed because all mapped cases passed on the current path:
+
+```text
+conv1d_bs1_as_conv2d                    PASS (max_diff=0.0009)
+conv1d_bs8_as_conv2d                    PASS (max_diff=0.0010)
+conv1d_bs1_612_as_conv2d                PASS (max_diff=0.0018)
+conv1d_bs1_615_as_conv2d                PASS (max_diff=0.0037)
+conv1d_bs1_1311_631_as_conv2d           PASS (max_diff=0.0036)
+conv1d_bs1_1311_632_as_conv2d           PASS (max_diff=0.0019)
+conv1d_bs1_1311_635_as_conv2d           PASS (max_diff=0.0037)
+conv1d_bs1_1311_615_g3_as_conv2d        PASS (max_diff=0.0021)
+conv1d_bs8_8111_611_as_conv2d           PASS (max_diff=0.0010)
+conv1d_bs8_8111_612_a_as_conv2d         PASS (max_diff=0.0019)
+conv1d_bs8_8111_612_b_as_conv2d         PASS (max_diff=0.0019)
+conv1d_bs8_8111_615_as_conv2d           PASS (max_diff=0.0031)
+conv1d_bs8_8311_631_as_conv2d           PASS (max_diff=0.0019)
+conv1d_bs8_8311_632_as_conv2d           PASS (max_diff=0.0029)
+conv1d_bs8_8311_635_a_as_conv2d         PASS (max_diff=0.0039)
+conv1d_bs8_8311_635_g3_as_conv2d        PASS (max_diff=0.0020)
+```
+
+Verified:
+
+```text
+python examples/conv.py PASS
+python examples/conv.py PASS, three serial full sweeps
+```
+
 ### Final sweep result
 
 `python examples/conv.py` passed the active sweep for this debugging session.
@@ -591,6 +637,7 @@ conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024  PASS (max_diff=0.0064)
 conv2d_cc_b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1  PASS (max_diff=0.0606)
 conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024  PASS (max_diff=0.0078)
 conv2d_cc_b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1  PASS (max_diff=0.0314)
+conv1d_* known_issue_shapes as H=1/KH=1 conv2d      PASS
 ```
 
 Next real NPU work:
