@@ -295,19 +295,19 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
         E(reg.CNA,  reg.CNA_CVT_CON4,
                 (1 << 16)                             # CNA_CVT_CON4_SCALE
         ),
-        E(reg.CNA,  reg.CNA_FEATURE_DATA_ADDR, in_dma & 0xFFFFFFFF),
+        E(reg.CNA,  reg.CNA_FEATURE_DATA_ADDR, in_dma),
         E(reg.CNA,  reg.CNA_DMA_CON0,
                 ((15 << 16) |                         # CNA_DMA_CON0_READ_BURST
                 15)                                   # CNA_DMA_CON0_WEIGHT_BURST
         ),
-        E(reg.CNA,  reg.CNA_DMA_CON1,     line_stride),
-        E(reg.CNA,  reg.CNA_DMA_CON2,     0),  # surf_stride = 0 , cannot skip
+        E(reg.CNA,  reg.CNA_DMA_CON1, line_stride),
+        E(reg.CNA,  reg.CNA_DMA_CON2, 0),  # surf_stride = 0 , cannot skip
         E(reg.CNA,  reg.CNA_FC_DATA_SIZE0,
                 ((1 << 16) |                          # CNA_FC_DATA_SIZE0_WIDTH
                 m)                                    # CNA_FC_DATA_SIZE0_HEIGHT
         ),
         E(reg.CNA,  reg.CNA_FC_DATA_SIZE1, align_in),
-        E(reg.CNA,  reg.CNA_DCOMP_ADDR0,  wt_dma & 0xFFFFFFFF),
+        E(reg.CNA,  reg.CNA_DCOMP_ADDR0, wt_dma),
         E(reg.CORE, reg.CORE_MISC_CFG,
                 ((2 << 8) |                           # CORE_MISC_CFG_PROC_PRECISION
                 1)                                    # CORE_MISC_CFG_OPERATION_ENABLE
@@ -317,7 +317,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
                 0)                                    # CORE_DATAOUT_SIZE_0_WIDTH
         ),
         E(reg.CORE, reg.CORE_DATAOUT_SIZE_1, align_out - 1),
-        E(reg.CORE, reg.CORE_RESERVED_3030,  0),
+        E(reg.CORE, reg.CORE_RESERVED_3030, 0),
         E(reg.DPU,  reg.FEATURE_MODE_CFG,
                 ((15 << 5) |                          # DPU_FEATURE_MODE_CFG_BYPASS
                 (2 << 1))                             # DPU_FEATURE_MODE_CFG_MODE
@@ -327,12 +327,12 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
                 (2 << 26) |                           # DPU_DATA_FORMAT_PROC_PRECISION
                 2)                                    # DPU_DATA_FORMAT_IN_PRECISION
         ),
-        E(reg.DPU,  reg.DST_BASE_ADDR,     out_dma & 0xFFFFFFFF),
+        E(reg.DPU,  reg.DST_BASE_ADDR, out_dma),
         E(reg.DPU,  reg.DST_SURF_STRIDE,
                 (1 << 4)                              # DPU_DST_SURF_STRIDE
         ),
-        E(reg.DPU,  reg.DATA_CUBE_WIDTH,   0),
-        E(reg.DPU,  reg.DATA_CUBE_HEIGHT,  m - 1),
+        E(reg.DPU,  reg.DATA_CUBE_WIDTH, 0),
+        E(reg.DPU,  reg.DATA_CUBE_HEIGHT, m - 1),
         E(reg.DPU,  reg.DATA_CUBE_NOTCH,
                 ((notch_val << 16) |                  # DPU_DATA_CUBE_NOTCH_SURF
                 notch_val)                            # DPU_DATA_CUBE_NOTCH_LINE
@@ -353,7 +353,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
                 (3 << 2)  |                           # DPU_BS_OW_CFG_SIZE_E_0
                 (1 << 1))                             # DPU_BS_OW_CFG_OD_BYPASS
         ),
-        E(reg.DPU,  reg.WDMA_SIZE_0,       align_out - 1),
+        E(reg.DPU,  reg.WDMA_SIZE_0, align_out - 1),
         E(reg.DPU,  reg.WDMA_SIZE_1,
                 (((m - 1) << 16) |                    # DPU_WDMA_SIZE_1_HEIGHT
                 0)                                    # DPU_WDMA_SIZE_1_WIDTH
@@ -388,7 +388,7 @@ def write_regs_to_npu_task(task_regs):
         if next_offset is None: return [ enable_npu_units ]
         next_addr = regcmd_mem_create.dma_addr + next_offset* ctypes.sizeof(ctypes.c_uint64)
         return [
-            E(reg.PC_REG, reg.PC_BASE_ADDRESS, next_addr & 0xFFFFFFF0),
+            E(reg.PC_REG, reg.PC_BASE_ADDRESS, next_addr & 0xFFFFFFF0), # rounds down to nearest multiple of 16
             E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, _ceil_div(next_task_regs_len, 2) + 1),
             E(reg.VERSION, 0, 0),
             enable_npu_units
