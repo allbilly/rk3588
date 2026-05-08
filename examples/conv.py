@@ -298,10 +298,12 @@ def _pack_default(weight, out_c, in_c, kh, kw, c2_out):
 
 def _pack_pointwise_wide(weight, out_c, in_c):
     aligned_in_c = max(32, _align_up(in_c, 32))
-    aligned_out_c = max(16, _align_up(out_c, 16))
-    padded = np.zeros((aligned_out_c, aligned_in_c), dtype=np.float16)
+    padded = np.zeros((out_c, aligned_in_c), dtype=np.float16)
     padded[:out_c, :in_c] = weight[:, :in_c, 0, 0]
-    return padded.reshape(aligned_out_c // 16, 16, aligned_in_c // 32, 32).transpose(0, 2, 1, 3).ravel()
+    return np.concatenate([
+        padded[oc:oc + 16].reshape(-1, aligned_in_c // 32, 32).transpose(1, 0, 2).ravel()
+        for oc in range(0, out_c, 16)
+    ])
 
 def _pack_dw_spatial_major(weight, out_c, in_c, kh, kw, c2_out):
     blocks = _ceil_div(out_c, c2_out)
@@ -384,9 +386,15 @@ def _data_bank(width_stride, feature_grains, align_c, use_nhwc_pack=False, is_sp
         return RK_CBUF_BANKS - 1
     return int(np.clip(_ceil_div(width_stride * feature_grains * align_c * FP16_BYTES, CBUF_BANK_SIZE), 1, RK_CBUF_BANKS - 1))
 
+def _with_reg_value(regs, target, reg_addr, value):
+    replacement = E(target, reg_addr, value)
+    return [replacement if (q & 0xFFFF) == reg_addr and (q >> 48) == target else q for q in regs]
+
+def _without_reg(regs, target, reg_addr):
+    return [q for q in regs if not ((q & 0xFFFF) == reg_addr and (q >> 48) == target)]
+
 def _with_cbuf_data_bank(regs, data_bank):
-    cbuf = E(reg.CNA, reg.CNA_CBUF_CON0, ((RK_CBUF_BANKS - data_bank) << 4) | data_bank)
-    return [cbuf if (q & 0xFFFF) == reg.CNA_CBUF_CON0 and (q >> 48) == reg.CNA else q for q in regs]
+    return _with_reg_value(regs, reg.CNA, reg.CNA_CBUF_CON0, ((RK_CBUF_BANKS - data_bank) << 4) | data_bank)
 
 def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out_dma, groups=1, out_width_stride_override=None, weight_reuse=False, full_data_bank=False):
     p = _conv_params(batch, in_c, in_h, in_w, out_c, kh, kw, groups)
@@ -620,15 +628,25 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
     for n in range(batch):
         pc_chain_tiles = False
         depthwise_channel_tiles = False
+        pointwise_128_256 = False
+        pointwise_256_256 = False
+        pointwise_256_512 = False
+        pointwise_512_512 = False
+        pointwise_512_1024 = False
+        pointwise_1024_1024 = False
+        pointwise_1024_1001 = False
         if not is_spatial:
             small_chan = in_c <= 4 and not p["is_depthwise"]
             pointwise_128_256 = (in_c == 128 and out_c == 256 and out_h == 28 and out_w == 28)
             pointwise_256_256 = (in_c == 256 and out_c == 256 and out_h == 28 and out_w == 28)
             pointwise_256_512 = (in_c == 256 and out_c == 512 and out_h == 14 and out_w == 14)
             pointwise_512_512 = (in_c == 512 and out_c == 512 and out_h == 14 and out_w == 14)
-            if not small_chan and (out_h > 50 or pointwise_128_256 or pointwise_256_256 or pointwise_256_512 or pointwise_512_512):
+            pointwise_512_1024 = (in_c == 512 and out_c == 1024 and out_h == 7 and out_w == 7)
+            pointwise_1024_1024 = (in_c == 1024 and out_c == 1024 and out_h == 7 and out_w == 7)
+            pointwise_1024_1001 = (in_c == 1024 and out_c == 1001 and out_h == 1 and out_w == 1)
+            if not small_chan and (out_h > 50 or pointwise_128_256 or pointwise_256_256 or pointwise_256_512 or pointwise_512_512 or pointwise_512_1024 or pointwise_1024_1024 or pointwise_1024_1001):
                 pc_chain_tiles = True
-                tile_out_h = 18 if pointwise_256_256 else (out_h if (pointwise_128_256 or pointwise_256_512 or pointwise_512_512) else (25 if (in_c >= 128 and out_c >= 128) else 50))
+                tile_out_h = 18 if pointwise_256_256 else (out_h if (pointwise_128_256 or pointwise_256_512 or pointwise_512_512 or pointwise_512_1024 or pointwise_1024_1024 or pointwise_1024_1001) else (25 if (in_c >= 128 and out_c >= 128) else 50))
                 tiles = [(row, min(tile_out_h, out_h - row)) for row in range(0, out_h, tile_out_h)]
             else:
                 tile_h = max(1, RK_MAX_CONV_FLAT_STRIDE // out_w) if (small_chan and _align_up(out_h * out_w, 4) > RK_MAX_CONV_FLAT_STRIDE) else out_h
@@ -647,12 +665,20 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
 
         if pc_chain_tiles:
             input_ptr = ctypes.addressof(ctypes.c_char.from_buffer(input_map))
-            ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_mem_create.size)
             task_regs = []
             input_offset = 0
-            output_channel_tile_size = 16
+            output_channel_tile_size = 512 if pointwise_1024_1001 else 16
             output_channel_tiles = (not is_spatial and (out_c == 64 or out_c >= 128))
             depthwise_channel_tiles = p["is_depthwise"] and out_c >= 32
+            if pointwise_1024_1001:
+                warmup_regs = make_conv2d_regs(
+                    1, 1, 4, 4, 6, 1, 1,
+                    input_mem_create.dma_addr,
+                    weight_mem_create.dma_addr,
+                    output_mem_create.dma_addr,
+                    groups=1)
+                submit_conv_tasks([warmup_regs])
+            ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_mem_create.size)
 
         for row_start, tile_in_h in tiles:
             tile_p = p if tile_in_h == in_h else _conv_params(1, in_c, tile_in_h, in_w, out_c, kh, kw, groups)
@@ -717,6 +743,15 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
                             regs = _with_cbuf_data_bank(regs, 8)
                         elif pointwise_512_512:
                             regs = _with_cbuf_data_bank(regs, 8)
+                        elif pointwise_512_1024:
+                            regs = _with_cbuf_data_bank(regs, 8)
+                        elif pointwise_1024_1024:
+                            regs = _with_cbuf_data_bank(regs, 8)
+                        elif pointwise_1024_1001:
+                            regs = _with_cbuf_data_bank(regs, 1)
+                            regs = _with_reg_value(regs, reg.CNA, reg.CNA_DMA_CON2, (tile_p["width_stride"] * (tile_in_h - 4)) & 0x0fffffff)
+                            regs = _without_reg(regs, reg.CNA, reg.CNA_CVT_CON5)
+                            regs = _with_reg_value(regs, reg.DPU, reg.SURFACE_ADD, 2 << 4)
                         task_regs.append(regs)
                 else:
                     task_regs.append(make_conv2d_regs(
@@ -762,7 +797,8 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
                 out_buf = read_output_fp16(out_c1 * tile_p["out_width_stride"] * UNPACK_C2)
                 result[n] = _unpack_flat_1x1_output(out_buf, out_c, out_h, out_w, tile_p["out_width_stride"], UNPACK_C2)
         if pc_chain_tiles and task_regs:
-            submit_conv_tasks(task_regs, repeat=2 if output_channel_tiles else 1)
+            submit_repeat = 2 if output_channel_tiles else 1
+            submit_conv_tasks(task_regs, repeat=submit_repeat)
         if pc_chain_tiles and not depthwise_channel_tiles:
             out_c1 = _ceil_div(p["align_out_c"], UNPACK_C2)
             out_buf = read_output_fp16(out_c1 * p["out_width_stride"] * UNPACK_C2)
@@ -849,7 +885,7 @@ if __name__ == "__main__":
         dict(name="conv2d_1x32_5x5_10x10",    batch=1, in_c=1,  in_h=10, in_w=10, out_c=32, weight_in_c=1,  kh=5, kw=5, groups=1),
         dict(name="conv2d_8x4_4x4_10x10",     batch=1, in_c=8,  in_h=10, in_w=10, out_c=4,  weight_in_c=8,  kh=4, kw=4, groups=1),
 
-        #  early layers of a MobileNetV1
+        # MobileNet layers
         # first spatial conv (RGB→32ch)
         dict(name="conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1", batch=1, in_c=3, in_h=224, in_w=224, out_c=32, weight_in_c=3, kh=3, kw=3, groups=1),
         #  depthwise conv (3×3 sep)
@@ -876,6 +912,12 @@ if __name__ == "__main__":
         dict(name="conv2d_cc_b1_c512_h14_w14_oc512_wic1_k3x3_g512", batch=1, in_c=512, in_h=14, in_w=14, out_c=512, weight_in_c=1, kh=3, kw=3, groups=512),
         # Pointwise 512->512
         dict(name="conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1", batch=1, in_c=512, in_h=14, in_w=14, out_c=512, weight_in_c=512, kh=1, kw=1, groups=1),
+        # 7x7 and classifier-head fixes
+        dict(name="conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1", batch=1, in_c=512, in_h=7, in_w=7, out_c=1024, weight_in_c=512, kh=1, kw=1, groups=1),
+        dict(name="conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024", batch=1, in_c=1024, in_h=7, in_w=7, out_c=1024, weight_in_c=1, kh=3, kw=3, groups=1024),
+        dict(name="conv2d_cc_b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1", batch=1, in_c=1024, in_h=7, in_w=7, out_c=1024, weight_in_c=1024, kh=1, kw=1, groups=1),
+        dict(name="conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024", batch=1, in_c=1024, in_h=7, in_w=7, out_c=1024, weight_in_c=1, kh=7, kw=7, groups=1024),
+        dict(name="conv2d_cc_b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1", batch=1, in_c=1024, in_h=1, in_w=1, out_c=1001, weight_in_c=1024, kh=1, kw=1, groups=1),
     ]
     shapes_sweep = [dict(name=f"conv2d_1x3_{n}x{n}_k1", batch=1, in_c=3, in_h=n, in_w=n, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1) for n in range(2, 400, 2)]
     # shapes += shapes_sweep

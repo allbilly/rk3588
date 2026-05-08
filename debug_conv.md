@@ -176,6 +176,11 @@ conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1 256x28x28  -> 256x28x28  kh=1 kw=
 conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1 256x14x14  -> 512x14x14  kh=1 kw=1 g=1   PASS (max_diff=0.0311)
 conv2d_cc_b1_c512_h14_w14_oc512_wic1_k3x3_g512 512x14x14  -> 512x12x12  kh=3 kw=3 g=512 PASS (max_diff=0.0076)
 conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1 512x14x14  -> 512x14x14  kh=1 kw=1 g=1   PASS (max_diff=0.0312)
+conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1  512x7x7    -> 1024x7x7   kh=1 kw=1 g=1   PASS (max_diff=0.0312)
+conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024 1024x7x7  -> 1024x5x5   kh=3 kw=3 g=1024 PASS (max_diff=0.0064)
+conv2d_cc_b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1 1024x7x7  -> 1024x7x7   kh=1 kw=1 g=1   PASS (max_diff=0.0606)
+conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024 1024x7x7  -> 1024x1x1   kh=7 kw=7 g=1024 PASS (max_diff=0.0078)
+conv2d_cc_b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1 1024x1x1  -> 1001x1x1   kh=1 kw=1 g=1   PASS (max_diff=0.0314)
 ```
 
 ### RKNN dumps captured
@@ -188,6 +193,7 @@ conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1 512x14x14  -> 512x14x14  kh=1 kw=
 ~/npu/ops_rknn/dump/conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1_dump.txt
 ~/npu/ops_rknn/dump/conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1_dump.txt
 ~/npu/ops_rknn/dump/conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1_dump.txt
+/tmp/ops_rknn_emit_1024_1001.txt
 ```
 
 ### Depthwise 32x112 fix
@@ -493,6 +499,54 @@ conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1 PASS (max_diff=0.0312)
 python examples/conv.py PASS, three serial full sweeps
 ```
 
+### Final 7x7 and classifier-head fixes
+
+Remaining pasted `known_issue_shapes` entries were converted from positional string lists to normal dict entries:
+
+```text
+conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1
+conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024
+conv2d_cc_b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1
+conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024
+conv2d_cc_b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1
+```
+
+Quick fixes before dumping RKNN:
+
+1. `512->1024 @ 7x7` passed after adding an exact `pointwise_512_1024` PC-chain path, full-height single tile, 16-output-channel subtasks, and `_with_cbuf_data_bank(regs, 8)`.
+2. `1024->1024 @ 7x7` passed after adding the same exact-shape PC-chain path as `pointwise_1024_1024`, also using `_with_cbuf_data_bank(regs, 8)`.
+3. `1024x7x7` depthwise 3x3 and 7x7 passed without new register changes; the existing large depthwise channel/block path and spatial depthwise pack covered them.
+
+The classifier head `1024->1001 @ 1x1` needed an RKNN dump after quick PC-chain/bank attempts failed. RKNN showed:
+
+```text
+CNA_CBUF_CON0 DATA_BANK=1, WEIGHT_BANK=11
+CNA_CONV_CON2 FEATURE_GRAINS=2
+CNA_DMA_CON2 SURF_STRIDE=0x0ffffffd
+CNA_WEIGHT_SIZE2 kernels=1001 for the full task
+DPU_SURFACE_ADD=2
+PC-chain second task split: 512 + 489 output kernels
+```
+
+Final raw fix:
+
+1. Do not output-channel-pad `_pack_pointwise_wide()` for partial final 16-channel blocks; this keeps the classifier weight stream at exactly 1001 kernels while preserving multiple-of-16 shapes.
+2. Add exact `pointwise_1024_1001` PC-chain path with 512-output-channel tasks, matching RKNN's `512 + 489` split.
+3. Patch that shape's generated regs to `DATA_BANK=1`, `CNA_DMA_CON2=(width_stride * (height - 4)) & 0x0fffffff`, omit `CNA_CVT_CON5`, and use `DPU_SURFACE_ADD=2`.
+4. Add a scoped normal 1x1 NPU warm-up before this classifier head. The classifier passes as the first job in a fresh process but fails after any prior large PC/depthwise task without this warm-up.
+
+Verified:
+
+```text
+conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1   PASS (max_diff=0.0312)
+conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024 PASS (max_diff=0.0064)
+conv2d_cc_b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1 PASS (max_diff=0.0606)
+conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024 PASS (max_diff=0.0078)
+conv2d_cc_b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1 PASS (max_diff=0.0314)
+targeted final-shape transition sequence PASS
+python examples/conv.py PASS, three serial full sweeps
+```
+
 ### Final sweep result
 
 `python examples/conv.py` passed the active sweep for this debugging session.
@@ -532,6 +586,11 @@ conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1   PASS (max_diff=0.0312)
 conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1   PASS (max_diff=0.0311)
 conv2d_cc_b1_c512_h14_w14_oc512_wic1_k3x3_g512   PASS (max_diff=0.0076)
 conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1   PASS (max_diff=0.0312)
+conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1    PASS (max_diff=0.0312)
+conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024  PASS (max_diff=0.0064)
+conv2d_cc_b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1  PASS (max_diff=0.0606)
+conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024  PASS (max_diff=0.0078)
+conv2d_cc_b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1  PASS (max_diff=0.0314)
 ```
 
 Next real NPU work:
