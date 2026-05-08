@@ -361,7 +361,7 @@ def _feature_grains(row_bytes, floor_grains):
     even_rows_per_two_banks = (_ceil_div(2 * CBUF_BANK_SIZE, row_bytes) + 1) & ~1
     return min(floor_grains, even_rows_per_two_banks)
 
-def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out_dma, groups=1):
+def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out_dma, groups=1, out_width_stride_override=None):
     p = _conv_params(batch, in_c, in_h, in_w, out_c, kh, kw, groups)
     is_depthwise = p["is_depthwise"]
     is_spatial = (kh != 1 or kw != 1)
@@ -370,13 +370,13 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
     align_c = p["align_c"]
     align_out_c = p["align_out_c"]
     width_stride = p["width_stride"]
-    out_width_stride = p["out_width_stride"]
+    out_width_stride = out_width_stride_override or p["out_width_stride"]
     use_nhwc_pack = p["use_nhwc"]
     input_pack_c2 = p["input_pack_c2"]
 
     data_in_channel_aligned = _align_up(in_c, align_c)
-    feature_grains = _feature_grains(width_stride * align_c * FP16_BYTES, in_h + kh)
-    data_bank = int(np.clip(_ceil_div(width_stride * feature_grains * align_c * FP16_BYTES, CBUF_BANK_SIZE), 1, RK_CBUF_BANKS - 1))
+    feature_grains = in_h if (use_nhwc_pack and is_spatial) else _feature_grains(width_stride * align_c * FP16_BYTES, in_h + kh)
+    data_bank = RK_CBUF_BANKS - 1 if (use_nhwc_pack and is_spatial) else int(np.clip(_ceil_div(width_stride * feature_grains * align_c * FP16_BYTES, CBUF_BANK_SIZE), 1, RK_CBUF_BANKS - 1))
     out_channel_field = align_out_c - 1 if not is_depthwise else _align_up(align_out_c, 32) - 1
     effective_align_out = max(16, _align_up(_ceil_div(out_c, groups), 16)) if (groups > 1 and not is_depthwise) else out_channel_field + 1
 
@@ -570,6 +570,44 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
         else:
             tiles = [(0, in_h)]
 
+        if is_spatial and not grouped_spatial and out_h > 48:
+            tile_out_h = 48
+            tiles = [(row, min(tile_out_h + kh - 1, in_h - row)) for row in range(0, out_h, tile_out_h)]
+
+            input_ptr = ctypes.addressof(ctypes.c_char.from_buffer(input_map))
+            output_ptr = ctypes.addressof(ctypes.c_char.from_buffer(output_map))
+            ctypes.memset(output_ptr, 0, output_mem_create.size)
+            task_regs = []
+            input_offset = 0
+
+            for row_start, tile_in_h in tiles:
+                tile_p = _conv_params(1, in_c, tile_in_h, in_w, out_c, kh, kw, groups)
+                input_tile = input_nchw[n, :, row_start:row_start + tile_in_h, :]
+                input_flat = _pack_conv_input_fp16(input_tile, tile_p).view(np.uint16)
+                input_bytes = input_flat.nbytes
+                assert input_offset + input_bytes <= input_mem_create.size, "input buffer too small"
+                ctypes.memmove(input_ptr + input_offset, input_flat.ctypes.data, input_bytes)
+                output_offset = row_start * out_w * 16
+                task_regs.append(make_conv2d_regs(
+                    1, in_c, tile_in_h, in_w, out_c, kh, kw,
+                    input_mem_create.dma_addr + input_offset,
+                    weight_mem_create.dma_addr,
+                    output_mem_create.dma_addr + output_offset,
+                    groups=groups,
+                    out_width_stride_override=p["out_width_stride"]))
+                input_offset = _align_up(input_offset + input_bytes, 16)
+
+            write_regs_to_npu_task(task_regs)
+            npu_submit(tasks_mem_create.obj_addr, task_count=len(task_regs),
+                       flags=(RKNPU_JOB_PC |
+                              RKNPU_JOB_BLOCK |
+                              RKNPU_JOB_PINGPONG))
+
+            out_c1 = _ceil_div(p["align_out_c"], UNPACK_C2)
+            out_buf = read_output_fp16(out_c1 * p["out_width_stride"] * UNPACK_C2)
+            result[n] = _unpack_flat_1x1_output(out_buf, out_c, out_h, out_w, p["out_width_stride"], UNPACK_C2)
+            continue
+
         for row_start, tile_in_h in tiles:
             tile_p = p if tile_in_h == in_h else _conv_params(1, in_c, tile_in_h, in_w, out_c, kh, kw, groups)
             tile_out_h = tile_p["out_h"]
@@ -691,6 +729,7 @@ if __name__ == "__main__":
     # shapes += shapes_sweep
     # ── Known-issue / reference shapes (non-blocking, report-only) ──
     known_issue_shapes = [
+        dict(name="conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1", batch=1, in_c=3, in_h=224, in_w=224, out_c=32, weight_in_c=3, kh=3, kw=3, groups=1),
     ]
     shapes += known_issue_shapes
     
