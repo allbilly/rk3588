@@ -692,15 +692,14 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
                         oc_tile = min(output_channel_tile_size, out_c - oc_start)
                         weight_offset = oc_start * kh * kw * aligned_in_c * FP16_BYTES
                         surface_offset = (oc_start // 16) * p["out_width_stride"] * 16 * FP16_BYTES
-                        regs = make_conv2d_regs(
+                        task_regs.append(make_conv2d_regs(
                             1, in_c, tile_in_h, in_w, oc_tile, kh, kw,
                             input_mem_create.dma_addr + input_offset,
                             weight_mem_create.dma_addr + weight_offset,
                             output_mem_create.dma_addr + output_offset + surface_offset,
                             groups=groups,
                             out_width_stride_override=p["out_width_stride"],
-                            full_data_bank=True)
-                        submit_conv_tasks([regs], repeat=2)
+                            full_data_bank=True))
                 else:
                     task_regs.append(make_conv2d_regs(
                         1, in_c, tile_in_h, in_w, out_c, kh, kw,
@@ -745,7 +744,7 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
                 out_buf = read_output_fp16(out_c1 * tile_p["out_width_stride"] * UNPACK_C2)
                 result[n] = _unpack_flat_1x1_output(out_buf, out_c, out_h, out_w, tile_p["out_width_stride"], UNPACK_C2)
         if pc_chain_tiles and task_regs:
-            submit_conv_tasks(task_regs)
+            submit_conv_tasks(task_regs, repeat=2 if output_channel_tiles else 1)
         if pc_chain_tiles and not depthwise_channel_tiles:
             out_c1 = _ceil_div(p["align_out_c"], UNPACK_C2)
             out_buf = read_output_fp16(out_c1 * p["out_width_stride"] * UNPACK_C2)

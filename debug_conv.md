@@ -217,6 +217,7 @@ Fixes applied:
 1. Large non-spatial pointwise convs with `out_h > 50` now use pc-chain height tiling.
 2. `FEATURE_GRAINS`, `DATA_BANK`, `CNA_CBUF_CON1`, and `CNA_FC_DATA_SIZE1` now use the aligned real input channel count for wide inputs, not just the CBUF lane width.
 3. The 32->64 pointwise shape uses 16-output-channel block tasks with weight and output-surface offsets.
+4. Those output-channel block tasks are submitted as one PC chain, then the whole chain is submitted twice. Submitting each 16-channel tile as an independent job still left intermittent stale-state failures across repeated `python examples/conv.py` runs.
 
 ### Pointwise 64->128 fix
 
@@ -328,6 +329,12 @@ Fix applied:
 1. Each independent pointwise output-channel tile is submitted twice before moving to the next output-channel tile.
 2. This was re-tested after final PC tail clearing, so the earlier pointwise-to-depthwise poisoning did not recur.
 
+Follow-up fix:
+
+1. The per-output-channel independent submits were still intermittently stale across repeated full-process sweeps (`max_diff` around `44-52`).
+2. The pointwise output-channel tile regs are now accumulated into one PC chain and the complete chain is submitted twice.
+3. Testing `PC_BASE_ADDRESS=1` as a regcmd preamble regressed the 224 spatial conv, and post-submit reset did not fix the instability, so both experiments were rejected.
+
 Verified:
 
 ```text
@@ -336,6 +343,13 @@ conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64 PASS (max_diff=0.0075)
 ```
 
 Also verified `python examples/conv.py` plus three additional full sweeps in a row.
+
+Latest verification:
+
+```text
+python examples/conv.py                  PASS, 10 consecutive full-process sweeps
+targeted cc transition stress sequence   PASS, 10 consecutive runs
+```
 
 ## Files involved
 
