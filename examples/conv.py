@@ -8,6 +8,7 @@ RKNPU_JOB_PC = 1 << 0
 RKNPU_JOB_BLOCK = 1 << 1
 RKNPU_JOB_PINGPONG = 1 << 2
 FP16_BYTES = 2
+FP16_ATOM_ELEMENTS = 16
 CBUF_ENTRY_BYTES = 128
 CBUF_ENTRIES_PER_BANK = 256
 RK_CBUF_BANKS = 12
@@ -195,27 +196,31 @@ def _align_up(x, align):
 def E(target, reg_addr, value):
     return (target << 48) | ((value & 0xFFFFFFFF) << 16) | reg_addr
 
+def _is_depthwise(in_c, out_c, groups):
+    return groups == in_c == out_c
+
 # wt is kh_major
 def _is_kh_major(out_c, in_c, kh, kw, groups):
-    is_depthwise = (groups == in_c and out_c == in_c)
     is_spatial = (kh != 1 or kw != 1)
     multi_input_group = groups > 1 and in_c != groups
-    return is_spatial and not is_depthwise and not multi_input_group
+    return is_spatial and not _is_depthwise(in_c, out_c, groups) and not multi_input_group
 
 def _is_grouped_spatial(in_c, out_c, kh, kw, groups):
-    is_depthwise = (groups == in_c and out_c == in_c)
     is_spatial = (kh != 1 or kw != 1)
     multi_input_group = groups > 1 and in_c != groups
-    return is_spatial and multi_input_group and not is_depthwise
+    return is_spatial and multi_input_group and not _is_depthwise(in_c, out_c, groups)
 
 def should_use_nhwc_pack(channels, width, width_stride, c2):
+    # RK image/pixel DMA consumes NHWC-style rows for this schedule-derived case.
     c_ratio = c2 // channels if channels > 0 else 0
     return (c_ratio == 2) and (width_stride >= width)
 
 def _conv_align_c(in_c, groups, out_c):
-    is_depthwise = (groups == in_c and out_c == in_c)
+    is_depthwise = _is_depthwise(in_c, out_c, groups)
     if groups > 1 and not is_depthwise and in_c > 4:
         return 16
+    # FP16 atoms are 16 elements in local NVDLA; RK depthwise schedules align up
+    # to 32 channels, while regular conv input/kernel groups stop at 16.
     align_c = 8
     max_align = 32 if is_depthwise else 16
     while align_c < max_align and align_c < in_c:
@@ -223,12 +228,31 @@ def _conv_align_c(in_c, groups, out_c):
     return align_c
 
 def _conv_input_pack_c2(in_c, groups, align_c, is_depthwise):
+    # C2 selection is RK packing layered on top of 16-value FP16 atoms.
     if in_c == 1: return 2
     if is_depthwise or groups > 1 or in_c == 16: return 8
     return align_c
 
+def _dma_strides(in_h, width_stride, use_nhwc_pack):
+    # CDMA stride registers are in 32B units. RK NHWC/pixel rows use direct row
+    # stride; packed feature mode uses four atom groups per logical row here.
+    if use_nhwc_pack:
+        line_stride = width_stride
+        return line_stride, line_stride * (in_h - 1) if in_h > 1 else 0
+    return width_stride * 4, width_stride * (in_h - 4) if in_h > 4 else 0
+
+def _cbuf_entries(width_stride, align_c, in_h, is_depthwise):
+    # One CBUF entry is 128B, i.e. four 32B FP16 atoms. The align_c<16 multiplier
+    # is RK schedule-specific for small feature inputs.
+    row_entries = max(1, _ceil_div(width_stride * align_c, 2 * FP16_ATOM_ELEMENTS))
+    return row_entries if align_c >= 16 or is_depthwise else row_entries * in_h * 4
+
+def _data_bank(width_stride, feature_grains, align_c):
+    fd_bytes = width_stride * feature_grains * align_c * FP16_BYTES
+    return max(1, min(RK_CBUF_BANKS - 1, _ceil_div(fd_bytes, CBUF_BANK_SIZE)))
+
 def _conv_params(batch, in_c, in_h, in_w, out_c, kh, kw, groups):
-    is_depthwise = (groups == in_c and out_c == in_c)
+    is_depthwise = _is_depthwise(in_c, out_c, groups)
     is_spatial = (kh != 1 or kw != 1)
     out_h = in_h - kh + 1
     out_w = in_w - kw + 1
@@ -262,6 +286,8 @@ def _expand_grouped_weights(weight, in_c, out_c, kh, kw, groups):
     return expanded
 
 def _pack_kh_major(weight, out_c, in_c, kh, kw, c2_out):
+    # KH-major is an RK schedule-derived weight order for the shapes selected by
+    # _is_kh_major(), not a generic NVDLA layout.
     spatial_stride = c2_out * _ceil_div(in_c, c2_out)
     packed = np.zeros(kh * kw * out_c * spatial_stride, dtype=np.float16)
     for kh_idx in range(kh):
@@ -274,6 +300,7 @@ def _pack_kh_major(weight, out_c, in_c, kh, kw, c2_out):
     return packed
 
 def _pack_default(weight, out_c, in_c, kh, kw, c2_out):
+    # Default RK FP16 conv weights: output channel, spatial, aligned input channel.
     spatial_stride = c2_out * _ceil_div(in_c, c2_out)
     kernel_stride = kh * kw * spatial_stride
     packed = np.zeros(out_c * kernel_stride, dtype=np.float16)
@@ -287,6 +314,7 @@ def _pack_default(weight, out_c, in_c, kh, kw, c2_out):
     return packed
 
 def _pack_dw_spatial_major(weight, out_c, in_c, kh, kw, c2_out):
+    # Depthwise CONV_MODE=3 uses compact spatial-major RK packing.
     packed = np.zeros(out_c * kh * kw * c2_out, dtype=np.float16)
     for kh_idx in range(kh):
         for kw_idx in range(kw):
@@ -296,7 +324,7 @@ def _pack_dw_spatial_major(weight, out_c, in_c, kh, kw, c2_out):
     return packed
 
 def pack_conv_weights_for_shape(weight_full, out_c, in_c, kh, kw, align_c, groups):
-    is_depthwise = (groups == in_c and out_c == in_c)
+    is_depthwise = _is_depthwise(in_c, out_c, groups)
     if is_depthwise and out_c <= align_c and kh == 3 and kw == 3:
         return _pack_dw_spatial_major(weight_full, out_c, in_c, kh, kw, align_c)
     if _is_kh_major(out_c, in_c, kh, kw, groups):
@@ -339,39 +367,18 @@ def _unpack_grouped_spatial_output(out_raw, out_c, out_h, out_w, c2, plane_strid
 def _reorder_grouped_spatial_weights_block16(weight_full, out_c, in_c, kh, kw):
     block_size = 16
     kernel_hw = kh * kw
-    block_count = out_c * kernel_hw
-    full_blocks = out_c // block_size
-    rem_blocks = out_c % block_size
-    full_span = kernel_hw * block_size
-    src = weight_full.reshape(-1)
-    reordered = np.zeros_like(src)
-    for p in range(block_count):
-        dst_oc = p // kernel_hw
-        rem_p = p % kernel_hw
-        dst_kh = rem_p // kw
-        dst_kw = rem_p % kw
-        if p < full_blocks * full_span:
-            oc_block = p // full_span
-            block_off = p % full_span
-            khkw = block_off // block_size
-            oc_in_block = block_off % block_size
-            src_oc = oc_block * block_size + oc_in_block
-            src_kh = khkw // kw
-            src_kw = khkw % kw
-        elif rem_blocks > 0:
-            rem_off = p - full_blocks * full_span
-            khkw = rem_off // rem_blocks
-            oc_in_block = rem_off % rem_blocks
-            src_oc = full_blocks * block_size + oc_in_block
-            src_kh = khkw // kw
-            src_kw = khkw % kw
-        else:
-            src_oc, src_kh, src_kw = dst_oc, dst_kh, dst_kw
-        for ic in range(in_c):
-            src_idx = (((src_oc * in_c + ic) * kh) + src_kh) * kw + src_kw
-            dst_idx = (((dst_oc * in_c + ic) * kh) + dst_kh) * kw + dst_kw
-            reordered[dst_idx] = src[src_idx]
-    return reordered.reshape(out_c, in_c, kh, kw)
+    reordered = np.empty_like(weight_full)
+    for block_start in range(0, out_c, block_size):
+        block_end = min(block_start + block_size, out_c)
+        block_channels = block_end - block_start
+        block = weight_full[block_start:block_end]
+
+        # Hardware consumes grouped spatial weights as kh/kw-major within each
+        # output-channel block; pack_default consumes oc-major. Pre-shuffle the
+        # logical tensor so pack_default serializes the hardware order.
+        pack_order = block.transpose(2, 3, 0, 1).reshape(block_channels, kernel_hw, in_c)
+        reordered[block_start:block_end] = pack_order.transpose(0, 2, 1).reshape(block_channels, in_c, kh, kw)
+    return reordered
 
 def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out_dma, groups=1):
     p = _conv_params(batch, in_c, in_h, in_w, out_c, kh, kw, groups)
@@ -391,27 +398,13 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
     weight_bytes_per_kernel = kh * kw * data_in_channel_aligned * FP16_BYTES
     weight_bytes_total = weight_bytes_per_kernel * out_c
 
-    feature_grains = in_h + kh
-    row_bytes = width_stride * align_c * FP16_BYTES
-    max_grains = _ceil_div(2 * CBUF_BANK_SIZE, row_bytes) if row_bytes > 0 else 2
-    max_grains = (max_grains + 1) & ~1
-    if max_grains < 2: max_grains = 2
-    if feature_grains > max_grains: feature_grains = max_grains
-    row_entries = _ceil_div(width_stride * align_c, 32)
+    input_row_bytes = width_stride * align_c * FP16_BYTES
+    even_rows_per_two_banks = (_ceil_div(2 * CBUF_BANK_SIZE, input_row_bytes) + 1) & ~1   
+    feature_grains = max(in_h + kh, even_rows_per_two_banks)
 
-    if use_nhwc_pack:
-        line_stride = width_stride
-        surf_stride = line_stride * (in_h - 1) if in_h > 1 else 0
-    else:
-        line_stride = width_stride * 4
-        surf_stride = width_stride * (in_h - 4) if in_h > 4 else 0
-    if align_c >= 16 or is_depthwise:
-        cbuf_entries = row_entries
-    else:
-        cbuf_entries = row_entries * in_h * 4
-
-    fd_bytes = width_stride * feature_grains * align_c * FP16_BYTES
-    data_bank = max(1, min(RK_CBUF_BANKS - 1, _ceil_div(fd_bytes, CBUF_BANK_SIZE)))
+    line_stride, surf_stride = _dma_strides(in_h, width_stride, use_nhwc_pack)
+    cbuf_entries = _cbuf_entries(width_stride, align_c, in_h, is_depthwise)
+    data_bank = _data_bank(width_stride, feature_grains, align_c)
     weight_bank = RK_CBUF_BANKS - data_bank
 
     out_channel_field = align_out_c - 1
@@ -603,7 +596,7 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
     input_nchw = np.random.uniform(-2, 2, (batch, in_c, in_h, in_w)).astype(np.float16)
     weight_nchw = np.random.uniform(-2, 2, (out_c, weight_in_c, kh, kw)).astype(np.float16)
 
-    if groups == in_c and out_c == in_c:
+    if _is_depthwise(in_c, out_c, groups):
         weight_full = np.zeros((out_c, in_c, kh, kw), dtype=np.float16)
         for oc in range(out_c):
             weight_full[oc, oc] = weight_nchw[oc, 0]
