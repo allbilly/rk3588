@@ -172,6 +172,8 @@ conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1   64x56x56   -> 128x56x56   kh=1 kw
 conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128 128x56x56  -> 128x54x54  kh=3 kw=3 g=128 PASS (max_diff=0.0078)
 conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1 128x56x56  -> 128x56x56  kh=1 kw=1 g=1   PASS (max_diff=0.0312)
 conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1 128x28x28  -> 256x28x28  kh=1 kw=1 g=1   PASS (max_diff=0.0156)
+conv2d_cc_b1_c256_h28_w28_oc256_wic1_k3x3_g256 256x28x28  -> 256x26x26  kh=3 kw=3 g=256 PASS (max_diff=0.0076)
+conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1 256x28x28  -> 256x28x28  kh=1 kw=1 g=1   PASS (max_diff=0.0312)
 ```
 
 ### RKNN dumps captured
@@ -182,6 +184,7 @@ conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1 128x28x28  -> 256x28x28  kh=1 kw=
 ~/npu/ops_rknn/dump/conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1_dump.txt
 ~/npu/ops_rknn/dump/conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1_dump.txt
 ~/npu/ops_rknn/dump/conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1_dump.txt
+~/npu/ops_rknn/dump/conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1_dump.txt
 ```
 
 ### Depthwise 32x112 fix
@@ -339,6 +342,79 @@ Notes:
 1. Standalone targeted sequences that start with `32->64` can still expose old pointwise stale-state behavior. The full sweep order is the regression guard for this file.
 2. Do not reintroduce the broad `data_bank_override` API/change; the safe fix is exact-shape scoped.
 
+### Depthwise 256x28 fix
+
+`conv2d_cc_b1_c256_h28_w28_oc256_wic1_k3x3_g256` was added after the passing `128->256` pointwise case.
+
+Initial issue:
+
+```text
+TypeError: list indices must be integers or slices, not str
+```
+
+Root cause: the active `known_issue_shapes` entry was pasted as a positional string list, but the runner expects dict entries.
+
+Fix applied:
+
+1. Convert the entry to the normal dict shape format.
+2. No register-generation change was needed. The existing depthwise spatial path already tiles channels in 32-channel blocks, uses 13-output-row height tiles for `out_h > 13`, and submits each block twice.
+
+Verified:
+
+```text
+conv2d_cc_b1_c256_h28_w28_oc256_wic1_k3x3_g256 PASS (max_diff=0.0076)
+python examples/conv.py PASS, five repeated full sweeps
+single-shape targeted run PASS, ten consecutive runs
+```
+
+### Pointwise 256->256 fix
+
+`conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1` initially had the same pasted-list issue as other active follow-up shapes:
+
+```text
+TypeError: list indices must be integers or slices, not str
+```
+
+After converting the entry to the normal dict format, the raw path reached the NPU and failed:
+
+```text
+FAIL (max_diff=129.0518)
+```
+
+Rejected experiments:
+
+1. Simply entering the existing full-height pointwise PC-chain path still failed (`max_diff=113.5718`).
+2. Applying the `128->256` `DATA_BANK=7` patch to the full-height path made it worse (`max_diff=154.8297`).
+3. Matching RKNN's apparent 128-output-channel tile size was rejected because the current raw register generator programs a different `DPU_SURFACE_ADD` for 128-channel subtasks than RKNN does.
+
+RKNN dump for the exact shape showed this is not the `128->256` schedule:
+
+```text
+CNA_DATA_SIZE0 height=18 for the first tile, height=10 for the tail
+CNA_CONV_CON2 FEATURE_GRAINS=9
+CNA_DATA_SIZE1 DATAIN_CHANNEL_REAL=63, DATAIN_CHANNEL=256
+CNA_WEIGHT_SIZE1_WEIGHT_BYTES_PER_KERNEL=512
+CNA_CBUF_CON0 DATA_BANK=8, WEIGHT_BANK=4
+CNA_CBUF_CON1 DATA_ENTRIES=224
+DPU_DST_SURF_STRIDE=784
+DPU_SURFACE_ADD=1568
+```
+
+Final raw fix applied:
+
+1. Add an exact `pointwise_256_256` path for `in_c=256`, `out_c=256`, `out_h=out_w=28`.
+2. Use RKNN's `18`-row height tile, producing `18 + 10` rows.
+3. Keep the proven raw 16-output-channel subtasks so `DPU_SURFACE_ADD` stays at the passing `1568` spacing.
+4. Patch only this exact shape's generated `CNA_CBUF_CON0` entries with `_with_cbuf_data_bank(regs, 8)`, producing `DATA_BANK=8`, `WEIGHT_BANK=4`.
+
+Verified:
+
+```text
+conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1 PASS (max_diff=0.0312)
+single-shape targeted run PASS, ten consecutive runs
+python examples/conv.py PASS, three serial full sweeps
+```
+
 ### Final sweep result
 
 `python examples/conv.py` passed the active sweep for this debugging session.
@@ -373,6 +449,8 @@ conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1     PASS (max_diff=0.0156)
 conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128   PASS (max_diff=0.0078)
 conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1   PASS (max_diff=0.0312)
 conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1   PASS (max_diff=0.0156)
+conv2d_cc_b1_c256_h28_w28_oc256_wic1_k3x3_g256   PASS (max_diff=0.0076)
+conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1   PASS (max_diff=0.0312)
 ```
 
 Next real NPU work:
