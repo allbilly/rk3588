@@ -1,10 +1,9 @@
 # Debugging failed shape in `conv.py`
 
-## Shape
+Now we have a few pointwise and depthwise mobile net layer examples.
+You can check and do a quick fix first to see if it works before dumping ops_rknn.
 
-See the follow-up sections below for the active cc/debug shapes.
 
-Meaning: in_c=2, out_c=2, kernel 1x1, input 4x4, weight_in_c=2 (= in_c). Name `known_2x2_1x1_4x4` = known marker, 2 in-ch × 2 out-ch, 1×1 kernel, 4×4 input.
 
 ## Symptom
 
@@ -174,6 +173,7 @@ conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1 128x56x56  -> 128x56x56  kh=1 kw=
 conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1 128x28x28  -> 256x28x28  kh=1 kw=1 g=1   PASS (max_diff=0.0156)
 conv2d_cc_b1_c256_h28_w28_oc256_wic1_k3x3_g256 256x28x28  -> 256x26x26  kh=3 kw=3 g=256 PASS (max_diff=0.0076)
 conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1 256x28x28  -> 256x28x28  kh=1 kw=1 g=1   PASS (max_diff=0.0312)
+conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1 256x14x14  -> 512x14x14  kh=1 kw=1 g=1   PASS (max_diff=0.0311)
 ```
 
 ### RKNN dumps captured
@@ -185,6 +185,7 @@ conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1 256x28x28  -> 256x28x28  kh=1 kw=
 ~/npu/ops_rknn/dump/conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1_dump.txt
 ~/npu/ops_rknn/dump/conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1_dump.txt
 ~/npu/ops_rknn/dump/conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1_dump.txt
+~/npu/ops_rknn/dump/conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1_dump.txt
 ```
 
 ### Depthwise 32x112 fix
@@ -415,6 +416,43 @@ single-shape targeted run PASS, ten consecutive runs
 python examples/conv.py PASS, three serial full sweeps
 ```
 
+### Pointwise 256->512 fix
+
+`conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1` initially failed after converting the pasted positional list into a normal dict entry:
+
+```text
+FAIL (max_diff=107.6679)
+```
+
+RKNN dump for the exact shape showed:
+
+```text
+CNA_CONV_CON2 FEATURE_GRAINS=10
+CNA_DATA_SIZE1 DATAIN_CHANNEL_REAL=63, DATAIN_CHANNEL=256
+CNA_WEIGHT_SIZE2 kernels=512
+CNA_CBUF_CON0 DATA_BANK=8, WEIGHT_BANK=4
+CNA_CBUF_CON1 DATA_ENTRIES=112
+DPU_SURFACE_ADD=392
+```
+
+Rejected attempts:
+
+1. A single full pointwise task with `DATA_BANK=8` still failed.
+2. The same shape under the old full-task path stayed at the same `max_diff` and did not match RKNN.
+
+Final fix applied:
+
+1. Add an exact `pointwise_256_512` PC-chain path for `in_c=256`, `out_c=512`, `out_h=out_w=14`.
+2. Keep the 16-output-channel tile path so the generated subtasks reuse the correct `DPU_SURFACE_ADD=392` spacing.
+3. Patch this shape's `CNA_CBUF_CON0` to `_with_cbuf_data_bank(regs, 8)` so the bank split matches RKNN.
+
+Verified:
+
+```text
+conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1 PASS (max_diff=0.0311)
+python examples/conv.py PASS, three serial full sweeps
+```
+
 ### Final sweep result
 
 `python examples/conv.py` passed the active sweep for this debugging session.
@@ -451,6 +489,7 @@ conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1   PASS (max_diff=0.0312)
 conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1   PASS (max_diff=0.0156)
 conv2d_cc_b1_c256_h28_w28_oc256_wic1_k3x3_g256   PASS (max_diff=0.0076)
 conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1   PASS (max_diff=0.0312)
+conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1   PASS (max_diff=0.0311)
 ```
 
 Next real NPU work:
