@@ -620,7 +620,7 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
             small_chan = in_c <= 4 and not p["is_depthwise"]
             if not small_chan and out_h > 50:
                 pc_chain_tiles = True
-                tile_out_h = 50
+                tile_out_h = 25 if (in_c >= 128 and out_c >= 128) else 50
                 tiles = [(row, min(tile_out_h, out_h - row)) for row in range(0, out_h, tile_out_h)]
             else:
                 tile_h = max(1, RK_MAX_CONV_FLAT_STRIDE // out_w) if (small_chan and _align_up(out_h * out_w, 4) > RK_MAX_CONV_FLAT_STRIDE) else out_h
@@ -844,6 +844,8 @@ if __name__ == "__main__":
         dict(name="conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1", batch=1, in_c=64, in_h=56, in_w=56, out_c=128, weight_in_c=64, kh=1, kw=1, groups=1),
         # depthwise conv (128ch) 
         dict(name="conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128", batch=1, in_c=128, in_h=56, in_w=56, out_c=128, weight_in_c=1, kh=3, kw=3, groups=128),
+        # pointwise (1×1 projection, same-channel)
+        dict(name="conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1", batch=1, in_c=128, in_h=56, in_w=56, out_c=128, weight_in_c=128, kh=1, kw=1, groups=1),
     ]
     shapes_sweep = [dict(name=f"conv2d_1x3_{n}x{n}_k1", batch=1, in_c=3, in_h=n, in_w=n, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1) for n in range(2, 400, 2)]
     # shapes += shapes_sweep

@@ -170,6 +170,7 @@ conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32  32x112x112 -> 32x110x110  kh=3 kw
 conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1  32x112x112 -> 64x112x112  kh=1 kw=1 g=1   PASS (max_diff=0.0146)
 conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1   64x56x56   -> 128x56x56   kh=1 kw=1 g=1   PASS (max_diff=0.0156)
 conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128 128x56x56  -> 128x54x54  kh=3 kw=3 g=128 PASS (max_diff=0.0078)
+conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1 128x56x56  -> 128x56x56  kh=1 kw=1 g=1   PASS (max_diff=0.0312)
 ```
 
 ### RKNN dumps captured
@@ -178,6 +179,7 @@ conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128 128x56x56  -> 128x54x54  kh=3 kw=
 ~/npu/ops_rknn/dump/conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32_dump.txt
 ~/npu/ops_rknn/dump/conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1_dump.txt
 ~/npu/ops_rknn/dump/conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1_dump.txt
+~/npu/ops_rknn/dump/conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1_dump.txt
 ```
 
 ### Depthwise 32x112 fix
@@ -242,6 +244,45 @@ conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1 PASS (max_diff=0.0156)
 python examples/conv.py PASS with this known-issue shape enabled
 ```
 
+### Pointwise 128->128 fix
+
+`conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1` initially failed after converting the active `known_issue_shapes` entry from the pasted positional list into the runner's dict format:
+
+```text
+FAIL (max_diff=109.5923)
+```
+
+RKNN dump for the exact shape showed that the 128-input pointwise schedule uses smaller height tiles than the 64-input case:
+
+```text
+CNA_DATA_SIZE0 height=25 for main tiles, height=6 for tail
+CNA_CONV_CON2 FEATURE_GRAINS=9 for 25-row tiles, 6 for tail
+CNA_DATA_SIZE1 DATAIN_CHANNEL_REAL=63, DATAIN_CHANNEL=128
+CNA_WEIGHT_SIZE0=0x8000, CNA_WEIGHT_SIZE1=256, CNA_WEIGHT_SIZE2 kernels=128
+CNA_CBUF_CON1 DATA_ENTRIES=224
+DPU_DST_SURF_STRIDE=3136, DPU_SURFACE_ADD=6272
+```
+
+Experiments:
+
+1. Switching from 16-output-channel subtasks to 32-output-channel subtasks did not improve the failure.
+2. Running full 128-output-channel tasks without output-channel subtasks still failed.
+3. Matching RKNN's 25-row height split without output-channel subtasks made only channels `0..15` correct.
+4. The passing raw schedule is 25-row height tiles plus the existing 16-output-channel pointwise subtasks and wide 16x32 weight packing.
+
+Fix applied:
+
+1. For large non-spatial pointwise convs with `in_c >= 128` and `out_c >= 128`, use `tile_out_h=25` instead of `50`.
+2. Keep the existing output-channel tile size at 16 and keep `_pack_pointwise_wide()`.
+
+Verified:
+
+```text
+conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1 PASS (max_diff=0.0312)
+python examples/conv.py PASS, then five repeated full sweeps PASS
+128-depthwise -> 128-pointwise targeted transition PASS, 10 consecutive runs
+```
+
 ### Final sweep result
 
 `python examples/conv.py` passed the active sweep for this debugging session.
@@ -274,11 +315,12 @@ conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64    PASS (max_diff=0.0075)
 conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1      PASS (max_diff=0.0151)
 conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1     PASS (max_diff=0.0156)
 conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128   PASS (max_diff=0.0078)
+conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1   PASS (max_diff=0.0312)
 ```
 
 Next real NPU work:
 
-1. Continue enabling the remaining wider pointwise 1x1 cases and validate whether the 16x32 weight packing generalizes.
+1. Continue enabling the remaining wider pointwise 1x1 cases and validate whether the 25-row pointwise height tile generalizes for `in_c >= 128`.
 2. Keep state-transition regressions covered in `examples/conv.py` while reducing empirical double-submit workarounds where possible.
 
 ### Known regressions avoided
