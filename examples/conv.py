@@ -623,81 +623,85 @@ if __name__ == "__main__":
     # Known NPU limitations: non-1x1 kernels produce partial output 
     shapes = [
         # ── 1x1 kernels (fully supported via NHWC mode + channel slicing for ic>=5) ──
-        ("conv2d_1x6_1x1_4x4", 1, 1, 4, 4, 6, 1, 1, 1, 1),
-        ("conv2d_3x3_1x1_4x4", 1, 3, 4, 4, 3, 3, 1, 1, 1),
-        ("conv2d_4x2_1x1_4x4", 1, 4, 4, 4, 2, 4, 1, 1, 1),
-        ("conv2d_b1_c4_h9_w9_oc4_wic4_k1x1_g1", 1, 4, 9, 9, 4, 4, 1, 1, 1),
-        ("conv2d_16x16_1x1_8x8", 1, 16, 8, 8, 16, 16, 1, 1, 1),
-        ("conv2d_b1_c16_h32_w32_oc16_wic16_k1x1_g1", 1, 16, 32, 32, 16, 16, 1, 1, 1),
+        dict(name="conv2d_1x6_1x1_4x4",                batch=1, in_c=1,  in_h=4,  in_w=4,  out_c=6, weight_in_c=1, kh=1, kw=1, groups=1),
+        dict(name="conv2d_3x3_1x1_4x4",                batch=1, in_c=3,  in_h=4,  in_w=4,  out_c=3, weight_in_c=3, kh=1, kw=1, groups=1),
+        dict(name="conv2d_4x2_1x1_4x4",                batch=1, in_c=4,  in_h=4,  in_w=4,  out_c=2, weight_in_c=4, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c4_h9_w9_oc4_wic4_k1x1_g1",  batch=1, in_c=4,  in_h=9,  in_w=9,  out_c=4, weight_in_c=4, kh=1, kw=1, groups=1),
+        dict(name="conv2d_16x16_1x1_8x8",              batch=1, in_c=16, in_h=8,  in_w=8,  out_c=16, weight_in_c=16, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c16_h32_w32_oc16_wic16_k1x1_g1", batch=1, in_c=16, in_h=32, in_w=32, out_c=16, weight_in_c=16, kh=1, kw=1, groups=1),
 
         # ── Non-1x1 kernels (partial output — known NPU hardware limitation) ──
-        ("conv2d_b1_c4_h9_w9_oc4_wic4_k3x3_g1", 1, 4, 9, 9, 4, 4, 3, 3, 1),
-        ("conv2d_b1_c16_h18_w18_oc16_wic16_k3x3_g1", 1, 16, 18, 18, 16, 16, 3, 3, 1),
-        ("conv2d_b2_c4_h9_w9_oc4_wic4_k3x3_g1", 2, 4, 9, 9, 4, 4, 3, 3, 1),
-        ("conv2d_b1_c1_h5_w7_oc6_wic1_k3x3_g1", 1, 1, 5, 7, 6, 1, 3, 3, 1),
+        dict(name="conv2d_b1_c4_h9_w9_oc4_wic4_k3x3_g1",  batch=1, in_c=4,  in_h=9,  in_w=9,  out_c=4, weight_in_c=4, kh=3, kw=3, groups=1),
+        dict(name="conv2d_b1_c16_h18_w18_oc16_wic16_k3x3_g1", batch=1, in_c=16, in_h=18, in_w=18, out_c=16, weight_in_c=16, kh=3, kw=3, groups=1),
+        dict(name="conv2d_b2_c4_h9_w9_oc4_wic4_k3x3_g1",  batch=2, in_c=4,  in_h=9,  in_w=9,  out_c=4, weight_in_c=4, kh=3, kw=3, groups=1),
+        dict(name="conv2d_b1_c1_h5_w7_oc6_wic1_k3x3_g1",  batch=1, in_c=1,  in_h=5,  in_w=7,  out_c=6, weight_in_c=1, kh=3, kw=3, groups=1),
 
         # Depthwise
-        ("conv2d_b1_c3_h11_w28_oc3_wic1_k3x3_g3", 1, 3, 11, 28, 3, 1, 3, 3, 3),
+        dict(name="conv2d_b1_c3_h11_w28_oc3_wic1_k3x3_g3", batch=1, in_c=3, in_h=11, in_w=28, out_c=3, weight_in_c=1, kh=3, kw=3, groups=3),
 
         # Non-square kernels
-        ("conv2d_3x6_1x3_5x5", 1, 3, 5, 5, 6, 3, 1, 3, 1),
+        dict(name="conv2d_3x6_1x3_5x5", batch=1, in_c=3, in_h=5, in_w=5, out_c=6, weight_in_c=3, kh=1, kw=3, groups=1),
 
         # ── test_ops.py _test_conv2d(cin=3): (3,5,7) @ (6,kh,kw) ──
-        ("conv2d_b1_c3_h5_w7_oc6_wic1_k3x3_g3", 1, 3, 5, 7, 6, 1, 3, 3, 3),
-        ("conv2d_b1_c3_h5_w7_oc6_wic3_k2x1_g1", 1, 3, 5, 7, 6, 3, 2, 1, 1),
-        ("conv2d_b1_c3_h5_w7_oc6_wic3_k2x3_g1", 1, 3, 5, 7, 6, 3, 2, 3, 1),
-        ("conv2d_b1_c3_h5_w7_oc6_wic3_k2x5_g1", 1, 3, 5, 7, 6, 3, 2, 5, 1),
-        ("conv2d_b1_c3_h5_w7_oc6_wic3_k3x1_g1", 1, 3, 5, 7, 6, 3, 3, 1, 1),
-        ("conv2d_b1_c3_h5_w7_oc6_wic3_k3x3_g1", 1, 3, 5, 7, 6, 3, 3, 3, 1),
-        ("conv2d_b1_c3_h5_w7_oc6_wic3_k3x5_g1", 1, 3, 5, 7, 6, 3, 3, 5, 1),
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic1_k3x3_g3", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=1, kh=3, kw=3, groups=3),
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k2x1_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=2, kw=1, groups=1),
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k2x3_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=2, kw=3, groups=1),
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k2x5_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=2, kw=5, groups=1),
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k3x1_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=3, kw=1, groups=1),
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k3x3_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=3, kw=3, groups=1),
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k3x5_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=3, kw=5, groups=1),
 
         # ── test_ops.py _test_conv2d(cin=1): (1,5,7) @ (6,kh,kw) ──
-        ("conv2d_1x6_2x1_5x7", 1, 1, 5, 7, 6, 1, 2, 1, 1),
-        ("conv2d_1x6_2x3_5x7", 1, 1, 5, 7, 6, 1, 2, 3, 1),
-        ("conv2d_1x6_3x1_5x7_b", 1, 1, 5, 7, 6, 1, 3, 1, 1),
-        ("conv2d_1x6_3x5_5x7", 1, 1, 5, 7, 6, 1, 3, 5, 1),
+        dict(name="conv2d_1x6_2x1_5x7", batch=1, in_c=1, in_h=5, in_w=7, out_c=6, weight_in_c=1, kh=2, kw=1, groups=1),
+        dict(name="conv2d_1x6_2x3_5x7", batch=1, in_c=1, in_h=5, in_w=7, out_c=6, weight_in_c=1, kh=2, kw=3, groups=1),
+        dict(name="conv2d_1x6_3x1_5x7_b", batch=1, in_c=1, in_h=5, in_w=7, out_c=6, weight_in_c=1, kh=3, kw=1, groups=1),
+        dict(name="conv2d_1x6_3x5_5x7",   batch=1, in_c=1, in_h=5, in_w=7, out_c=6, weight_in_c=1, kh=3, kw=5, groups=1),
 
         # ── Grouped convs from test_ops.py ──
-        ("conv2d_b1_c4_h1_w1_oc2_wic2_k1x1_g2", 1, 4, 1, 1, 2, 2, 1, 1, 2),
-        ("conv2d_4x4_1x1_1x1_g2", 1, 4, 1, 1, 4, 2, 1, 1, 2),
-        ("conv2d_b1_c32_h32_w32_oc32_wic1_k1x1_g32", 1, 32, 32, 32, 32, 1, 1, 1, 32),
-        ("conv2d_b1_c15_h5_w5_oc35_wic3_k3x3_g5", 1, 15, 5, 5, 35, 3, 3, 3, 5),
+        dict(name="conv2d_b1_c4_h1_w1_oc2_wic2_k1x1_g2",     batch=1,  in_c=4,  in_h=1,  in_w=1,  out_c=2,  weight_in_c=2,  kh=1, kw=1, groups=2),
+        dict(name="conv2d_4x4_1x1_1x1_g2",                   batch=1,  in_c=4,  in_h=1,  in_w=1,  out_c=4,  weight_in_c=2,  kh=1, kw=1, groups=2),
+        dict(name="conv2d_b1_c32_h32_w32_oc32_wic1_k1x1_g32", batch=1, in_c=32, in_h=32, in_w=32, out_c=32, weight_in_c=1,  kh=1, kw=1, groups=32),
+        dict(name="conv2d_b1_c15_h5_w5_oc35_wic3_k3x3_g5",   batch=1,  in_c=15, in_h=5,  in_w=5,  out_c=35, weight_in_c=3,  kh=3, kw=3, groups=5),
 
         # ── Batch >1 coverage ──
-        ("conv2d_b2_c3_h11_w28_oc3_wic1_k3x3_g3", 2, 3, 11, 28, 3, 1, 3, 3, 3),
-        ("conv2d_b4_c15_h5_w5_oc35_wic3_k3x3_g5", 4, 15, 5, 5, 35, 3, 3, 3, 5),
+        dict(name="conv2d_b2_c3_h11_w28_oc3_wic1_k3x3_g3", batch=2, in_c=3,  in_h=11, in_w=28, out_c=3,  weight_in_c=1, kh=3, kw=3, groups=3),
+        dict(name="conv2d_b4_c15_h5_w5_oc35_wic3_k3x3_g5", batch=4, in_c=15, in_h=5,  in_w=5,  out_c=35, weight_in_c=3, kh=3, kw=3, groups=5),
 
         # ── Grouped output-channel variants ──
-        ("conv2d_b1_c4_h5_w5_oc4_wic2_k3x3_g2", 1, 4, 5, 5, 4, 2, 3, 3, 2),
-        ("conv2d_b1_c4_h5_w5_oc8_wic2_k3x3_g2", 1, 4, 5, 5, 8, 2, 3, 3, 2),
-        ("conv2d_b1_c4_h5_w5_oc12_wic2_k3x3_g2", 1, 4, 5, 5, 12, 2, 3, 3, 2),
-        ("conv2d_b1_c6_h5_w5_oc6_wic2_k3x3_g3", 1, 6, 5, 5, 6, 2, 3, 3, 3),
-        ("conv2d_b1_c6_h5_w5_oc12_wic2_k3x3_g3", 1, 6, 5, 5, 12, 2, 3, 3, 3),
-        ("conv2d_b1_c6_h5_w5_oc18_wic2_k3x3_g3", 1, 6, 5, 5, 18, 2, 3, 3, 3),
-        ("conv2d_b1_c15_h5_w5_oc20_wic3_k3x3_g5", 1, 15, 5, 5, 20, 3, 3, 3, 5),
-        ("conv2d_b1_c15_h5_w5_oc25_wic3_k3x3_g5", 1, 15, 5, 5, 25, 3, 3, 3, 5),
-        ("conv2d_b1_c15_h5_w5_oc30_wic3_k3x3_g5", 1, 15, 5, 5, 30, 3, 3, 3, 5),
-        ("conv2d_b1_c15_h5_w5_oc40_wic3_k3x3_g5", 1, 15, 5, 5, 40, 3, 3, 3, 5),
+        dict(name="conv2d_b1_c4_h5_w5_oc4_wic2_k3x3_g2",   batch=1, in_c=4,  in_h=5, in_w=5, out_c=4,  weight_in_c=2, kh=3, kw=3, groups=2),
+        dict(name="conv2d_b1_c4_h5_w5_oc8_wic2_k3x3_g2",   batch=1, in_c=4,  in_h=5, in_w=5, out_c=8,  weight_in_c=2, kh=3, kw=3, groups=2),
+        dict(name="conv2d_b1_c4_h5_w5_oc12_wic2_k3x3_g2",  batch=1, in_c=4,  in_h=5, in_w=5, out_c=12, weight_in_c=2, kh=3, kw=3, groups=2),
+        dict(name="conv2d_b1_c6_h5_w5_oc6_wic2_k3x3_g3",   batch=1, in_c=6,  in_h=5, in_w=5, out_c=6,  weight_in_c=2, kh=3, kw=3, groups=3),
+        dict(name="conv2d_b1_c6_h5_w5_oc12_wic2_k3x3_g3",  batch=1, in_c=6,  in_h=5, in_w=5, out_c=12, weight_in_c=2, kh=3, kw=3, groups=3),
+        dict(name="conv2d_b1_c6_h5_w5_oc18_wic2_k3x3_g3",  batch=1, in_c=6,  in_h=5, in_w=5, out_c=18, weight_in_c=2, kh=3, kw=3, groups=3),
+        dict(name="conv2d_b1_c15_h5_w5_oc20_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=20, weight_in_c=3, kh=3, kw=3, groups=5),
+        dict(name="conv2d_b1_c15_h5_w5_oc25_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=25, weight_in_c=3, kh=3, kw=3, groups=5),
+        dict(name="conv2d_b1_c15_h5_w5_oc30_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=30, weight_in_c=3, kh=3, kw=3, groups=5),
+        dict(name="conv2d_b1_c15_h5_w5_oc40_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=40, weight_in_c=3, kh=3, kw=3, groups=5),
     ]
-    shapes += [ (f"conv2d_1x3_{n}x{n}_k1", 1, 3, n, n, 6, 3, 1, 1, 1) for n in range(2, 400, 2)]
+    # shape sweep
+    # shapes += [dict(name=f"conv2d_1x3_{n}x{n}_k1", batch=1, in_c=3, in_h=n, in_w=n, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1) for n in range(2, 400, 2)]
+    
     # ── Known-issue / reference shapes (non-blocking, report-only) ──
     known_issue_shapes = [
-        # ("known_2x2_1x1_4x4", 1, 2, 4, 4, 2, 2, 1, 1, 1),
-        # ("known_8x8_1x1_5x5", 1, 8, 5, 5, 8, 8, 1, 1, 1),
-        # ("known_10x20_3x3_9x9", 1, 10, 9, 9, 20, 10, 3, 3, 1),
-        # ("known_16x16_3x3_9x9", 1, 16, 9, 9, 16, 16, 3, 3, 1),
-        # ("known_2x4_3x3_6x6", 1, 2, 6, 6, 4, 2, 3, 3, 1),
-        # ("known_2x4_2x2_5x5", 1, 2, 5, 5, 4, 2, 2, 2, 1),
-        # ("known_1x32_5x5_10x10", 1, 1, 10, 10, 32, 1, 5, 5, 1),
-        # ("known_8x4_4x4_10x10", 1, 8, 10, 10, 4, 8, 4, 4, 1),
+        # dict(name="known_2x2_1x1_4x4",  batch=1, in_c=2, in_h=4, in_w=4, out_c=2, weight_in_c=2, kh=1, kw=1, groups=1),
+        # dict(name="known_8x8_1x1_5x5",       batch=1, in_c=8,  in_h=5,  in_w=5,  out_c=8,  weight_in_c=8,  kh=1, kw=1, groups=1),
+        # dict(name="known_10x20_3x3_9x9",     batch=1, in_c=10, in_h=9,  in_w=9,  out_c=20, weight_in_c=10, kh=3, kw=3, groups=1),
+        # dict(name="known_16x16_3x3_9x9",     batch=1, in_c=16, in_h=9,  in_w=9,  out_c=16, weight_in_c=16, kh=3, kw=3, groups=1),
+        # dict(name="known_2x4_3x3_6x6",       batch=1, in_c=2,  in_h=6,  in_w=6,  out_c=4,  weight_in_c=2,  kh=3, kw=3, groups=1),
+        # dict(name="known_2x4_2x2_5x5",       batch=1, in_c=2,  in_h=5,  in_w=5,  out_c=4,  weight_in_c=2,  kh=2, kw=2, groups=1),
+        # dict(name="known_1x32_5x5_10x10",    batch=1, in_c=1,  in_h=10, in_w=10, out_c=32, weight_in_c=1,  kh=5, kw=5, groups=1),
+        # dict(name="known_8x4_4x4_10x10",     batch=1, in_c=8,  in_h=10, in_w=10, out_c=4,  weight_in_c=8,  kh=4, kw=4, groups=1),
     ]
     shapes += known_issue_shapes
     
-    name_width = max(len(shape[0]) for shape in shapes)
-    in_shape_width = max(len(f"{shape[2]}x{shape[3]}x{shape[4]}") for shape in shapes)
-    out_shape_width = max(len(f"{shape[5]}x{shape[3] - shape[7] + 1}x{shape[4] - shape[8] + 1}") for shape in shapes)
+    name_width = max(len(s["name"]) for s in shapes)
+    in_shape_width = max(len(f"{s['in_c']}x{s['in_h']}x{s['in_w']}") for s in shapes)
+    out_shape_width = max(len(f"{s['out_c']}x{s['in_h'] - s['kh'] + 1}x{s['in_w'] - s['kw'] + 1}") for s in shapes)
 
-    for name, batch, in_c, in_h, in_w, out_c, weight_in_c, kh, kw, groups in shapes:
+    for s in shapes:
+        name, batch, in_c, in_h, in_w, out_c, weight_in_c, kh, kw, groups = \
+            s["name"], s["batch"], s["in_c"], s["in_h"], s["in_w"], s["out_c"], s["weight_in_c"], s["kh"], s["kw"], s["groups"]
         result, inp, wt = run_conv2d(batch, in_c, out_c, kh, kw, (in_h, in_w), groups=groups, weight_in_c=weight_in_c)
         expected = compute_expected_nchw(inp, wt, batch, in_c, in_h, in_w, out_c, kh, kw, groups=groups)
         md = float(np.max(np.abs(result.astype(np.float64) - expected)))
