@@ -384,6 +384,10 @@ def _data_bank(width_stride, feature_grains, align_c, use_nhwc_pack=False, is_sp
         return RK_CBUF_BANKS - 1
     return int(np.clip(_ceil_div(width_stride * feature_grains * align_c * FP16_BYTES, CBUF_BANK_SIZE), 1, RK_CBUF_BANKS - 1))
 
+def _with_cbuf_data_bank(regs, data_bank):
+    cbuf = E(reg.CNA, reg.CNA_CBUF_CON0, ((RK_CBUF_BANKS - data_bank) << 4) | data_bank)
+    return [cbuf if (q & 0xFFFF) == reg.CNA_CBUF_CON0 and (q >> 48) == reg.CNA else q for q in regs]
+
 def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out_dma, groups=1, out_width_stride_override=None, weight_reuse=False, full_data_bank=False):
     p = _conv_params(batch, in_c, in_h, in_w, out_c, kh, kw, groups)
     is_depthwise = p["is_depthwise"]
@@ -618,9 +622,10 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
         depthwise_channel_tiles = False
         if not is_spatial:
             small_chan = in_c <= 4 and not p["is_depthwise"]
-            if not small_chan and out_h > 50:
+            pointwise_128_256 = (in_c == 128 and out_c == 256 and out_h == 28 and out_w == 28)
+            if not small_chan and (out_h > 50 or pointwise_128_256):
                 pc_chain_tiles = True
-                tile_out_h = 25 if (in_c >= 128 and out_c >= 128) else 50
+                tile_out_h = out_h if pointwise_128_256 else (25 if (in_c >= 128 and out_c >= 128) else 50)
                 tiles = [(row, min(tile_out_h, out_h - row)) for row in range(0, out_h, tile_out_h)]
             else:
                 tile_h = max(1, RK_MAX_CONV_FLAT_STRIDE // out_w) if (small_chan and _align_up(out_h * out_w, 4) > RK_MAX_CONV_FLAT_STRIDE) else out_h
@@ -692,14 +697,18 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
                         oc_tile = min(output_channel_tile_size, out_c - oc_start)
                         weight_offset = oc_start * kh * kw * aligned_in_c * FP16_BYTES
                         surface_offset = (oc_start // 16) * p["out_width_stride"] * 16 * FP16_BYTES
-                        task_regs.append(make_conv2d_regs(
+                        regs = make_conv2d_regs(
                             1, in_c, tile_in_h, in_w, oc_tile, kh, kw,
                             input_mem_create.dma_addr + input_offset,
                             weight_mem_create.dma_addr + weight_offset,
                             output_mem_create.dma_addr + output_offset + surface_offset,
                             groups=groups,
                             out_width_stride_override=p["out_width_stride"],
-                            full_data_bank=True))
+                            full_data_bank=True)
+                        # TODO: remove special case later
+                        if pointwise_128_256:
+                            regs = _with_cbuf_data_bank(regs, 7)
+                        task_regs.append(regs)
                 else:
                     task_regs.append(make_conv2d_regs(
                         1, in_c, tile_in_h, in_w, out_c, kh, kw,
@@ -846,6 +855,8 @@ if __name__ == "__main__":
         dict(name="conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128", batch=1, in_c=128, in_h=56, in_w=56, out_c=128, weight_in_c=1, kh=3, kw=3, groups=128),
         # pointwise (1×1 projection, same-channel)
         dict(name="conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1", batch=1, in_c=128, in_h=56, in_w=56, out_c=128, weight_in_c=128, kh=1, kw=1, groups=1),
+        # Pointwise 128->256
+        dict(name="conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1", batch=1, in_c=128, in_h=28, in_w=28, out_c=256, weight_in_c=128, kh=1, kw=1, groups=1),
     ]
     shapes_sweep = [dict(name=f"conv2d_1x3_{n}x{n}_k1", batch=1, in_c=3, in_h=n, in_w=n, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1) for n in range(2, 400, 2)]
     # shapes += shapes_sweep

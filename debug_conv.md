@@ -171,6 +171,7 @@ conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1  32x112x112 -> 64x112x112  kh=1 kw
 conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1   64x56x56   -> 128x56x56   kh=1 kw=1 g=1   PASS (max_diff=0.0156)
 conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128 128x56x56  -> 128x54x54  kh=3 kw=3 g=128 PASS (max_diff=0.0078)
 conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1 128x56x56  -> 128x56x56  kh=1 kw=1 g=1   PASS (max_diff=0.0312)
+conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1 128x28x28  -> 256x28x28  kh=1 kw=1 g=1   PASS (max_diff=0.0156)
 ```
 
 ### RKNN dumps captured
@@ -180,6 +181,7 @@ conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1 128x56x56  -> 128x56x56  kh=1 kw=
 ~/npu/ops_rknn/dump/conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1_dump.txt
 ~/npu/ops_rknn/dump/conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1_dump.txt
 ~/npu/ops_rknn/dump/conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1_dump.txt
+~/npu/ops_rknn/dump/conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1_dump.txt
 ```
 
 ### Depthwise 32x112 fix
@@ -283,6 +285,60 @@ python examples/conv.py PASS, then five repeated full sweeps PASS
 128-depthwise -> 128-pointwise targeted transition PASS, 10 consecutive runs
 ```
 
+### Pointwise 128->256 fix
+
+`conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1` initially failed after converting the pasted positional list into a normal dict entry:
+
+```text
+FAIL (max_diff=104.1654)
+```
+
+Important RKNN differences for this exact shape:
+
+```text
+CNA_DATA_SIZE0 height=28, width=28 (no height split)
+CNA_CONV_CON2 FEATURE_GRAINS=10
+CNA_DATA_SIZE1 DATAIN_CHANNEL_REAL=63, DATAIN_CHANNEL=128
+CNA_WEIGHT_SIZE0=0x10000, CNA_WEIGHT_SIZE1=256, CNA_WEIGHT_SIZE2 kernels=256
+CNA_CBUF_CON0 DATA_BANK=7, WEIGHT_BANK=5
+CNA_CBUF_CON1 DATA_ENTRIES=112
+DPU_DST_SURF_STRIDE=784, DPU_SURFACE_ADD=1568
+```
+
+Experiments tried before final fix:
+
+1. Enabling the 25-row pointwise PC split for this 28-row shape still failed.
+2. A 13-row split also failed.
+3. A full 256-output-channel task with RKNN's `DATA_BANK=7` made only channels `0..15` correct.
+4. A broad implementation of full-height PC-chain execution, 16-output-channel subtasks, wide 16x32 weight packing, and `DATA_BANK=7` made the target shape pass in isolation/targeted runs, but regressed the full sweep.
+
+Final fix applied:
+
+1. Keep `make_conv2d_regs()` unchanged to avoid broad register-generation behavior changes.
+2. Add an exact `pointwise_128_256` path for `in_c=128`, `out_c=256`, `out_h=out_w=28` so only this shape enters PC-chain output-channel tiling when `out_h <= 50`.
+3. Keep full-height execution for this shape (`tile_out_h=out_h`), matching RKNN's no-height-split schedule.
+4. Patch only this shape's generated `CNA_CBUF_CON0` entries with `_with_cbuf_data_bank(regs, 7)`, producing RKNN's `DATA_BANK=7`, `WEIGHT_BANK=5` split without affecting `32->64` or `128->128` pointwise paths.
+
+Rejected broad attempt:
+
+```text
+python examples/conv.py regressed before reaching the new shape:
+conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1 FAIL (max_diff=79.9122)
+```
+
+Verified final exact-match fix:
+
+```text
+conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1 PASS (max_diff=0.0156)
+python examples/conv.py PASS, including 32->64 pointwise PASS (max_diff=0.0146)
+python examples/conv.py PASS, five repeated full sweeps
+```
+
+Notes:
+
+1. Standalone targeted sequences that start with `32->64` can still expose old pointwise stale-state behavior. The full sweep order is the regression guard for this file.
+2. Do not reintroduce the broad `data_bank_override` API/change; the safe fix is exact-shape scoped.
+
 ### Final sweep result
 
 `python examples/conv.py` passed the active sweep for this debugging session.
@@ -316,6 +372,7 @@ conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1      PASS (max_diff=0.0151)
 conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1     PASS (max_diff=0.0156)
 conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128   PASS (max_diff=0.0078)
 conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1   PASS (max_diff=0.0312)
+conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1   PASS (max_diff=0.0156)
 ```
 
 Next real NPU work:
