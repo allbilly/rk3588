@@ -13,81 +13,87 @@ CBUF_ENTRY_BYTES = 128
 CBUF_ENTRIES_PER_BANK = 256
 RK_CBUF_BANKS = 12
 CBUF_BANK_SIZE = CBUF_ENTRIES_PER_BANK * CBUF_ENTRY_BYTES
-REGCMD_RESERVED = 16384
 # Small-channel 1x1 uses CNA_CONV_CON1_NONALIGN_DMA/ARGB_IN; large flat output
 # strides corrupt the tail, while the regular c16 path is fine at 1024.
 RK_MAX_CONV_FLAT_STRIDE = 992
+UNPACK_C2 = FP16_ATOM_ELEMENTS // FP16_BYTES
 
 class reg:
-    CNA  = 0x0201
-    CORE = 0x0801
-    DPU  = 0x1001
-    RDMA = 0x2001
-    PC   = 0x0081
-    PC_REG = 0x0101
+    # --- Stream/Target IDs (shifted into bits 48-63) ---
+    CNA  = 0x0201   # CNA (Convolution/Matrix unit)
+    CORE = 0x0801   # CORE (Matrix compute engine)
+    DPU  = 0x1001   # DPU (Elementwise/DPU unit)
+    RDMA = 0x2001   # RDMA (Read DMA for inputs/weights)
+    PC   = 0x0081   # PC (Program Control / operation enable)
+    PC_REG = 0x0101 # PC chain registers
     VERSION = 0x0041
 
-    OPERATION_ENABLE    = 0x0008
-    PC_BASE_ADDRESS     = 0x0010
-    PC_REGISTER_AMOUNTS = 0x0014
+    # --- PC (0x0000) ---
+    OPERATION_ENABLE    = 0x0008   # PC operation enable
+    PC_BASE_ADDRESS     = 0x0010   # next regcmd DMA address for PC chain
+    PC_REGISTER_AMOUNTS = 0x0014   # next regcmd fetch amount for PC chain
 
-    S_POINTER           = 0x4004
-    FEATURE_MODE_CFG    = 0x400c
-    DATA_FORMAT         = 0x4010
-    DST_BASE_ADDR       = 0x4020
-    DST_SURF_STRIDE     = 0x4024
-    DATA_CUBE_WIDTH     = 0x4030
-    DATA_CUBE_HEIGHT    = 0x4034
-    DATA_CUBE_NOTCH     = 0x4038
-    DATA_CUBE_CHANNEL   = 0x403c
-    BS_CFG              = 0x4040
-    BS_OW_CFG           = 0x4050
-    WDMA_SIZE_0         = 0x4058
-    WDMA_SIZE_1         = 0x405c
-    BN_CFG              = 0x4060
-    EW_CFG              = 0x4070
-    EW_CVT_SCALE_VALUE  = 0x4078
-    OUT_CVT_SCALE       = 0x4084
-    SURFACE_ADD         = 0x40c0
+    # --- DPU (0x4000) ---
+    S_POINTER           = 0x4004   # DPU S pointer config (pp/exec)
+    FEATURE_MODE_CFG    = 0x400c   # DPU feature mode config
+    DATA_FORMAT         = 0x4010   # DPU data format config
+    DST_BASE_ADDR       = 0x4020   # DPU destination base address
+    DST_SURF_STRIDE     = 0x4024   # DPU destination surface stride
+    DATA_CUBE_WIDTH     = 0x4030   # DPU data cube width
+    DATA_CUBE_HEIGHT    = 0x4034   # DPU data cube height
+    DATA_CUBE_NOTCH     = 0x4038   # DPU data cube notch
+    DATA_CUBE_CHANNEL   = 0x403c   # DPU data cube channel
+    BS_CFG              = 0x4040   # DPU batch/norm/scale config
+    BS_OW_CFG           = 0x4050   # DPU batch OW config
+    WDMA_SIZE_0         = 0x4058   # DPU write DMA size 0
+    WDMA_SIZE_1         = 0x405c   # DPU write DMA size 1
+    BN_CFG              = 0x4060   # DPU batch norm config
+    EW_CFG              = 0x4070   # DPU elementwise config
+    EW_CVT_SCALE_VALUE  = 0x4078   # DPU EW convert scale value
+    OUT_CVT_SCALE       = 0x4084   # DPU output conversion scale
+    SURFACE_ADD         = 0x40c0   # DPU surface add
 
-    RDMA_DATA_CUBE_WIDTH  = 0x500c
-    RDMA_DATA_CUBE_HEIGHT = 0x5010
-    RDMA_DATA_CUBE_CHANNEL= 0x5014
-    RDMA_ERDMA_CFG        = 0x5034
-    RDMA_SRC_BASE_ADDR    = 0x5018
-    RDMA_EW_BASE_ADDR     = 0x5038
-    RDMA_FEATURE_MODE_CFG = 0x5044
+    # --- DPU RDMA (0x5000) ---
+    RDMA_DATA_CUBE_WIDTH  = 0x500c   # RDMA data cube width
+    RDMA_DATA_CUBE_HEIGHT = 0x5010   # RDMA data cube height
+    RDMA_DATA_CUBE_CHANNEL= 0x5014   # RDMA data cube channel
+    RDMA_ERDMA_CFG        = 0x5034   # RDMA ERDMA config
+    RDMA_SRC_BASE_ADDR    = 0x5018   # RDMA source base address (input)
+    RDMA_EW_BASE_ADDR     = 0x5038   # RDMA EW base address (weight)
+    RDMA_FEATURE_MODE_CFG = 0x5044   # RDMA feature mode config
 
-    CNA_CONV_CON1          = 0x100c
-    CNA_CONV_CON2          = 0x1010
-    CNA_CONV_CON3          = 0x1014
-    CNA_DATA_SIZE0         = 0x1020
-    CNA_DATA_SIZE1         = 0x1024
-    CNA_DATA_SIZE2         = 0x1028
-    CNA_DATA_SIZE3         = 0x102c
-    CNA_WEIGHT_SIZE0       = 0x1030
-    CNA_WEIGHT_SIZE1       = 0x1034
-    CNA_WEIGHT_SIZE2       = 0x1038
-    CNA_CBUF_CON0          = 0x1040
-    CNA_CBUF_CON1          = 0x1044
-    CNA_CVT_CON0           = 0x104c
-    CNA_CVT_CON1           = 0x1050
-    CNA_CVT_CON2           = 0x1054
-    CNA_CVT_CON3           = 0x1058
-    CNA_CVT_CON4           = 0x105c
-    CNA_CVT_CON5           = 0x1180
-    CNA_FEATURE_DATA_ADDR  = 0x1070
-    CNA_DMA_CON0           = 0x1078
-    CNA_DMA_CON1           = 0x107c
-    CNA_DMA_CON2           = 0x1080
-    CNA_FC_DATA_SIZE0      = 0x1084
-    CNA_FC_DATA_SIZE1      = 0x1088
-    CNA_DCOMP_ADDR0        = 0x1110
+    # --- CNA (0x1000) ---
+    CNA_CONV_CON1          = 0x100c   # CNA convolution control 1
+    CNA_CONV_CON2          = 0x1010   # CNA convolution control 2 (grains)
+    CNA_CONV_CON3          = 0x1014   # CNA convolution control 3 (stride)
+    CNA_DATA_SIZE0         = 0x1020   # CNA input data size 0
+    CNA_DATA_SIZE1         = 0x1024   # CNA input data size 1 (channel)
+    CNA_DATA_SIZE2         = 0x1028   # CNA output data size 2
+    CNA_DATA_SIZE3         = 0x102c   # CNA output data size 3 (atomics)
+    CNA_WEIGHT_SIZE0       = 0x1030   # CNA weight total size
+    CNA_WEIGHT_SIZE1       = 0x1034   # CNA weight per-kernel size
+    CNA_WEIGHT_SIZE2       = 0x1038   # CNA weight dims (width/height/kernels)
+    CNA_CBUF_CON0          = 0x1040   # CNA CBUF config 0 (banks)
+    CNA_CBUF_CON1          = 0x1044   # CNA CBUF config 1 (entries)
+    CNA_CVT_CON0           = 0x104c   # CNA convert config 0
+    CNA_CVT_CON1           = 0x1050   # CNA convert config 1 (scale)
+    CNA_CVT_CON2           = 0x1054   # CNA convert config 2 (scale)
+    CNA_CVT_CON3           = 0x1058   # CNA convert config 3 (scale)
+    CNA_CVT_CON4           = 0x105c   # CNA convert config 4 (scale)
+    CNA_CVT_CON5           = 0x1180   # CNA convert config 5 (mask)
+    CNA_FEATURE_DATA_ADDR  = 0x1070   # CNA feature data base address
+    CNA_DMA_CON0           = 0x1078   # CNA DMA control 0 (burst)
+    CNA_DMA_CON1           = 0x107c   # CNA DMA control 1 (line stride)
+    CNA_DMA_CON2           = 0x1080   # CNA DMA control 2 (surface stride)
+    CNA_FC_DATA_SIZE0      = 0x1084   # CNA FC data size 0
+    CNA_FC_DATA_SIZE1      = 0x1088   # CNA FC data size 1 (channel)
+    CNA_DCOMP_ADDR0        = 0x1110   # CNA weight decompress address 0
 
-    CORE_MISC_CFG          = 0x3010
-    CORE_DATAOUT_SIZE_0    = 0x3014
-    CORE_DATAOUT_SIZE_1    = 0x3018
-    CORE_RESERVED_3030     = 0x3030
+    # --- CORE (0x3000) ---
+    CORE_MISC_CFG          = 0x3010   # CORE misc config
+    CORE_DATAOUT_SIZE_0    = 0x3014   # CORE dataout size 0 (height/width)
+    CORE_DATAOUT_SIZE_1    = 0x3018   # CORE dataout size 1 (channel)
+    CORE_RESERVED_3030     = 0x3030   # CORE reserved (must be zeroed)
 
 class rknpu_mem_create(ctypes.Structure):
     _fields_ = [
@@ -199,7 +205,9 @@ def E(target, reg_addr, value):
 def _is_depthwise(in_c, out_c, groups):
     return groups == in_c == out_c
 
-# wt is kh_major
+# Spatial (non-dw, non-grouped conv) uses KH-major weight layout: spatial loops
+# outermost, then OC, then aligned-IC innermost. This matches the CSC→CMAC
+# data sequencing for spatial convolutions on RK schedule.
 def _is_kh_major(out_c, in_c, kh, kw, groups):
     is_spatial = (kh != 1 or kw != 1)
     multi_input_group = groups > 1 and in_c != groups
@@ -210,27 +218,17 @@ def _is_grouped_spatial(in_c, out_c, kh, kw, groups):
     multi_input_group = groups > 1 and in_c != groups
     return is_spatial and multi_input_group and not _is_depthwise(in_c, out_c, groups)
 
-def should_use_nhwc_pack(channels, width, width_stride, c2):
-    # RK image/pixel DMA consumes NHWC-style rows for this schedule-derived case.
-    c_ratio = c2 // channels if channels > 0 else 0
-    return (c_ratio == 2) and (width_stride >= width)
+def should_use_nhwc_pack(channels, c2):
+    return channels > 0 and c2 // channels == 2
 
 def _conv_align_c(in_c, groups, out_c):
-    is_depthwise = _is_depthwise(in_c, out_c, groups)
-    if groups > 1 and not is_depthwise and in_c > 4:
-        return 16
-    # FP16 atoms are 16 elements in local NVDLA; RK depthwise schedules align up
-    # to 32 channels, while regular conv input/kernel groups stop at 16.
-    align_c = 8
-    max_align = 32 if is_depthwise else 16
-    while align_c < max_align and align_c < in_c:
-        align_c <<= 1
-    return align_c
+    if not _is_depthwise(in_c, out_c, groups) and in_c > 4: return 16
+    return np.clip(1 << (max(1, in_c) - 1).bit_length(), 8, 32)
 
-def _conv_input_pack_c2(in_c, groups, align_c, is_depthwise):
+def _conv_input_pack_c2(in_c, groups, out_c, align_c):
     # C2 selection is RK packing layered on top of 16-value FP16 atoms.
     if in_c == 1: return 2
-    if is_depthwise or groups > 1 or in_c == 16: return 8
+    if _is_depthwise(in_c, out_c, groups) or groups > 1 or in_c == 16: return 8
     return align_c
 
 def _dma_strides(in_h, width_stride, use_nhwc_pack):
@@ -247,10 +245,6 @@ def _cbuf_entries(width_stride, align_c, in_h, is_depthwise):
     row_entries = max(1, _ceil_div(width_stride * align_c, 2 * FP16_ATOM_ELEMENTS))
     return row_entries if align_c >= 16 or is_depthwise else row_entries * in_h * 4
 
-def _data_bank(width_stride, feature_grains, align_c):
-    fd_bytes = width_stride * feature_grains * align_c * FP16_BYTES
-    return max(1, min(RK_CBUF_BANKS - 1, _ceil_div(fd_bytes, CBUF_BANK_SIZE)))
-
 def _conv_params(batch, in_c, in_h, in_w, out_c, kh, kw, groups):
     is_depthwise = _is_depthwise(in_c, out_c, groups)
     is_spatial = (kh != 1 or kw != 1)
@@ -262,8 +256,8 @@ def _conv_params(batch, in_c, in_h, in_w, out_c, kh, kw, groups):
     out_atoms = max(1, out_h * out_w)
     out_width_stride = out_atoms if (not is_spatial and out_atoms < 4) else _align_up(out_atoms, 4)
 
-    input_pack_c2 = _conv_input_pack_c2(in_c, groups, align_c, is_depthwise)
-    use_nhwc = (not is_depthwise) and should_use_nhwc_pack(in_c, in_w, width_stride, input_pack_c2)
+    input_pack_c2 = _conv_input_pack_c2(in_c, groups, out_c, align_c)
+    use_nhwc = (not is_depthwise) and (in_c > 0 and input_pack_c2 // in_c == 2)
     return {
         "batch": batch, "in_c": in_c, "in_h": in_h, "in_w": in_w,
         "out_c": out_c, "kh": kh, "kw": kw, "groups": groups,
@@ -286,42 +280,21 @@ def _expand_grouped_weights(weight, in_c, out_c, kh, kw, groups):
     return expanded
 
 def _pack_kh_major(weight, out_c, in_c, kh, kw, c2_out):
-    # KH-major is an RK schedule-derived weight order for the shapes selected by
-    # _is_kh_major(), not a generic NVDLA layout.
-    spatial_stride = c2_out * _ceil_div(in_c, c2_out)
-    packed = np.zeros(kh * kw * out_c * spatial_stride, dtype=np.float16)
-    for kh_idx in range(kh):
-        for kw_idx in range(kw):
-            base = (kh_idx * kw + kw_idx) * out_c * spatial_stride
-            for oc in range(out_c):
-                for ic in range(in_c):
-                    idx = base + oc * spatial_stride + (ic // c2_out) * c2_out + (ic % c2_out)
-                    packed[idx] = weight[oc, ic, kh_idx, kw_idx]
-    return packed
+    aligned_in_c = c2_out * _ceil_div(in_c, c2_out)
+    padded = np.zeros((out_c, aligned_in_c, kh, kw), dtype=np.float16)
+    padded[:, :in_c] = weight
+    return padded.transpose(2, 3, 0, 1).ravel()
 
 def _pack_default(weight, out_c, in_c, kh, kw, c2_out):
-    # Default RK FP16 conv weights: output channel, spatial, aligned input channel.
-    spatial_stride = c2_out * _ceil_div(in_c, c2_out)
-    kernel_stride = kh * kw * spatial_stride
-    packed = np.zeros(out_c * kernel_stride, dtype=np.float16)
-    for oc in range(out_c):
-        for kh_idx in range(kh):
-            for kw_idx in range(kw):
-                base = oc * kernel_stride + (kh_idx * kw + kw_idx) * spatial_stride
-                for ic in range(in_c):
-                    idx = base + (ic // c2_out) * c2_out + (ic % c2_out)
-                    packed[idx] = weight[oc, ic, kh_idx, kw_idx]
-    return packed
+    aligned_in_c = c2_out * _ceil_div(in_c, c2_out)
+    padded = np.zeros((out_c, aligned_in_c, kh, kw), dtype=np.float16)
+    padded[:, :in_c] = weight
+    return padded.transpose(0, 2, 3, 1).ravel()
 
 def _pack_dw_spatial_major(weight, out_c, in_c, kh, kw, c2_out):
-    # Depthwise CONV_MODE=3 uses compact spatial-major RK packing.
-    packed = np.zeros(out_c * kh * kw * c2_out, dtype=np.float16)
-    for kh_idx in range(kh):
-        for kw_idx in range(kw):
-            base = (kh_idx * kw + kw_idx) * c2_out
-            for oc in range(out_c):
-                packed[base + oc] = weight[oc, oc, kh_idx, kw_idx]
-    return packed
+    packed = np.zeros((kh, kw, c2_out), dtype=np.float16)
+    packed[:, :, :out_c] = weight[range(out_c), range(out_c)].transpose(1, 2, 0)
+    return packed.ravel()
 
 def pack_conv_weights_for_shape(weight_full, out_c, in_c, kh, kw, align_c, groups):
     is_depthwise = _is_depthwise(in_c, out_c, groups)
@@ -334,9 +307,9 @@ def pack_conv_weights_for_shape(weight_full, out_c, in_c, kh, kw, align_c, group
 def _pack_conv_input_fp16(input_nchw, p):
     in_c, in_h, in_w = input_nchw.shape
     if p["use_nhwc"]:
-        packed = np.zeros((1, in_h, p["width_stride"], in_c), dtype=np.float16)
-        packed[0, :, :in_w, :] = input_nchw.transpose(1, 2, 0)
-        return packed.ravel()
+        out = np.zeros((in_h, p["width_stride"], in_c), dtype=np.float16)
+        out[:, :in_w] = input_nchw.transpose(1, 2, 0)
+        return out.ravel()
 
     c2 = p["input_pack_c2"]
     c1 = _ceil_div(in_c, c2)
@@ -345,10 +318,9 @@ def _pack_conv_input_fp16(input_nchw, p):
     return padded.reshape(c1, c2, in_h, p["width_stride"]).transpose(0, 2, 3, 1).ravel()
 
 def _unpack_flat_1x1_output(out_raw, out_c, out_h, out_w, out_width_stride, c2):
-    flat_width = out_h * out_w
     c1 = _ceil_div(out_c, c2)
     packed = out_raw.reshape(1, c1, 1, out_width_stride, c2)
-    return packed[0, :, 0, :flat_width, :].transpose(0, 2, 1).reshape(c1 * c2, flat_width)[:out_c].reshape(out_c, out_h, out_w)
+    return packed[0, :, 0, :out_h * out_w, :].transpose(0, 2, 1).reshape(c1 * c2, out_h * out_w)[:out_c].reshape(out_c, out_h, out_w)
 
 def _unpack_nc1hwc2_output(out_raw, out_c, out_h, out_w, c2):
     c1 = _ceil_div(out_c, c2)
@@ -393,7 +365,6 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
     use_nhwc_pack = p["use_nhwc"]
     input_pack_c2 = p["input_pack_c2"]
 
-    data_in_channel_real = in_c - 1
     data_in_channel_aligned = _align_up(in_c, align_c)
     weight_bytes_per_kernel = kh * kw * data_in_channel_aligned * FP16_BYTES
     weight_bytes_total = weight_bytes_per_kernel * out_c
@@ -404,40 +375,9 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
 
     line_stride, surf_stride = _dma_strides(in_h, width_stride, use_nhwc_pack)
     cbuf_entries = _cbuf_entries(width_stride, align_c, in_h, is_depthwise)
-    data_bank = _data_bank(width_stride, feature_grains, align_c)
-    weight_bank = RK_CBUF_BANKS - data_bank
-
-    out_channel_field = align_out_c - 1
-    if is_depthwise:
-        out_channel_field = _align_up(align_out_c, 32) - 1
-    orig_channel = out_c - 1
-
-    dataout_width = out_w
-    dataout_atomics = out_w * out_h
-    dst_surf_stride = out_width_stride
-
-    pixel_bits = 0
-    if (in_c >= 1 and in_c <= 4) and not is_depthwise:
-        pixel_bits = ((1 << 30) |          # CNA_CONV_CON1_NONALIGN_DMA
-                      (1 << 29) |          # CNA_CONV_CON1_GROUP_LINE_OFF
-                      ((7 + in_c) << 12))  # CNA_CONV_CON1_ARGB_IN
-    cvt_con0 = 1                            # CNA_CVT_CON0_CVT_BYPASS
-    if not use_nhwc_pack:
-        cvt_con0 |= ((1 << 3) |             # CNA_CVT_CON0_DATA_SIGN
-                     (1 << 1))              # CNA_CVT_CON0_CVT_TYPE
-    cvt_active = in_c if use_nhwc_pack else input_pack_c2
-    cvt_active = max(1, min(cvt_active, 8))
-
-    core_misc = (2 << 8)                    # CORE_MISC_CFG_PROC_PRECISION(fp16)
-    if is_depthwise:
-        core_misc |= (1 << 1)               # CORE_MISC_CFG_DW_EN
-    elif is_spatial:
-        core_misc |= (1 << 0)               # CORE_MISC_CFG_OPERATION_ENABLE
-
-    ow_cfg_size = 3 if is_depthwise else 1
-    effective_align_out = out_channel_field + 1
-    if groups > 1 and not is_depthwise:
-        effective_align_out = max(16, _align_up(_ceil_div(out_c, groups), 16))
+    data_bank = np.clip(_ceil_div(width_stride * feature_grains * align_c * FP16_BYTES, CBUF_BANK_SIZE), 1, RK_CBUF_BANKS - 1)
+    out_channel_field = align_out_c - 1 if not is_depthwise else _align_up(align_out_c, 32) - 1
+    effective_align_out = max(16, _align_up(_ceil_div(out_c, groups), 16)) if (groups > 1 and not is_depthwise) else out_channel_field + 1
 
     npu_regs = [
         E(reg.DPU, reg.S_POINTER,
@@ -447,7 +387,7 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
         E(reg.CNA, reg.CNA_CONV_CON1,
             ((2 << 4) |                    # CNA_CONV_CON1_IN_PRECISION(fp16)
              (2 << 7) |                    # CNA_CONV_CON1_PROC_PRECISION(fp16)
-             pixel_bits |
+             (((1 << 30) | (1 << 29) | ((7 + in_c) << 12)) if (in_c <= 4 and not is_depthwise) else 0) |
              (3 if is_depthwise else 0))), # CNA_CONV_CON1_CONV_MODE(depthwise when 3)
         E(reg.CNA, reg.CNA_CONV_CON2,
             (feature_grains << 4)           # CNA_CONV_CON2_FEATURE_GRAINS
@@ -459,23 +399,25 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
             ((width_stride << 16) |         # CNA_DATA_SIZE0_DATAIN_WIDTH
              in_h)),                       # CNA_DATA_SIZE0_DATAIN_HEIGHT
         E(reg.CNA, reg.CNA_DATA_SIZE1,
-            ((data_in_channel_real << 16) | # CNA_DATA_SIZE1_DATAIN_CHANNEL_REAL
-             data_in_channel_aligned)),    # CNA_DATA_SIZE1_DATAIN_CHANNEL
-        E(reg.CNA, reg.CNA_DATA_SIZE2, dataout_width),    # CNA_DATA_SIZE2_DATAOUT_WIDTH
-        E(reg.CNA, reg.CNA_DATA_SIZE3, dataout_atomics),  # CNA_DATA_SIZE3_DATAOUT_ATOMICS
-        E(reg.CNA, reg.CNA_WEIGHT_SIZE0, weight_bytes_total),
-        E(reg.CNA, reg.CNA_WEIGHT_SIZE1, weight_bytes_per_kernel),
+            ((in_c - 1 << 16) |             # CNA_DATA_SIZE1_DATAIN_CHANNEL_REAL
+             data_in_channel_aligned)),     # CNA_DATA_SIZE1_DATAIN_CHANNEL
+        E(reg.CNA, reg.CNA_DATA_SIZE2, out_w),                       # CNA_DATA_SIZE2_DATAOUT_WIDTH
+        E(reg.CNA, reg.CNA_DATA_SIZE3, out_w * out_h),               # CNA_DATA_SIZE3_DATAOUT_ATOMICS
+        E(reg.CNA, reg.CNA_WEIGHT_SIZE0, weight_bytes_total),        # CNA_WEIGHT_SIZE0_WEIGHT_TOTAL_SIZE
+        E(reg.CNA, reg.CNA_WEIGHT_SIZE1, weight_bytes_per_kernel),   # CNA_WEIGHT_SIZE1_WEIGHT_PER_KERNEL_SIZE
         E(reg.CNA, reg.CNA_WEIGHT_SIZE2,
             ((kw << 24) |                  # CNA_WEIGHT_SIZE2_WEIGHT_WIDTH
              (kh << 16) |                  # CNA_WEIGHT_SIZE2_WEIGHT_HEIGHT
              (1 if is_depthwise else out_c))), # CNA_WEIGHT_SIZE2_WEIGHT_KERNELS
         E(reg.CNA, reg.CNA_CBUF_CON0,
-            ((weight_bank << 4) |           # CNA_CBUF_CON0_WEIGHT_BANK
-             data_bank)),                  # CNA_CBUF_CON0_DATA_BANK
+            ((RK_CBUF_BANKS - data_bank << 4) | # CNA_CBUF_CON0_WEIGHT_BANK
+             data_bank)),                       # CNA_CBUF_CON0_DATA_BANK
         E(reg.CNA, reg.CNA_CBUF_CON1, cbuf_entries),      # CNA_CBUF_CON1_DATA_ENTRIES
 
         # CNA conversion and DMA setup.
-        E(reg.CNA, reg.CNA_CVT_CON0, cvt_con0),
+        E(reg.CNA, reg.CNA_CVT_CON0, ((not use_nhwc_pack << 3) |          # CNA_CVT_CON0_DATA_SIGN
+                                     (not use_nhwc_pack << 1) |           # CNA_CVT_CON0_CVT_TYPE
+                                        1)),                              # CNA_CVT_CON0_CVT_BYPASS
         E(reg.CNA, reg.CNA_CVT_CON1, (1 << 16)),          # CNA_CVT_CON1_CVT_SCALE0
         E(reg.CNA, reg.CNA_CVT_CON2, (1 << 16)),          # CNA_CVT_CON2_CVT_SCALE1
         E(reg.CNA, reg.CNA_CVT_CON3, (1 << 16)),          # CNA_CVT_CON3_CVT_SCALE2
@@ -491,8 +433,10 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
              in_h)),                       # CNA_FC_DATA_SIZE0_DMA_HEIGHT
         E(reg.CNA, reg.CNA_FC_DATA_SIZE1, align_c),       # CNA_FC_DATA_SIZE1_DMA_CHANNEL
         E(reg.CNA, reg.CNA_DCOMP_ADDR0, wt_dma),
-        E(reg.CNA, reg.CNA_CVT_CON5, (1 << cvt_active) - 1), # CNA_CVT_CON5_PER_CHANNEL_CVT_EN
-        E(reg.CORE, reg.CORE_MISC_CFG, core_misc),
+        E(reg.CNA, reg.CNA_CVT_CON5, (1 << in_c if use_nhwc_pack else input_pack_c2) - 1), # CNA_CVT_CON5_PER_CHANNEL_CVT_EN
+        E(reg.CORE, reg.CORE_MISC_CFG, ((2 << 8) |             # CORE_MISC_CFG_PROC_PRECISION(fp16)
+                                        (is_depthwise << 1) |  # CORE_MISC_CFG_DW_EN
+                                        (is_spatial))),        # CORE_MISC_CFG_OPERATION_ENABLE),
         E(reg.CORE, reg.CORE_DATAOUT_SIZE_0,
             (((out_h - 1) << 16) |          # CORE_DATAOUT_SIZE_0_DATAOUT_HEIGHT
              (out_w - 1))),                # CORE_DATAOUT_SIZE_0_DATAOUT_WIDTH
@@ -505,28 +449,28 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
         E(reg.DPU, reg.DATA_FORMAT,
             ((2 << 29) |                   # DPU_DATA_FORMAT_OUT_PRECISION(fp16)
              (2 << 26) |                   # DPU_DATA_FORMAT_PROC_PRECISION(fp16)
-              2)),                          # DPU_DATA_FORMAT_IN_PRECISION(fp16)
+              2)),                         # DPU_DATA_FORMAT_IN_PRECISION(fp16)
         E(reg.DPU, reg.DST_BASE_ADDR, out_dma),
-        E(reg.DPU, reg.DST_SURF_STRIDE, dst_surf_stride << 4),  # DPU_DST_SURF_STRIDE_DST_SURF_STRIDE
-        E(reg.DPU, reg.DATA_CUBE_WIDTH, out_w - 1),             # DPU_DATA_CUBE_WIDTH_WIDTH
-        E(reg.DPU, reg.DATA_CUBE_HEIGHT, out_h - 1),            # DPU_DATA_CUBE_HEIGHT_HEIGHT
+        E(reg.DPU, reg.DST_SURF_STRIDE, out_width_stride << 4), # DPU_DST_SURF_STRIDE_DST_SURF_STRIDE
+        E(reg.DPU, reg.DATA_CUBE_WIDTH, out_w - 1),            # DPU_DATA_CUBE_WIDTH_WIDTH
+        E(reg.DPU, reg.DATA_CUBE_HEIGHT, out_h - 1),           # DPU_DATA_CUBE_HEIGHT_HEIGHT
         E(reg.DPU, reg.DATA_CUBE_CHANNEL,
-            ((orig_channel << 16) |         # DPU_DATA_CUBE_CHANNEL_ORIG_CHANNEL
-             out_channel_field)),          # DPU_DATA_CUBE_CHANNEL_CHANNEL
+            ((out_c - 1 << 16) |            # DPU_DATA_CUBE_CHANNEL_ORIG_CHANNEL
+             out_channel_field)),           # DPU_DATA_CUBE_CHANNEL_CHANNEL
         E(reg.DPU, reg.BS_CFG,
             ((1 << 6) |                    # DPU_BS_CFG_BS_RELU_BYPASS
              (1 << 4) |                    # DPU_BS_CFG_BS_MUL_BYPASS
              (1 << 1) |                    # DPU_BS_CFG_BS_ALU_BYPASS
              1)),                          # DPU_BS_CFG_BS_BYPASS
         E(reg.DPU, reg.BS_OW_CFG,
-            ((ow_cfg_size << 8) |           # DPU_BS_OW_CFG_SIZE_E_2
-             (ow_cfg_size << 5) |           # DPU_BS_OW_CFG_SIZE_E_1
-             (ow_cfg_size << 2) |           # DPU_BS_OW_CFG_SIZE_E_0
-             (1 << 1))),                   # DPU_BS_OW_CFG_OD_BYPASS
-        E(reg.DPU, reg.WDMA_SIZE_0, out_channel_field),         # DPU_WDMA_SIZE_0_CHANNEL_WDMA
+            (((3 if is_depthwise else 1) << 8) | # DPU_BS_OW_CFG_SIZE_E_2
+             ((3 if is_depthwise else 1) << 5) | # DPU_BS_OW_CFG_SIZE_E_1
+             ((3 if is_depthwise else 1) << 2) | # DPU_BS_OW_CFG_SIZE_E_0
+             (1 << 1))),                         # DPU_BS_OW_CFG_OD_BYPASS
+        E(reg.DPU, reg.WDMA_SIZE_0, out_channel_field),    # DPU_WDMA_SIZE_0_CHANNEL_WDMA
         E(reg.DPU, reg.WDMA_SIZE_1,
             (((out_h - 1) << 16) |          # DPU_WDMA_SIZE_1_HEIGHT_WDMA
-             (out_w - 1))),                # DPU_WDMA_SIZE_1_WIDTH_WDMA
+             (out_w - 1))),                 # DPU_WDMA_SIZE_1_WIDTH_WDMA
         E(reg.DPU, reg.BN_CFG,
             ((1 << 6) |                    # DPU_BN_CFG_BN_RELU_BYPASS
              (1 << 4) |                    # DPU_BN_CFG_BN_MUL_BYPASS
@@ -538,12 +482,12 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
              (1 << 7) |                    # DPU_EW_CFG_EW_LUT_BYPASS
              (1 << 1) |                    # DPU_EW_CFG_EW_OP_BYPASS
              1)),                          # DPU_EW_CFG_EW_BYPASS
-        E(reg.DPU, reg.EW_CVT_SCALE_VALUE, 1), # DPU_EW_CVT_SCALE_VALUE_EW_OP_CVT_SCALE
+        E(reg.DPU, reg.EW_CVT_SCALE_VALUE, 1),  # DPU_EW_CVT_SCALE_VALUE_EW_OP_CVT_SCALE
         E(reg.DPU, reg.OUT_CVT_SCALE,
             ((1 << 16) |                   # DPU_OUT_CVT_SCALE_FP32TOFP16_EN
              1)),                          # DPU_OUT_CVT_SCALE_OUT_CVT_SCALE
         E(reg.DPU, reg.SURFACE_ADD,
-            (dst_surf_stride * (effective_align_out // 8)) << 4), # DPU_SURFACE_ADD_SURF_ADD
+            (out_width_stride * (effective_align_out // 8)) << 4), # DPU_SURFACE_ADD_SURF_ADD
     ]
     return npu_regs
 
@@ -567,6 +511,7 @@ def write_regs_to_npu_task(task_regs):
         offset += _align_up(len(regs) + 4, 2)
     assert offset <= regcmd_mem_create.size // ctypes.sizeof(ctypes.c_uint64), "regcmd buffer too small"
 
+    # add tail enable, write to npu_tasks
     for idx, regs in enumerate(task_regs):
         base = offsets[idx]
         for i, qword in enumerate(regs):
@@ -602,28 +547,27 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
             weight_full[oc, oc] = weight_nchw[oc, 0]
     else:
         weight_full = _expand_grouped_weights(weight_nchw, in_c, out_c, kh, kw, groups)
-    if _is_grouped_spatial(in_c, out_c, kh, kw, groups):
+    grouped_spatial = _is_grouped_spatial(in_c, out_c, kh, kw, groups)
+    if grouped_spatial:
         weight_full = _reorder_grouped_spatial_weights_block16(weight_full, out_c, in_c, kh, kw)
 
-    # Weights live in weight_map; the 16KB offset mirrors rknnops.h REGCMD_RESERVED.
     if p["is_depthwise"] and in_c == 32 and out_c == 32 and not is_spatial:
         wt_flat = np.zeros((kh * kw * _align_up(in_c, p["align_c"]) * out_c), dtype=np.float16)
         wt_flat[:out_c] = weight_nchw[:, 0, 0, 0]
     else:
         wt_flat = pack_conv_weights_for_shape(weight_full, out_c, in_c, kh, kw, p["align_c"], groups)
     wt_ptr = ctypes.addressof(ctypes.c_char.from_buffer(weight_map))
-    ctypes.memmove(wt_ptr + REGCMD_RESERVED, wt_flat.ctypes.data, wt_flat.nbytes)
+    ctypes.memmove(wt_ptr, wt_flat.ctypes.data, wt_flat.nbytes)
 
-    unpack_c2 = 8
     result = np.zeros((batch, out_c, out_h, out_w), dtype=np.float16)
+    def read_output_fp16(count):
+        return np.frombuffer(output_map, dtype=np.uint16, count=count).copy().view(np.float16)
 
     for n in range(batch):
         if not is_spatial:
-            tile_h_max = out_h
-            use_small_channel_dma = (in_c >= 1 and in_c <= 4) and not p["is_depthwise"]
-            if use_small_channel_dma and _align_up(out_h * out_w, 4) > RK_MAX_CONV_FLAT_STRIDE:
-                tile_h_max = max(1, RK_MAX_CONV_FLAT_STRIDE // out_w)
-            tiles = [(row, min(tile_h_max, out_h - row)) for row in range(0, out_h, tile_h_max)]
+            small_chan = in_c <= 4 and not p["is_depthwise"]
+            tile_h = max(1, RK_MAX_CONV_FLAT_STRIDE // out_w) if (small_chan and _align_up(out_h * out_w, 4) > RK_MAX_CONV_FLAT_STRIDE) else out_h
+            tiles = [(row, min(tile_h, out_h - row)) for row in range(0, out_h, tile_h)]
         else:
             tiles = [(0, in_h)]
 
@@ -638,7 +582,7 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
             task_regs = [make_conv2d_regs(
                 1, in_c, tile_in_h, in_w, out_c, kh, kw,
                 input_mem_create.dma_addr,
-                weight_mem_create.dma_addr + REGCMD_RESERVED,
+                weight_mem_create.dma_addr,
                 output_mem_create.dma_addr,
                 groups=groups)]
 
@@ -648,53 +592,36 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
                               RKNPU_JOB_BLOCK |     # block until job completion
                               RKNPU_JOB_PINGPONG))  # use ping-pong task submission
 
+            out_c1 = _ceil_div(out_c, UNPACK_C2)
             if not is_spatial:
-                out_c1 = _ceil_div(out_c, unpack_c2)
-                out_nbytes = out_c1 * tile_p["out_width_stride"] * unpack_c2 * FP16_BYTES
-                out_buf = np.frombuffer(output_map, dtype=np.uint16, count=out_nbytes // FP16_BYTES).copy()
+                out_count = out_c1 * tile_p["out_width_stride"] * UNPACK_C2
+                out_buf = read_output_fp16(out_count)
                 result[n, :, row_start:row_start + tile_out_h, :] = _unpack_flat_1x1_output(
-                    out_buf.view(np.float16), out_c, tile_out_h, out_w, tile_p["out_width_stride"], unpack_c2)
+                    out_buf, out_c, tile_out_h, out_w, tile_p["out_width_stride"], UNPACK_C2)
+                continue
+            if grouped_spatial:
+                plane_stride = out_h * out_w * UNPACK_C2 + p["out_width_stride"] * 2
+                out_buf = read_output_fp16(out_c1 * plane_stride)
+                result[n] = _unpack_grouped_spatial_output(out_buf, out_c, out_h, out_w, UNPACK_C2, plane_stride)
             else:
-                out_c1 = _ceil_div(out_c, unpack_c2)
-                if _is_grouped_spatial(in_c, out_c, kh, kw, groups):
-                    plane_stride = out_h * out_w * unpack_c2 + p["out_width_stride"] * 2
-                    out_nbytes = out_c1 * plane_stride * FP16_BYTES
-                    out_buf = np.frombuffer(output_map, dtype=np.uint16, count=out_nbytes // FP16_BYTES).copy()
-                    result[n] = _unpack_grouped_spatial_output(out_buf.view(np.float16), out_c, out_h, out_w,
-                                                               unpack_c2, plane_stride)
-                else:
-                    out_nbytes = out_c1 * out_h * out_w * unpack_c2 * FP16_BYTES
-                    out_buf = np.frombuffer(output_map, dtype=np.uint16, count=out_nbytes // FP16_BYTES).copy()
-                    result[n] = _unpack_nc1hwc2_output(out_buf.view(np.float16), out_c, out_h, out_w, unpack_c2)
+                out_buf = read_output_fp16(out_c1 * out_h * out_w * UNPACK_C2)
+                result[n] = _unpack_nc1hwc2_output(out_buf, out_c, out_h, out_w, UNPACK_C2)
     return result, input_nchw, weight_nchw
 
 def compute_expected_nchw(input_nchw, weight_nchw, batch, in_c, in_h, in_w, out_c, kh, kw, groups=1):
-    out_h = in_h - kh + 1
-    out_w = in_w - kw + 1
-    expected = np.zeros((batch, out_c, out_h, out_w), dtype=np.float64)
-    input64 = input_nchw.astype(np.float64)
-    weight64 = weight_nchw.astype(np.float64)
-    oc_per_group = out_c // groups
-    ic_per_group = in_c // groups
+    out_h, out_w = in_h - kh + 1, in_w - kw + 1
+    i64, w64 = input_nchw.astype(np.float64), weight_nchw.astype(np.float64)
+    expected = np.zeros((batch, out_c, out_h, out_w))
     for n in range(batch):
         for g in range(groups):
-            for oc_local in range(oc_per_group):
-                oc = g * oc_per_group + oc_local
-                for ic_local in range(ic_per_group):
-                    ic = g * ic_per_group + ic_local
+            for oc in range(g * out_c // groups, (g + 1) * out_c // groups):
+                for ic in range(g * in_c // groups, (g + 1) * in_c // groups):
                     for i in range(kh):
                         for j in range(kw):
-                            expected[n, oc] += (input64[n, ic, i:i+out_h, j:j+out_w] *
-                                            weight64[oc, ic_local, i, j])
+                            expected[n, oc] += i64[n, ic, i:i+out_h, j:j+out_w] * w64[oc, ic - g * in_c // groups, i, j]
     return expected
 
 if __name__ == "__main__":
-    import sys
-    dry_run = "--dry" in sys.argv
-    if len(sys.argv) > 1 and sys.argv[1] not in ("--dry",):
-        print("usage: python3 conv.py [--dry]")
-        sys.exit(1)
-
     shapes = [
         ("conv2d_b1_c16_h18_w18_oc16_wic16_k3x3_g1", 1, 16, 18, 18, 16, 16, 3, 3, 1),
         ("conv2d_b1_c4_h9_w9_oc4_wic4_k1x1_g1", 1, 4, 9, 9, 4, 4, 1, 1, 1),
@@ -726,28 +653,11 @@ if __name__ == "__main__":
         ("conv2d_b1_c3_h5_w7_oc6_wic1_k3x3_g3", 1, 3, 5, 7, 6, 1, 3, 3, 3),
         ("conv2d_b1_c3_h5_w7_oc6_wic3_k3x5_g1", 1, 3, 5, 7, 6, 3, 3, 5, 1),
     ]
-    shapes += [
-        (f"conv2d_1x3_{n}x{n}_k1", 1, 3, n, n, 6, 3, 1, 1, 1)
-        for n in range(2, 400, 2)
-    ]
+    shapes += [ (f"conv2d_1x3_{n}x{n}_k1", 1, 3, n, n, 6, 3, 1, 1, 1) for n in range(2, 400, 2)]
 
     name_width = max(len(shape[0]) for shape in shapes)
     in_shape_width = max(len(f"{shape[2]}x{shape[3]}x{shape[4]}") for shape in shapes)
     out_shape_width = max(len(f"{shape[5]}x{shape[3] - shape[7] + 1}x{shape[4] - shape[8] + 1}") for shape in shapes)
-
-    if dry_run:
-        for name, batch, in_c, in_h, in_w, out_c, weight_in_c, kh, kw, groups in shapes:
-            regs = make_conv2d_regs(1, in_c, in_h, in_w, out_c, kh, kw,
-                                    0xffecc000, 0xffed0000, 0xffea0000, groups=groups)
-            print(f"  {name}: Registers ({len(regs)})")
-            for i, r in enumerate(regs):
-                target = (r >> 48) & 0xFFFF
-                value = (r >> 16) & 0xFFFFFFFF
-                addr = r & 0xFFFF
-                print(f"  [{i:2d}] target=0x{target:04x} addr=0x{addr:04x} value=0x{value:08x}")
-            print()
-        os.close(fd)
-        exit(0)
 
     for name, batch, in_c, in_h, in_w, out_c, weight_in_c, kh, kw, groups in shapes:
         result, inp, wt = run_conv2d(batch, in_c, out_c, kh, kw, (in_h, in_w), groups=groups, weight_in_c=weight_in_c)
@@ -760,5 +670,4 @@ if __name__ == "__main__":
         out_shape = f"{out_c}x{out_h}x{out_w}"
         print(f"  {name:<{name_width}s} {in_shape:<{in_shape_width}s} -> {out_shape:<{out_shape_width}s} kh={kh} kw={kw} g={groups}  {'PASS' if ok else 'FAIL'}  (max_diff={md:.4f})")
         assert ok, f"{name} failed"
-
     os.close(fd)
