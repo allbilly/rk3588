@@ -133,9 +133,10 @@ class rknpu_submit(ctypes.Structure):
         ("task_counter", ctypes.c_uint32),
         ("priority", ctypes.c_int32),
         ("task_obj_addr", ctypes.c_uint64),
-        ("regcfg_obj_addr", ctypes.c_uint64),
+        ("iommu_domain_id", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
         ("task_base_addr", ctypes.c_uint64),
-        ("user_data", ctypes.c_uint64),
+        ("hw_elapse_time", ctypes.c_int64),
         ("core_mask", ctypes.c_uint32),
         ("fence_fd", ctypes.c_int32),
         ("subcore_task", rknpu_subcore_task * 5),
@@ -177,7 +178,7 @@ def npu_submit(task_obj_addr, task_count=1, flags=0x1):
     submit_struct = rknpu_submit(
         flags=flags, timeout=6000, task_start=0, task_number=task_count,
         task_counter=0, priority=0, task_obj_addr=task_obj_addr,
-        regcfg_obj_addr=0, task_base_addr=0, user_data=0, core_mask=1, fence_fd=-1,
+        iommu_domain_id=0, reserved=0, task_base_addr=0, hw_elapse_time=0, core_mask=1, fence_fd=-1,
     )
     submit_struct.subcore_task[0] = rknpu_subcore_task(task_start=0, task_number=task_count)
     submit_struct.subcore_task[1] = rknpu_subcore_task(task_start=task_count, task_number=0)
