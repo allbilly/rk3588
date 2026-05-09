@@ -59,12 +59,32 @@ python experimental/conv.py
 python experimental/pool.py
 ```
 
-🐧 Armbian Ubuntu with ROCKET driver preinstalled,
+🐧 Mainline Armbian Ubuntu with ROCKET driver preinstalled,
 ```bash
 python experimental/mainline6_18/elementwise.py
 python experimental/mainline6_18/gemm.py
 python experimental/mainline6_18/conv.py
 python experimental/mainline6_18/pool.py
+```
+
+⚙️ 
+If you are on Mainline, you can test out [mesa teflon](https://docs.mesa3d.org/teflon.html) as well. More instrusctions on [mesa_example_run.md](./mesa_example_run.md)
+```bash
+sudo apt-get -y build-dep mesa
+sudo apt-get -y install git cmake
+git clone https://gitlab.freedesktop.org/mesa/mesa.git
+cd mesa
+meson setup build -Dgallium-drivers=rocket -Dvulkan-drivers= -Dteflon=true
+meson compile -C build
+uv venv python=3.10 && source .venv/bin/activate
+uv pip install tflite-runtime==2.13.0 numpy<2 pillow
+wget https://raw.githubusercontent.com/tensorflow/tensorflow/master/tensorflow/lite/examples/label_image/testdata/grace_hopper.bmp
+
+TEFLON_DEBUG=verbose ETNA_MESA_DEBUG=ml_msgs python3.10 src/gallium/frontends/teflon/tests/classification.py \
+       -i ./grace_hopper.bmp \
+       -m src/gallium/targets/teflon/tests/models/mobilenetv1/mobilenet_v1_1_224_quant.tflite \
+       -l src/gallium/frontends/teflon/tests/labels_mobilenet_quant_v1_224.txt \
+       -e build/src/gallium/targets/teflon/libteflon.so
 ```
 
 ## 2. PC chaining 
