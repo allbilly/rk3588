@@ -381,12 +381,9 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma, out_fp16=False):
                 (1 << 1)  |                           # DPU_EW_CFG_EW_OP_BYPASS
                 1)                                    # DPU_EW_CFG_EW_BYPASS
         ),
-    ]
-    if out_fp16:
-        npu_regs.append(E(reg.DPU, reg.OUT_CVT_SCALE,
-                ((1 << 16) | 1)                        # DPU_OUT_CVT_SCALE (FP32TOFP16_EN)
-        ))
-    npu_regs += [
+        E(reg.DPU, reg.OUT_CVT_SCALE,
+                ((1 << 16) | 1) if out_fp16 else 0     # DPU_OUT_CVT_SCALE (FP32TOFP16_EN)
+        ),
         E(reg.DPU,  reg.SURFACE_ADD,
                 ((1 * 4) << 4)                        # DPU_SURFACE_ADD
         ),
