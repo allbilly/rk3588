@@ -386,6 +386,52 @@ def _data_bank(width_stride, feature_grains, align_c, use_nhwc_pack=False, is_sp
         return RK_CBUF_BANKS - 1
     return int(np.clip(_ceil_div(width_stride * feature_grains * align_c * FP16_BYTES, CBUF_BANK_SIZE), 1, RK_CBUF_BANKS - 1))
 
+def _tile_data_bank(p, tile_in_h):
+    if p["out_c"] % 16:
+        return 1
+    if p["out_h"] > 50:
+        return RK_CBUF_BANKS - 1
+    data_bytes = p["width_stride"] * tile_in_h * _align_up(p["in_c"], p["align_c"]) * FP16_BYTES
+    input_channel_floor = _ceil_div(p["in_c"], 64)
+    return int(np.clip(max(_ceil_div(data_bytes, CBUF_BANK_SIZE), input_channel_floor), 1, 8))
+
+def _conv_tiles(p, is_spatial, grouped_spatial):
+    if not is_spatial:
+        small_channel = p["in_c"] <= 4 and not p["is_depthwise"]
+        channel_tiled = p["out_c"] == 64 or p["out_c"] >= 128
+        if small_channel:
+            tile_h = max(1, RK_MAX_CONV_FLAT_STRIDE // p["out_w"]) if p["out_width_stride"] > RK_MAX_CONV_FLAT_STRIDE else p["out_h"]
+        elif p["out_h"] > 50:
+            tile_h = 25 if (p["in_c"] >= 128 and p["out_c"] >= 128) else 50
+        elif channel_tiled:
+            row_bytes = p["width_stride"] * _align_up(p["in_c"], p["align_c"]) * FP16_BYTES
+            tile_h = min(p["out_h"], max(1, (8 * CBUF_BANK_SIZE) // max(1, row_bytes)))
+        else:
+            tile_h = p["out_h"]
+        return (not small_channel and (p["out_h"] > 50 or channel_tiled),
+                [(row, min(tile_h, p["out_h"] - row)) for row in range(0, p["out_h"], tile_h)])
+
+    if not grouped_spatial and p["out_h"] > 48:
+        tile_out_h = 48
+        return True, [(row, min(tile_out_h + p["kh"] - 1, p["in_h"] - row)) for row in range(0, p["out_h"], tile_out_h)]
+
+    if p["is_depthwise"] and p["out_c"] > 32:
+        if p["out_h"] <= 13:
+            return True, [(0, p["in_h"])]
+        tile_out_h = 13
+        return True, [(row, min(tile_out_h + p["kh"] - 1, p["in_h"] - row)) for row in range(0, p["out_h"], tile_out_h)]
+
+    return False, [(0, p["in_h"])]
+
+def _direct_submit_repeat(p, batch, is_spatial, tile_count):
+    if (not is_spatial and p["in_c"] <= 4 and not p["is_depthwise"] and tile_count > 1):
+        return 2
+    if p["is_depthwise"] and is_spatial:
+        return 2
+    single_atom_1d_nhwc = (p["use_nhwc"] and p["input_pack_c2"] < 8
+                           and p["in_h"] == 1 and p["kh"] == 1)
+    return 2 if batch > 1 and single_atom_1d_nhwc else 1
+
 def _with_reg_value(regs, target, reg_addr, value):
     replacement = E(target, reg_addr, value)
     return [replacement if (q & 0xFFFF) == reg_addr and (q >> 48) == target else q for q in regs]
@@ -591,7 +637,6 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
     p = _conv_params(1, in_c, in_h, in_w, out_c, kh, kw, groups)
     is_spatial = (kh != 1 or kw != 1)
     out_h, out_w = p["out_h"], p["out_w"]
-    is_conv1d_mapped = in_h == 1 and kh == 1 and in_w == 11 and out_c == 6 and kw in (1, 2, 5) and batch in (1, 8)
 
     np.random.seed(42)
     input_nchw = np.random.uniform(-2, 2, (batch, in_c, in_h, in_w)).astype(np.float16)
@@ -627,51 +672,18 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
         return np.frombuffer(output_map, dtype=np.uint16, count=count).copy().view(np.float16)
 
     for n in range(batch):
-        pc_chain_tiles = False
+        pc_chain_tiles, tiles = _conv_tiles(p, is_spatial, grouped_spatial)
         depthwise_channel_tiles = False
-        pointwise_128_256 = False
-        pointwise_256_256 = False
-        pointwise_256_512 = False
-        pointwise_512_512 = False
-        pointwise_512_1024 = False
-        pointwise_1024_1024 = False
-        pointwise_1024_1001 = False
-        if not is_spatial:
-            small_chan = in_c <= 4 and not p["is_depthwise"]
-            pointwise_128_256 = (in_c == 128 and out_c == 256 and out_h == 28 and out_w == 28)
-            pointwise_256_256 = (in_c == 256 and out_c == 256 and out_h == 28 and out_w == 28)
-            pointwise_256_512 = (in_c == 256 and out_c == 512 and out_h == 14 and out_w == 14)
-            pointwise_512_512 = (in_c == 512 and out_c == 512 and out_h == 14 and out_w == 14)
-            pointwise_512_1024 = (in_c == 512 and out_c == 1024 and out_h == 7 and out_w == 7)
-            pointwise_1024_1024 = (in_c == 1024 and out_c == 1024 and out_h == 7 and out_w == 7)
-            pointwise_1024_1001 = (in_c == 1024 and out_c == 1001 and out_h == 1 and out_w == 1)
-            if not small_chan and (out_h > 50 or pointwise_128_256 or pointwise_256_256 or pointwise_256_512 or pointwise_512_512 or pointwise_512_1024 or pointwise_1024_1024 or pointwise_1024_1001):
-                pc_chain_tiles = True
-                tile_out_h = 18 if pointwise_256_256 else (out_h if (pointwise_128_256 or pointwise_256_512 or pointwise_512_512 or pointwise_512_1024 or pointwise_1024_1024 or pointwise_1024_1001) else (25 if (in_c >= 128 and out_c >= 128) else 50))
-                tiles = [(row, min(tile_out_h, out_h - row)) for row in range(0, out_h, tile_out_h)]
-            else:
-                tile_h = max(1, RK_MAX_CONV_FLAT_STRIDE // out_w) if (small_chan and _align_up(out_h * out_w, 4) > RK_MAX_CONV_FLAT_STRIDE) else out_h
-                tiles = [(row, min(tile_h, out_h - row)) for row in range(0, out_h, tile_h)]
-        elif not grouped_spatial and out_h > 48:
-            pc_chain_tiles = True
-            tile_out_h = 48
-            tiles = [(row, min(tile_out_h + kh - 1, in_h - row)) for row in range(0, out_h, tile_out_h)]
-        else:
-            tiles = [(0, in_h)]
-            if p["is_depthwise"] and out_c > 32:
-                pc_chain_tiles = True
-                if out_h > 13:
-                    tile_out_h = 13
-                    tiles = [(row, min(tile_out_h + kh - 1, in_h - row)) for row in range(0, out_h, tile_out_h)]
+        compact_tail = (not is_spatial and out_c % 16 and out_h == 1 and out_w == 1)
 
         if pc_chain_tiles:
             input_ptr = ctypes.addressof(ctypes.c_char.from_buffer(input_map))
             task_regs = []
             input_offset = 0
-            output_channel_tile_size = 512 if pointwise_1024_1001 else 16
+            output_channel_tile_size = 512 if compact_tail else 16
             output_channel_tiles = (not is_spatial and (out_c == 64 or out_c >= 128))
             depthwise_channel_tiles = p["is_depthwise"] and out_c >= 32
-            if pointwise_1024_1001:
+            if compact_tail:
                 warmup_regs = make_conv2d_regs(
                     1, 1, 4, 4, 6, 1, 1,
                     input_mem_create.dma_addr,
@@ -735,20 +747,8 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
                             groups=groups,
                             out_width_stride_override=p["out_width_stride"],
                             full_data_bank=True)
-                        # TODO: remove special case later
-                        if pointwise_128_256:
-                            regs = _with_cbuf_data_bank(regs, 7)
-                        elif pointwise_256_256:
-                            regs = _with_cbuf_data_bank(regs, 8)
-                        elif pointwise_256_512:
-                            regs = _with_cbuf_data_bank(regs, 8)
-                        elif pointwise_512_512:
-                            regs = _with_cbuf_data_bank(regs, 8)
-                        elif pointwise_512_1024:
-                            regs = _with_cbuf_data_bank(regs, 8)
-                        elif pointwise_1024_1024:
-                            regs = _with_cbuf_data_bank(regs, 8)
-                        elif pointwise_1024_1001:
+                        regs = _with_cbuf_data_bank(regs, _tile_data_bank(p, tile_in_h))
+                        if compact_tail:
                             regs = _with_cbuf_data_bank(regs, 1)
                             regs = _with_reg_value(regs, reg.CNA, reg.CNA_DMA_CON2, (tile_p["width_stride"] * (tile_in_h - 4)) & 0x0fffffff)
                             regs = _without_reg(regs, reg.CNA, reg.CNA_CVT_CON5)
@@ -778,15 +778,7 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
                             output_mem_create.dma_addr,
                             groups=groups )]
 
-            small_channel_tiled = (not is_spatial and in_c <= 4 and not p["is_depthwise"] and len(tiles) > 1)
-            if small_channel_tiled:
-                submit_conv_tasks(task_regs, repeat=2)
-            elif is_conv1d_mapped and batch > 1:
-                submit_conv_tasks(task_regs, repeat=2)
-            elif p["is_depthwise"] and is_spatial:
-                submit_conv_tasks(task_regs, repeat=2)
-            else:
-                submit_conv_tasks(task_regs)
+            submit_conv_tasks(task_regs, repeat=_direct_submit_repeat(p, batch, is_spatial, len(tiles)))
 
             out_c1 = _ceil_div(out_c, UNPACK_C2) if grouped_spatial else _ceil_div(p["align_out_c"], UNPACK_C2)
             if not is_spatial:

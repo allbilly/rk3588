@@ -739,6 +739,59 @@ python examples/conv.py                  PASS, 10 consecutive full-process sweep
 targeted cc transition stress sequence   PASS, 10 consecutive runs
 ```
 
+### Cleanup branch: replace exact pointwise shape predicates
+
+The `conv-cleanup` worktree removes the local `pointwise_128_256`,
+`pointwise_256_256`, `pointwise_256_512`, `pointwise_512_512`,
+`pointwise_512_1024`, `pointwise_1024_1024`, `pointwise_1024_1001`, and
+`is_conv1d_mapped` booleans from `run_conv2d()`.  The old code made the correct
+hardware path hard to see because tile height, output-channel tiling, CBUF bank
+selection, compact classifier-head handling, and repeat-submit state workarounds
+were all encoded as exact shapes.
+
+The first cleanup pass split those rules into several pointwise helpers.  The
+current cleanup collapses that further into the normal scheduling path:
+
+1. `_conv_tiles(p, is_spatial, grouped_spatial)` returns the PC-chain flag and
+   `(row_start, tile_input_height)` list for 1x1, spatial, and large-depthwise
+   convolutions.  Pointwise is no longer selected by exact layer names; it falls
+   out of the same tile planner:
+   - small-channel flat output keeps the `RK_MAX_CONV_FLAT_STRIDE` row limit;
+   - tall wide pointwise keeps the proven `50` or `25` row split (`25` when both
+     input and output channels are at least `128`);
+   - shorter output-channel-tiled pointwise uses a CBUF-limited row count from
+     row bytes and eight data banks;
+   - spatial and depthwise paths keep their existing 48-row and 13-row splits.
+2. `_tile_data_bank(p, tile_in_h)` computes the output-channel-tile CBUF
+   data-bank override from the tile input footprint and input-channel floor,
+   capped to the empirically passing `[1, 8]` range.  Tall pointwise tiles keep
+   the all-data-bank path.
+3. The classifier-head tail is now a local condition in `run_conv2d()`:
+   non-multiple-of-16 output channels with one output atom.  That still applies
+   the scoped tail fixes: `DATA_BANK=1`, patched `CNA_DMA_CON2`, omit
+   `CNA_CVT_CON5`, and `DPU_SURFACE_ADD=2`.
+4. `_direct_submit_repeat(p, batch, is_spatial, tile_count)` centralizes the
+   stale-state workarounds: depthwise spatial direct jobs repeat, small-channel
+   tiled direct jobs repeat, and batch>1 single-row NHWC conv1d-mapped jobs
+   repeat.
+
+DeepWiki MCP was installed and queried during this cleanup.  The useful answer was
+from `allbilly/mesa`: Rocket's driver model computes `entries_per_slice`, turns
+input/weight footprints into CBUF banks, chooses whether weights fit and can be
+reused, then derives task slices from available input banks.  That supports moving
+the Python code toward bank/footprint formulas.  DeepWiki could not fully derive
+the RK3588-specific stale-state double-submit behavior; those repeats remain
+empirical and should be reduced only after a register-level reset/isolation
+sequence is identified.
+
+Verification on the rebased cleanup worktree:
+
+```text
+python -m py_compile examples/conv.py PASS
+targeted conv1d/small-tiled/pointwise/classifier cases PASS
+python examples/conv.py PASS
+```
+
 ## Files involved
 
 | File | Location |
