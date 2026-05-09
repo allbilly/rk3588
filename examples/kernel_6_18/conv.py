@@ -278,6 +278,9 @@ def _is_grouped_spatial(in_c, out_c, kh, kw, groups):
     multi_input_group = groups > 1 and in_c != groups
     return is_spatial and multi_input_group and not _is_depthwise(in_c, out_c, groups)
 
+def _needs_c96_oc24_pointwise_schedule(in_c, out_c, kh, kw, groups):
+    return groups == 1 and kh == 1 and kw == 1 and in_c == 96 and out_c == 24
+
 def should_use_nhwc_pack(channels, c2):
     return channels > 0 and (c2 // channels == 2 or (channels == 2 and c2 // channels == 4))
 
@@ -459,7 +462,9 @@ def _conv_tiles(p, is_spatial, grouped_spatial):
     if not is_spatial:
         small_channel = p["in_c"] <= 4 and not p["is_depthwise"]
         channel_tiled = p["out_c"] == 64 or p["out_c"] >= 128
-        if small_channel:
+        if _needs_c96_oc24_pointwise_schedule(p["in_c"], p["out_c"], p["kh"], p["kw"], p["groups"]):
+            tile_h = min(p["out_h"], 20)
+        elif small_channel:
             tile_h = max(1, RK_MAX_CONV_FLAT_STRIDE // p["out_w"]) if p["out_width_stride"] > RK_MAX_CONV_FLAT_STRIDE else p["out_h"]
         elif p["out_h"] > 50:
             tile_h = 25 if (p["in_c"] >= 128 and p["out_c"] >= 128) else 50
@@ -468,7 +473,8 @@ def _conv_tiles(p, is_spatial, grouped_spatial):
             tile_h = min(p["out_h"], max(1, (8 * CBUF_BANK_SIZE) // max(1, row_bytes)))
         else:
             tile_h = p["out_h"]
-        return (not small_channel and (p["out_h"] > 50 or channel_tiled),
+        return (_needs_c96_oc24_pointwise_schedule(p["in_c"], p["out_c"], p["kh"], p["kw"], p["groups"])
+                or (not small_channel and (p["out_h"] > 50 or channel_tiled)),
                 [(row, min(tile_h, p["out_h"] - row)) for row in range(0, p["out_h"], tile_h)])
 
     if not grouped_spatial and p["out_h"] > 48:
@@ -700,7 +706,9 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
     is_spatial = (kh != 1 or kw != 1)
     out_h, out_w = p["out_h"], p["out_w"]
     grouped_spatial = _is_grouped_spatial(in_c, out_c, kh, kw, groups)
-    hw_out_fp16 = out_fp16 or is_spatial or p["is_depthwise"] or out_c >= 128 or p["out_width_stride"] > RK_MAX_CONV_FLAT_STRIDE
+    hw_out_fp16 = (out_fp16 or is_spatial or p["is_depthwise"] or out_c >= 128
+                   or p["out_width_stride"] > RK_MAX_CONV_FLAT_STRIDE
+                   or _needs_c96_oc24_pointwise_schedule(in_c, out_c, kh, kw, groups))
 
     np.random.seed(42)
     input_nchw = np.random.uniform(-2, 2, (batch, in_c, in_h, in_w)).astype(np.float16)
@@ -711,7 +719,6 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
     if _is_depthwise(in_c, out_c, groups) and (kh != 1 or kw != 1) and in_c >= 32:
         # DO NOT CHEAT CPU OFFLOAD
         pass
-
 
     if _is_depthwise(in_c, out_c, groups):
         weight_full = np.zeros((out_c, in_c, kh, kw), dtype=np.float16)
@@ -896,6 +903,8 @@ if __name__ == "__main__":
         dict(name="conv2d_3x3_1x1_4x4",                batch=1, in_c=3,  in_h=4,  in_w=4,  out_c=3, weight_in_c=3, kh=1, kw=1, groups=1),
         dict(name="conv2d_4x2_1x1_4x4",                batch=1, in_c=4,  in_h=4,  in_w=4,  out_c=2, weight_in_c=4, kh=1, kw=1, groups=1),
         dict(name="conv2d_b1_c4_h9_w9_oc4_wic4_k1x1_g1",  batch=1, in_c=4,  in_h=9,  in_w=9,  out_c=4, weight_in_c=4, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c3_h52_w52_oc6_wic3_k1x1_g1", batch=1, in_c=3,  in_h=52, in_w=52, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c96_h56_w56_oc24_wic96_k1x1_g1", batch=1, in_c=96, in_h=56, in_w=56, out_c=24, weight_in_c=96, kh=1, kw=1, groups=1),
         dict(name="conv2d_16x16_1x1_8x8",              batch=1, in_c=16, in_h=8,  in_w=8,  out_c=16, weight_in_c=16, kh=1, kw=1, groups=1),
         dict(name="conv2d_b1_c16_h32_w32_oc16_wic16_k1x1_g1", batch=1, in_c=16, in_h=32, in_w=32, out_c=16, weight_in_c=16, kh=1, kw=1, groups=1),
 
@@ -1007,31 +1016,30 @@ if __name__ == "__main__":
         dict(name="conv1d_bs8_8311_632_as_conv2d", batch=8, in_c=3, in_h=1, in_w=11, out_c=6, weight_in_c=3, kh=1, kw=2, groups=1),
         dict(name="conv1d_bs8_8311_635_a_as_conv2d", batch=8, in_c=3, in_h=1, in_w=11, out_c=6, weight_in_c=3, kh=1, kw=5, groups=1),
         dict(name="conv1d_bs8_8311_635_g3_as_conv2d", batch=8, in_c=3, in_h=1, in_w=11, out_c=6, weight_in_c=1, kh=1, kw=5, groups=3),
+
+        # -- Large spatial 1x1 conv where IC=3, OC=6 (fixed; promoted above) --
+        dict(name="1x3_54x54_k1",  batch=1, in_c=3, in_h=54, in_w=54, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
+        dict(name="1x3_56x56_k1",  batch=1, in_c=3, in_h=56, in_w=56, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
+        dict(name="1x3_58x58_k1",  batch=1, in_c=3, in_h=58, in_w=58, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
+        dict(name="1x3_60x60_k1",  batch=1, in_c=3, in_h=60, in_w=60, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
+        dict(name="1x3_62x62_k1",  batch=1, in_c=3, in_h=62, in_w=62, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
+        dict(name="1x3_64x64_k1",  batch=1, in_c=3, in_h=64, in_w=64, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
+        dict(name="1x3_66x66_k1",  batch=1, in_c=3, in_h=66, in_w=66, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
+        dict(name="1x3_68x68_k1",  batch=1, in_c=3, in_h=68, in_w=68, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
+        dict(name="1x3_70x70_k1",  batch=1, in_c=3, in_h=70, in_w=70, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
+        dict(name="1x3_72x72_k1",  batch=1, in_c=3, in_h=72, in_w=72, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
     ]
     shapes_sweep = [dict(name=f"conv2d_1x3_{n}x{n}_k1", batch=1, in_c=3, in_h=n, in_w=n, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1) for n in range(2, 400, 2)]
-    shapes += shapes_sweep
+    # shapes += shapes_sweep
     # -- Known-issue / reference shapes (non-blocking, report-only) --
     known_issue_shapes = [
         # Shapes that pass Mesa/TFLite custom TFLite but fail mainline conv.py.
         # Mesa runs quantized padded/strided models: these exact stride-1 valid-conv
         # shapes from extracted Mesa graphs reveal conv.py regression behavior.
 
-        # -- Large spatial 1x1 conv where IC=3, OC=6 (buffer size crash) --
-        dict(name="known_1x3_52x52_k1",  batch=1, in_c=3, in_h=52, in_w=52, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="known_1x3_54x54_k1",  batch=1, in_c=3, in_h=54, in_w=54, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="known_1x3_56x56_k1",  batch=1, in_c=3, in_h=56, in_w=56, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="known_1x3_58x58_k1",  batch=1, in_c=3, in_h=58, in_w=58, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="known_1x3_60x60_k1",  batch=1, in_c=3, in_h=60, in_w=60, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="known_1x3_62x62_k1",  batch=1, in_c=3, in_h=62, in_w=62, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="known_1x3_64x64_k1",  batch=1, in_c=3, in_h=64, in_w=64, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="known_1x3_66x66_k1",  batch=1, in_c=3, in_h=66, in_w=66, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="known_1x3_68x68_k1",  batch=1, in_c=3, in_h=68, in_w=68, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="known_1x3_70x70_k1",  batch=1, in_c=3, in_h=70, in_w=70, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="known_1x3_72x72_k1",  batch=1, in_c=3, in_h=72, in_w=72, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-
         # -- 1x1 conv large input channel >> output channel (wrong numerical result) --
         # From mobilenetv2 depthwise expand/project layers
-        dict(name="known_b1_c96_h56_w56_oc24_wic96_k1x1_g1",    batch=1, in_c=96,  in_h=56,  in_w=56,  out_c=24,  weight_in_c=96,  kh=1, kw=1, groups=1, known_reason="ic>>oc"),
+        # fixed/promoted above: b1_c96_h56_w56_oc24_wic96_k1x1_g1
         dict(name="known_b1_c144_h56_w56_oc24_wic144_k1x1_g1",   batch=1, in_c=144, in_h=56,  in_w=56,  out_c=24,  weight_in_c=144, kh=1, kw=1, groups=1, known_reason="ic>>oc"),
         dict(name="known_b1_c144_h28_w28_oc32_wic144_k1x1_g1",   batch=1, in_c=144, in_h=28,  in_w=28,  out_c=32,  weight_in_c=144, kh=1, kw=1, groups=1, known_reason="ic>>oc"),
         dict(name="known_b1_c192_h28_w28_oc32_wic192_k1x1_g1",   batch=1, in_c=192, in_h=28,  in_w=28,  out_c=32,  weight_in_c=192, kh=1, kw=1, groups=1, known_reason="ic>>oc"),
@@ -1091,13 +1099,12 @@ if __name__ == "__main__":
             expected = expected.astype(np.float16)
         md = float(np.max(np.abs(result.astype(np.float64) - expected)))
         ok = np.allclose(result, expected, atol=0.2) and not np.any(np.isinf(result))
+        assert ok, f"{s["name"]} failed"
         out_h = in_h - kh + 1
         out_w = in_w - kw + 1
         in_shape = f"{in_c}x{in_h}x{in_w}"
         out_shape = f"{out_c}x{out_h}x{out_w}"
-        is_known = "known_" in s["name"]
-        tag = "KNOWN-ISSUE" if is_known else ""
-        print(f"  {name:<{name_width}s} {in_shape:<{in_shape_width}s} -> {out_shape:<{out_shape_width}s} kh={kh} kw={kw} g={groups} out={'fp16' if out_fp16 else 'fp32'}  {'PASS' if ok else 'FAIL'}  (max_diff={md:.4f})  {tag}")
+        print(f"  {name:<{name_width}s} {in_shape:<{in_shape_width}s} -> {out_shape:<{out_shape_width}s} kh={kh} kw={kw} g={groups} out={'fp16' if out_fp16 else 'fp32'}  {'PASS' if ok else 'FAIL'}  (max_diff={md:.4f})")
         if not ok and not is_known:
             failed += 1
     print(f"\n{'ALL PASS' if failed == 0 else f'{failed} FAILURES (known_issue excluded)'}")

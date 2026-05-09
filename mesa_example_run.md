@@ -2,6 +2,8 @@
 
 ## Prerequisites
 
+mesa source code is at /home/orangepi/rk3588/ref/mesa
+
 ```bash
 # from ~/mesa
 source .venv/bin/activate

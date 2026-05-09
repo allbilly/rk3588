@@ -1,3 +1,5 @@
+we are working in pur npu registers driver. DO NOT offload work to CPU/GPU unless specified
+
 review info in experimental/* and nvdla/* when face and problem, and ask deepwiki
 
 On this Orange Pi RK3588 machine, the NPU card is present. Do not assume hardware is
