@@ -1,4 +1,4 @@
-we are working in pur npu registers driver. DO NOT offload work to CPU/GPU unless specified
+we are working in pur npu registers driver. DO NOT offload work to CPU/GPU unless specified. Make sure to test run any code changes unless specified otherwise.
 
 review info in experimental/* and nvdla/* when face and problem, and ask deepwiki
 

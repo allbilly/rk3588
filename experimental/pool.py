@@ -7,9 +7,13 @@ import argparse
 
 class reg:
     PC = 0x0100
+    PC_REG = 0x0100
+    VERSION = 0x0040
     PPU = 0x4000
     PPU_RDMA = 0x8000
     REG_PC_OPERATION_ENABLE = 0x0008
+    REG_PC_BASE_ADDRESS = 0x0010
+    REG_PC_REGISTER_AMOUNTS = 0x0014
     REG_PPU_S_POINTER = 0x6004
     REG_PPU_DATA_CUBE_IN_WIDTH = 0x600c
     REG_PPU_DATA_CUBE_IN_HEIGHT = 0x6010
@@ -111,6 +115,12 @@ RKNPU_JOB_PC = 0x1
 RKNPU_JOB_BLOCK = 0 << 1
 RKNPU_JOB_NONBLOCK = 1 << 1
 RKNPU_JOB_PINGPONG = 0x4
+FP16_BYTES = 2
+PC_CHAIN_TAIL_QWORDS = 4
+TASK_BUF_SIZE = 64 * 1024
+REGCMD_BUF_SIZE = 512 * 1024
+INPUT_BUF_SIZE = 4 * 1024 * 1024
+OUTPUT_BUF_SIZE = 4 * 1024 * 1024
 
 fd = os.open(f"/dev/dri/card1", os.O_RDWR)
 
@@ -155,9 +165,10 @@ class rknpu_submit(ctypes.Structure):
         ("task_counter", ctypes.c_uint32),
         ("priority", ctypes.c_int32),
         ("task_obj_addr", ctypes.c_uint64),
-        ("regcfg_obj_addr", ctypes.c_uint64),
+        ("iommu_domain_id", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
         ("task_base_addr", ctypes.c_uint64),
-        ("user_data", ctypes.c_uint64),
+        ("hw_elapse_time", ctypes.c_int64),
         ("core_mask", ctypes.c_uint32),
         ("fence_fd", ctypes.c_int32),
         ("subcore_task", rknpu_subcore_task * 5),
@@ -212,24 +223,25 @@ def mem_destroy(fd, mem_create):
                               rknpu_mem_destroy(handle=mem_create.handle, obj_addr=mem_create.obj_addr))
 
 
-def submit(fd, task_obj_addr):
+def submit(fd, task_obj_addr, task_count=1):
     submit_struct = rknpu_submit(
         flags=RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG,
         timeout=6000,
         task_start=0,
-        task_number=1,
+        task_number=task_count,
         task_counter=0,
         priority=0,
         task_obj_addr=task_obj_addr,
-        regcfg_obj_addr=0,
+        iommu_domain_id=0,
+        reserved=0,
         task_base_addr=0,
-        user_data=0,
+        hw_elapse_time=0,
         core_mask=1,
         fence_fd=-1,
     )
-    submit_struct.subcore_task[0] = rknpu_subcore_task(task_start=0, task_number=1)
-    submit_struct.subcore_task[1] = rknpu_subcore_task(task_start=1, task_number=0)
-    submit_struct.subcore_task[2] = rknpu_subcore_task(task_start=2, task_number=0)
+    submit_struct.subcore_task[0] = rknpu_subcore_task(task_start=0, task_number=task_count)
+    submit_struct.subcore_task[1] = rknpu_subcore_task(task_start=task_count, task_number=0)
+    submit_struct.subcore_task[2] = rknpu_subcore_task(task_start=task_count, task_number=0)
     submit_struct.subcore_task[3] = rknpu_subcore_task(task_start=0, task_number=0)
     submit_struct.subcore_task[4] = rknpu_subcore_task(task_start=0, task_number=0)
     return ioctl(fd, DRM_IOCTL_RKNPU_SUBMIT, submit_struct)
@@ -240,6 +252,14 @@ def reset_npu(fd):
     ret = ioctl(fd, DRM_IOCTL_RKNPU_ACTION, action)
     print(f"reset_npu ret={ret}")
     return ret
+
+
+task_map, task_mc = mem_allocate(fd, TASK_BUF_SIZE, RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
+regcmd_map, regcmd_mc = mem_allocate(fd, REGCMD_BUF_SIZE, RKNPU_MEM_NON_CACHEABLE)
+input_map, input_mc = mem_allocate(fd, INPUT_BUF_SIZE, RKNPU_MEM_NON_CACHEABLE)
+output_map, output_mc = mem_allocate(fd, OUTPUT_BUF_SIZE, RKNPU_MEM_NON_CACHEABLE)
+
+
 POOL_OPS = ("min", "max", "avg", "globalmin", "globalmax", "globalavg")
 POOL_ENABLE_MASK = 0x60
 POOL_INT_MASK = 0xc00
@@ -251,8 +271,12 @@ def mask_reg(val, shift, mask):
 
 
 def emit(target, addr, value):
-    if target == reg.PC: target = 0x80
+    if target == reg.PC and addr == reg.REG_PC_OPERATION_ENABLE: target = 0x80
     return (((target + 1) & 0xffff) << 48) | ((int(value) & 0xffffffff) << 16) | (addr & 0xffff)
+
+
+def pc_amount(reg_count):
+    return (int(reg_count) + 1) // 2 + 1
 
 
 def field(name, value):
@@ -296,6 +320,12 @@ def pool2d_reference(x, op):
     return out
 
 
+def pool_input(op, in_h, in_w):
+    seed = 0x504f4f4c ^ (POOL_OPS.index(op) << 16) ^ (in_h << 4) ^ in_w
+    rng = np.random.default_rng(seed)
+    return rng.uniform(-8.0, 8.0, (in_h, in_w, POOL_CHANNELS)).astype(np.float16)
+
+
 def ppu_pointer():
     return (field("PPU_S_POINTER_POINTER_PP_MODE", 1) |
                     field("PPU_S_POINTER_EXECUTER_PP_EN", 1) |
@@ -329,7 +359,7 @@ def pooling_regs(op, input_dma=0x11110000, output_dma=0x22220000, in_h=4, in_w=4
     out_h_field = 0 if direct_global else in_h - 2
     out_w_field = 0 if direct_global else in_w - 2
     channel_field = POOL_CHANNELS - 1
-    width_stride = in_w
+    width_stride = in_w * POOL_CHANNELS * FP16_BYTES
     src_surf_stride = width_stride * in_h
     dst_surf_stride = 1 if direct_global else in_w * (in_h - 1)
     index_add = 1 if direct_global else dst_surf_stride
@@ -345,11 +375,10 @@ def pooling_regs(op, input_dma=0x11110000, output_dma=0x22220000, in_h=4, in_w=4
         emit(reg.PPU, reg.REG_PPU_DATA_CUBE_IN_HEIGHT, field("PPU_DATA_CUBE_IN_HEIGHT_CUBE_IN_HEIGHT", in_h_field)),
         emit(reg.PPU, reg.REG_PPU_DATA_CUBE_IN_CHANNEL, field("PPU_DATA_CUBE_IN_CHANNEL_CUBE_IN_CHANNEL", channel_field)),
     ]
-    if op != "globalmax":
-        regs += [
-            emit(reg.PPU, reg.REG_PPU_DATA_CUBE_OUT_WIDTH, field("PPU_DATA_CUBE_OUT_WIDTH_CUBE_OUT_WIDTH", out_w_field)),
-            emit(reg.PPU, reg.REG_PPU_DATA_CUBE_OUT_HEIGHT, field("PPU_DATA_CUBE_OUT_HEIGHT_CUBE_OUT_HEIGHT", out_h_field)),
-        ]
+    regs += [
+        emit(reg.PPU, reg.REG_PPU_DATA_CUBE_OUT_WIDTH, field("PPU_DATA_CUBE_OUT_WIDTH_CUBE_OUT_WIDTH", out_w_field)),
+        emit(reg.PPU, reg.REG_PPU_DATA_CUBE_OUT_HEIGHT, field("PPU_DATA_CUBE_OUT_HEIGHT_CUBE_OUT_HEIGHT", out_h_field)),
+    ]
     regs += [
         emit(reg.PPU, reg.REG_PPU_DATA_CUBE_OUT_CHANNEL, field("PPU_DATA_CUBE_OUT_CHANNEL_CUBE_OUT_CHANNEL", channel_field)),
         emit(reg.PPU, reg.REG_PPU_OPERATION_MODE_CFG,
@@ -394,109 +423,189 @@ def pooling_regs(op, input_dma=0x11110000, output_dma=0x22220000, in_h=4, in_w=4
     return regs
 
 
-def run_pool(op, in_h=4, in_w=4):
-    fd = os.open("/dev/dri/card1", os.O_RDWR)
-    maps = []
-    mems = []
-    try:
+def chain_tail(regcmd_dma, next_offset, next_regs_len):
+    enable = emit(reg.PC, reg.REG_PC_OPERATION_ENABLE,
+                  field("PC_OPERATION_ENABLE_RESERVED_0", POOL_PC_ENABLE))
+    if next_offset is None:
+        return [
+            emit(reg.PC_REG, reg.REG_PC_BASE_ADDRESS, 0),
+            emit(reg.PC_REG, reg.REG_PC_REGISTER_AMOUNTS, 0),
+            emit(reg.VERSION, 0, 0),
+            enable,
+        ]
+    next_addr = regcmd_dma + next_offset * ctypes.sizeof(ctypes.c_uint64)
+    return [
+        emit(reg.PC_REG, reg.REG_PC_BASE_ADDRESS, next_addr & 0xfffffff0),
+        emit(reg.PC_REG, reg.REG_PC_REGISTER_AMOUNTS, pc_amount(next_regs_len)),
+        emit(reg.VERSION, 0, 0),
+        enable,
+    ]
+
+
+def write_regs_to_tasks(task_map, regcmd_map, task_mc, regcmd_mc, task_regs):
+    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), 0, task_map.size())
+    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), 0, regcmd_map.size())
+    tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
+    regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
+
+    offsets = []
+    offset = 0
+    for regs in task_regs:
+        offsets.append(offset)
+        offset += align_up(len(regs) + PC_CHAIN_TAIL_QWORDS, 2)
+    if offset > regcmd_mc.size // ctypes.sizeof(ctypes.c_uint64):
+        raise ValueError("regcmd buffer too small")
+    if len(task_regs) > task_mc.size // ctypes.sizeof(struct_rknpu_task):
+        raise ValueError("task buffer too small")
+
+    for idx, regs in enumerate(task_regs):
+        base = offsets[idx]
+        body = regs[:-1]
+        for i, value in enumerate(body):
+            regcmd[base + i] = value
+        next_offset = offsets[idx + 1] if idx + 1 < len(task_regs) else None
+        next_regs_len = len(task_regs[idx + 1]) - 1 if idx + 1 < len(task_regs) else 0
+        for i, value in enumerate(chain_tail(regcmd_mc.dma_addr, next_offset, next_regs_len)):
+            regcmd[base + len(body) + i] = value
+
+        tasks[idx].flags = 0
+        tasks[idx].op_idx = POOL_TASK_OP_IDX
+        tasks[idx].enable_mask = POOL_ENABLE_MASK
+        tasks[idx].int_mask = POOL_INT_MASK
+        tasks[idx].int_clear = 0x1ffff
+        tasks[idx].int_status = 0
+        tasks[idx].regcfg_amount = len(body)
+        tasks[idx].regcfg_offset = 0
+        tasks[idx].regcmd_addr = regcmd_mc.dma_addr + base * ctypes.sizeof(ctypes.c_uint64)
+
+
+def output_shape(op, in_h, in_w):
+    if op in ("globalmax", "globalavg"):
+        return 1, 1
+    return in_h - 1, in_w - 1
+
+
+def output_elements(op, in_h, in_w):
+    out_h, out_w = output_shape(op, in_h, in_w)
+    if op == "globalmin":
+        out_h, out_w = in_h - 1, in_w - 1
+    return out_h * out_w * POOL_CHANNELS
+
+
+def read_pool_output(output_map, op, expected_shape, in_h, in_w):
+    if op == "globalmin":
+        count = (in_h - 1) * (in_w - 1) * POOL_CHANNELS
+        pooled = np.frombuffer(output_map, dtype=np.float16, count=count).copy().reshape(in_h - 1, in_w - 1, POOL_CHANNELS)
+        return -np.max(pooled.astype(np.float32), axis=(0, 1), keepdims=True).astype(np.float16)
+    if op in ("globalmax", "globalavg"):
+        return np.frombuffer(output_map, dtype=np.float16, count=POOL_CHANNELS).copy().reshape(expected_shape)
+    got = np.frombuffer(output_map, dtype=np.float16, count=np.prod(expected_shape)).copy().reshape(expected_shape)
+    return -got if op == "min" else got
+
+
+def pool_task_tiles(op, in_h, in_w):
+    if op.startswith("global"):
+        return [(0, in_h)]
+    max_output_rows = max(1, min(8191 // in_w, 8191))
+    tiles = []
+    for out_start in range(0, in_h - 1, max_output_rows):
+        out_rows = min(max_output_rows, in_h - 1 - out_start)
+        tiles.append((out_start, out_rows + 1))
+    return tiles
+
+
+def run_pool(op, in_h=4, in_w=4, reset=True):
+    if reset:
         reset_npu(fd)
-        task_map, task_mc = mem_allocate(fd, 4096, RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
-        regcmd_map, regcmd_mc = mem_allocate(fd, 4096, RKNPU_MEM_NON_CACHEABLE)
-        input_bytes = align_up(in_h * in_w * POOL_CHANNELS * np.dtype(np.float16).itemsize, 4096)
-        out_h = 1 if op in ("globalmax", "globalavg") else in_h - 1
-        out_w = 1 if op in ("globalmax", "globalavg") else in_w - 1
-        if op == "globalmin":
-            out_h, out_w = in_h - 1, in_w - 1
-        output_bytes = align_up(max(1, out_h * out_w * POOL_CHANNELS * np.dtype(np.float16).itemsize), 4096)
-        input_map, input_mc = mem_allocate(fd, input_bytes, RKNPU_MEM_NON_CACHEABLE)
-        output_map, output_mc = mem_allocate(fd, output_bytes, RKNPU_MEM_NON_CACHEABLE)
-        maps = [task_map, regcmd_map, input_map, output_map]
-        mems = [task_mc, regcmd_mc, input_mc, output_mc]
+    tiles = pool_task_tiles(op, in_h, in_w)
+    regcmd_qwords = sum(align_up(len(pooling_regs(op, in_h=tile_h, in_w=in_w)), 2) + PC_CHAIN_TAIL_QWORDS
+                        for _, tile_h in tiles)
+    input_bytes = align_up(in_h * in_w * POOL_CHANNELS * FP16_BYTES, 4096)
+    if op in ("globalmax", "globalavg"):
+        output_elems = POOL_CHANNELS
+    else:
+        output_elems = (in_h - 1) * (in_w - 1) * POOL_CHANNELS
+    output_bytes = align_up(max(1, output_elems * FP16_BYTES), 4096)
+    if len(tiles) * ctypes.sizeof(struct_rknpu_task) > task_mc.size:
+        raise ValueError("task buffer too small")
+    if regcmd_qwords * ctypes.sizeof(ctypes.c_uint64) > regcmd_mc.size:
+        raise ValueError("regcmd buffer too small")
+    if input_bytes > input_mc.size:
+        raise ValueError("input buffer too small")
+    if output_bytes > output_mc.size:
+        raise ValueError("output buffer too small")
 
-        tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
-        regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
+    x = pool_input(op, in_h, in_w)
+    expected = pool2d_reference(x, op)
+    input_for_op = -x if op in ("min", "globalmin") else x
+    input_map[:input_for_op.nbytes] = input_for_op.reshape(-1).tobytes()
+    output_map[:output_bytes] = b"\x00" * output_bytes
 
-        x = (np.arange(in_h * in_w * POOL_CHANNELS, dtype=np.float16).reshape(in_h, in_w, POOL_CHANNELS) /
-                  np.float16(8.0)).astype(np.float16)
-        expected = pool2d_reference(x, op)
-        input_for_op = -x if op in ("min", "globalmin") else x
-        input_map[:input_for_op.nbytes] = input_for_op.reshape(-1).tobytes()
-        output_map[:output_bytes] = b"\x00" * output_bytes
+    task_regs = []
+    for out_start, tile_h in tiles:
+        input_dma = input_mc.dma_addr + out_start * in_w * POOL_CHANNELS * FP16_BYTES
+        output_dma = output_mc.dma_addr if op.startswith("global") else output_mc.dma_addr + out_start * (in_w - 1) * POOL_CHANNELS * FP16_BYTES
+        task_regs.append(pooling_regs(op, input_dma, output_dma, tile_h, in_w))
+    write_regs_to_tasks(task_map, regcmd_map, task_mc, regcmd_mc, task_regs)
 
-        regs = pooling_regs(op, input_mc.dma_addr, output_mc.dma_addr, in_h, in_w)
-        for i, value in enumerate(regs):
-            regcmd[i] = value
-
-        tasks[0].flags = 0
-        tasks[0].op_idx = POOL_TASK_OP_IDX
-        tasks[0].enable_mask = POOL_ENABLE_MASK
-        tasks[0].int_mask = POOL_INT_MASK
-        tasks[0].int_clear = 0x1ffff
-        tasks[0].int_status = 0
-        tasks[0].regcfg_amount = len(regs)
-        tasks[0].regcfg_offset = 0
-        tasks[0].regcmd_addr = regcmd_mc.dma_addr
-
-        ret = submit(fd, task_mc.obj_addr)
-        read_elems = (in_h - 1) * (in_w - 1) * x.shape[2] if op == "globalmin" else expected.size
-        got_raw = np.frombuffer(output_map, dtype=np.float16, count=read_elems).copy()
-        if op == "globalmin":
-            pooled = got_raw.reshape(in_h - 1, in_w - 1, x.shape[2])
-            got = -np.max(pooled.astype(np.float32), axis=(0, 1), keepdims=True).astype(np.float16)
-        elif op == "min":
-            got = -got_raw.reshape(expected.shape)
-        else:
-            got = got_raw.reshape(expected.shape)
-        decoded = (got.astype(np.float32) / x.shape[0]).astype(np.float16) if op == "globalavg" else got
-        atol = 0.25 if op in ("avg", "globalavg") else 0.0
-        ok = ret == 0 and np.allclose(decoded, expected, atol=atol)
-        print(f"SUBMIT ret={ret}")
-        print(f"op={op} input_shape={x.shape} output_shape={expected.shape} reg_count={len(regs)}")
-        print(f"NPU output={got.reshape(-1)[:min(32, got.size)]}")
-        if op == "globalavg":
-            print(f"NPU decoded={decoded.reshape(-1)[:min(32, decoded.size)]}")
-        print(f"expected={expected.reshape(-1)[:min(32, expected.size)]}")
-        print(f"max_abs_diff={float(np.max(np.abs(decoded.astype(np.float32) - expected.astype(np.float32)))):.6f}")
-        print(f"{op.upper()}POOL PASS" if ok else f"{op.upper()}POOL FAIL")
-        return 0 if ok else 1
-    finally:
-        for mmap_obj in reversed(maps):
-            mmap_obj.close()
-        for mem_create in reversed(mems):
-            mem_destroy(fd, mem_create)
-        os.close(fd)
+    ret = submit(fd, task_mc.obj_addr, len(task_regs))
+    got = read_pool_output(output_map, op, expected.shape, in_h, in_w)
+    decoded = (got.astype(np.float32) / x.shape[0]).astype(np.float16) if op == "globalavg" else got
+    atol = 0.25 if op in ("avg", "globalavg") else 0.0
+    ok = ret == 0 and np.allclose(decoded, expected, atol=atol)
+    print(f"op={op} input_shape={x.shape} output_shape={expected.shape} tasks={len(task_regs)} reg_count={sum(len(regs) for regs in task_regs)}")
+    print(f"NPU output={got.reshape(-1)[:min(32, got.size)]}")
+    if op == "globalavg":
+        print(f"NPU decoded={decoded.reshape(-1)[:min(32, decoded.size)]}")
+    print(f"expected={expected.reshape(-1)[:min(32, expected.size)]}")
+    print(f"max_abs_diff={float(np.max(np.abs(decoded.astype(np.float32) - expected.astype(np.float32)))):.6f}")
+    print(f"{op.upper()}POOL PASS" if ok else f"{op.upper()}POOL FAIL")
+    return 0 if ok else 1
 
 
 def main():
     parser = argparse.ArgumentParser(description="RK3588 PPU pool register streams from experimental/rknnops.h")
     parser.add_argument("--op", choices=POOL_OPS + ("all",), default="all")
-    parser.add_argument("--height", type=int, default=4)
-    parser.add_argument("--width", type=int, default=4)
+    parser.add_argument("--height", type=int)
+    parser.add_argument("--width", type=int)
     parser.add_argument("--dry", action="store_true", help="print register streams without submitting")
     args = parser.parse_args()
 
     if args.dry:
         ops = POOL_OPS if args.op == "all" else (args.op,)
+        height = args.height or 4
+        width = args.width or 4
         print("Pool dry run only: no /dev/dri open, no ioctl, no submit")
         for op in ops:
-            regs = pooling_regs(op, in_h=args.height, in_w=args.width)
-            print(f"op={op} reg_count={len(regs)}")
+            tiles = pool_task_tiles(op, height, width)
+            regs = [pooling_regs(op, 0x11110000 + i * 0x10000, 0x22220000 + i * 0x10000, tile_h, width)
+                    for i, (_, tile_h) in enumerate(tiles)]
+            print(f"op={op} tasks={len(regs)} reg_count={sum(len(tile_regs) for tile_regs in regs)}")
             print("first_regs:")
-            for value in regs[:6]:
+            for value in regs[0][:6]:
                 print(f"  0x{value:016x}")
             print("last_regs:")
-            for value in regs[-6:]:
+            for value in regs[-1][-6:]:
                 print(f"  0x{value:016x}")
         print("POOL DRY RUN PASS")
         return 0
 
-    if args.op == "all":
-        rc = 0
-        for op in POOL_OPS:
-            rc |= run_pool(op, args.height, args.width)
-        return rc
-    return run_pool(args.op, args.height, args.width)
+    ops = POOL_OPS if args.op == "all" else (args.op,)
+    tests = []
+    if args.height or args.width:
+        tests = [(op, args.height or 4, args.width or 4) for op in ops]
+    else:
+        tests += [(op, 4, 4) for op in ops]
+        tests += [(op, 9000, 4) for op in ops if op in ("min", "max", "avg")]
+    for test_idx, (op, height, width) in enumerate(tests):
+        print(f"\n{op} {height}x{width}:")
+        rc = run_pool(op, height, width, reset=(test_idx == 0))
+        assert rc == 0, f"{op} pool shape {(height, width)} failed"
+    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    finally:
+        os.close(fd)
