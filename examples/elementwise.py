@@ -7,6 +7,8 @@ RKNPU_ACT_RESET = 1
 RKNPU_JOB_PC = 1 << 0
 RKNPU_JOB_BLOCK = 1 << 1
 RKNPU_JOB_PINGPONG = 1 << 2
+FP16_BYTES = 2
+FP32_BYTES = 4
 PC_CHAIN_TAIL_QWORDS = 4
 
 class reg:
@@ -249,16 +251,44 @@ def write_regs_to_npu_task(task_regs):
 
 _MAX_ELEMENTS_PER_TASK = 8000 * 8  # 64000, safe below width limit 8175 and keeps tile DMA addresses 64-byte aligned
 
-def run_op(ew_cfg_val, a_vals, b_vals, neg_op=False, fdiv_op=False):
+def run_op(ew_cfg_val, a_vals, b_vals, neg_op=False, fdiv_op=False, out_fp16=False):
     n = len(a_vals)
+    out_precision = 2 if out_fp16 else 5
+    out_bytes = FP16_BYTES if out_fp16 else FP32_BYTES
+    out_dtype = np.float16 if out_fp16 else np.float32
+    out_cvt_scale = (1 if fdiv_op else ((1 << 16) | 1)) if out_fp16 else (1 if fdiv_op else 0)
+    tile_elems = _MAX_ELEMENTS_PER_TASK if out_fp16 else 4
+    tile_bytes = tile_elems * FP16_BYTES if out_fp16 else 64
+    tile_count = _ceil_div(n, tile_elems)
+
+    a_packed = np.array(a_vals, dtype=np.float16).view(np.uint16)
+    w_vals = np.full(n, -1.0, dtype=np.float16) if neg_op else np.array(b_vals, dtype=np.float16)
+    w_packed = w_vals.view(np.uint16)
+
+    if out_fp16:
+        ct_inputs = (ctypes.c_uint16 * n).from_buffer(input_map)
+        ct_weights = (ctypes.c_uint16 * n).from_buffer(weight_map)
+        ct_inputs[:] = a_packed.tolist()
+        ct_weights[:] = w_packed.tolist()
+    else:
+        tile_u16_stride = tile_bytes // FP16_BYTES
+        ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(input_map)), 0, tile_count * tile_bytes)
+        ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(weight_map)), 0, tile_count * tile_bytes)
+        ct_inputs = (ctypes.c_uint16 * (tile_count * tile_u16_stride)).from_buffer(input_map)
+        ct_weights = (ctypes.c_uint16 * (tile_count * tile_u16_stride)).from_buffer(weight_map)
+        for tile_idx, start in enumerate(range(0, n, tile_elems)):
+            tile_n = min(tile_elems, n - start)
+            dst = tile_idx * tile_u16_stride
+            ct_inputs[dst:dst + tile_n] = a_packed[start:start + tile_n].tolist()
+            ct_weights[dst:dst + tile_n] = w_packed[start:start + tile_n].tolist()
 
     task_regs = []
-    for start in range(0, n, _MAX_ELEMENTS_PER_TASK):
-        tile_n = min(_MAX_ELEMENTS_PER_TASK, n - start)
+    for tile_idx, start in enumerate(range(0, n, tile_elems)):
+        tile_n = min(tile_elems, n - start)
         dataout_width = (tile_n + 7) // 8 - 1
-        input_addr = input_mem_create.dma_addr + start * 2
-        weight_addr = weight_mem_create.dma_addr + start * 2
-        output_addr = output_mem_create.dma_addr + start * 2
+        input_addr = input_mem_create.dma_addr + (start * FP16_BYTES if out_fp16 else tile_idx * tile_bytes)
+        weight_addr = weight_mem_create.dma_addr + (start * FP16_BYTES if out_fp16 else tile_idx * tile_bytes)
+        output_addr = output_mem_create.dma_addr + (start * out_bytes if out_fp16 else tile_idx * tile_bytes)
 
         task_regs.append([
             E(reg.DPU,  reg.S_POINTER, 0x0000000E),
@@ -266,7 +296,7 @@ def run_op(ew_cfg_val, a_vals, b_vals, neg_op=False, fdiv_op=False):
                 ((15 << 5) | (2 << 1) | 1)
             ),
             E(reg.DPU,  reg.DATA_FORMAT,
-                ((2 << 29) | (2 << 26) | 2)
+                ((out_precision << 29) | (2 << 26) | 2)
             ),
             E(reg.DPU,  reg.DATA_CUBE_WIDTH, dataout_width),
             E(reg.DPU,  reg.DATA_CUBE_HEIGHT, 0),
@@ -275,9 +305,7 @@ def run_op(ew_cfg_val, a_vals, b_vals, neg_op=False, fdiv_op=False):
                 ((7 << 16) | 7)
             ),
             E(reg.DPU,  reg.EW_CFG, ew_cfg_val),
-            E(reg.DPU,  reg.OUT_CVT_SCALE,
-                (1 if fdiv_op else ((1 << 16) | 1))
-            ),
+            E(reg.DPU,  reg.OUT_CVT_SCALE, out_cvt_scale),
             E(reg.RDMA, reg.RDMA_S_POINTER, 0x0000000E),
             E(reg.RDMA, reg.RDMA_DATA_CUBE_WIDTH, dataout_width),
             E(reg.RDMA, reg.RDMA_DATA_CUBE_HEIGHT, 0),
@@ -294,20 +322,29 @@ def run_op(ew_cfg_val, a_vals, b_vals, neg_op=False, fdiv_op=False):
             ),
         ])
 
-    write_regs_to_npu_task(task_regs)
+    if out_fp16:
+        write_regs_to_npu_task(task_regs)
+        npu_submit(tasks_mem_create.obj_addr, task_count=len(task_regs),
+            flags=(RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG))
+        return np.frombuffer(output_map, dtype=out_dtype, count=n).copy().tolist()
 
-    a_packed = np.array(a_vals, dtype=np.float16).view(np.uint16)
-    ct_inputs = (ctypes.c_uint16 * n).from_buffer(input_map)
-    ct_inputs[:] = a_packed.tolist()
-
-    w_vals = np.full(n, -1.0, dtype=np.float16) if neg_op else np.array(b_vals, dtype=np.float16)
-    w_packed = w_vals.view(np.uint16)
-    ct_weights = (ctypes.c_uint16 * n).from_buffer(weight_map)
-    ct_weights[:] = w_packed.tolist()
-
-    npu_submit(tasks_mem_create.obj_addr, task_count=len(task_regs))
-
-    return np.frombuffer(output_map, dtype=np.float16, count=n).copy().tolist()
+    result = np.empty(n, dtype=np.float32)
+    for tile_idx, regs in enumerate(task_regs):
+        start = tile_idx * tile_elems
+        tile_n = min(tile_elems, n - start)
+        out_tile = np.frombuffer(output_map, dtype=np.float32, count=tile_bytes // FP32_BYTES, offset=tile_idx * tile_bytes)
+        out_tile[:] = np.nan
+        write_regs_to_npu_task([regs])
+        npu_submit(tasks_mem_create.obj_addr, task_count=1,
+            flags=(RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG))
+        for _ in range(1000000):
+            if np.isfinite(out_tile[:tile_n]).all():
+                break
+        else:
+            raise TimeoutError("fp32 output tile did not complete")
+        result[start:start + tile_n] = out_tile[:tile_n]
+    npu_reset(fd)
+    return result.tolist()
 
 
 OPS = {
@@ -320,7 +357,17 @@ OPS = {
 }
 
 if __name__ == "__main__":
-    mode = sys.argv[1].upper() if len(sys.argv) > 1 else "ALL"
+    args = sys.argv[1:]
+    out_fp16 = False
+    if "--out" in args:
+        out_idx = args.index("--out")
+        if out_idx + 1 >= len(args) or args[out_idx + 1] not in ("fp16", "fp32"):
+            print("Usage: elementwise.py [OP|ALL] [--out fp16|fp32]")
+            sys.exit(1)
+        out_fp16 = args[out_idx + 1] == "fp16"
+        del args[out_idx:out_idx + 2]
+    mode = args[0].upper() if args else "ALL"
+    out_dtype = np.float16 if out_fp16 else np.float32
 
     if mode == "ALL":
         run_list = list(OPS.items())
@@ -332,7 +379,8 @@ if __name__ == "__main__":
 
     np.random.seed(42)
     for op_name, (ew_cfg_val, expected_fn, kw) in run_list:
-        for n in [1, 2, 3, 4, 5, 8, 16, 32, 4096, 131072]:
+        test_ns = [1, 2, 3, 4, 5, 8, 16, 32, 4096, 131072] if out_fp16 else [16]
+        for n in test_ns:
             a_vals = np.random.uniform(-5, 5, n).astype(np.float16)
             if op_name == "FDIV":
                 b_vals = np.random.uniform(0.5, 5, n).astype(np.float16)
@@ -341,13 +389,13 @@ if __name__ == "__main__":
             else:
                 b_vals = np.random.uniform(-5, 5, n).astype(np.float16)
 
-            r = run_op(ew_cfg_val=ew_cfg_val, a_vals=a_vals, b_vals=b_vals, **kw)
-            r_arr = np.array(r, dtype=np.float16)
-            expected = expected_fn(a_vals, b_vals)
+            r = run_op(ew_cfg_val=ew_cfg_val, a_vals=a_vals, b_vals=b_vals, out_fp16=out_fp16, **kw)
+            r_arr = np.array(r, dtype=out_dtype)
+            expected = expected_fn(a_vals.astype(np.float32), b_vals.astype(np.float32)).astype(out_dtype)
             match = np.allclose(r_arr, expected, atol=0.1)
             md = np.max(np.abs(r_arr.astype(np.float64) - expected.astype(np.float64)))
             ok = "PASS" if match else "FAIL"
-            print(f"{op_name:4s} n={n:6d}: {ok}  max_diff={md:.6f}")
+            print(f"{op_name:4s} n={n:6d} out={'fp16' if out_fp16 else 'fp32'}: {ok}  max_diff={md:.6f}")
             assert match, f"{op_name} n={n} failed"
 
     os.close(fd)
