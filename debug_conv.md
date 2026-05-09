@@ -593,6 +593,21 @@ python examples/conv.py PASS
 python examples/conv.py PASS, three serial full sweeps
 ```
 
+Intermittent follow-up after enabling `shapes_sweep`:
+
+1. A later user run hit `conv1d_bs8_8311_632_as_conv2d`, and repeated local sweeps also exposed stale-state failures after the conv1d block in large small-channel 1x1 sweep cases such as `conv2d_1x3_290x290_k1` / `conv2d_1x3_338x338_k1`.
+2. The conv1d mapping itself was still correct; the failing shapes passed in isolation and the failure moved with accumulated NPU state.
+3. Scoped fix: mapped batch-8 conv1d jobs now submit each per-batch non-PC task twice.
+4. Scoped fix: small-channel non-PC 1x1 jobs that are internally height-tiled (`len(tiles) > 1`) also submit each tile twice.
+5. The existing `1024->1001` classifier-head warm-up was strengthened to submit the warm-up task twice, because repeated full-process runs could still expose the old classifier stale-state signature before reaching conv1d.
+
+Verified after the intermittent fix:
+
+```text
+targeted conv1d block -> conv2d_1x3_338x338_k1 transition PASS, 10 consecutive runs
+python examples/conv.py PASS, five serial full sweeps with shapes_sweep enabled
+```
+
 ### Final sweep result
 
 `python examples/conv.py` passed the active sweep for this debugging session.
