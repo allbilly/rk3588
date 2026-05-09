@@ -4,6 +4,9 @@ from fcntl import ioctl
 RKNPU_MEM_KERNEL_MAPPING = 8
 RKNPU_MEM_NON_CACHEABLE = 0
 RKNPU_ACT_RESET = 1
+RKNPU_JOB_PC = 1 << 0
+RKNPU_JOB_BLOCK = 1 << 1
+RKNPU_JOB_PINGPONG = 1 << 2
 FP16_BYTES = 2
 FP32_BYTES = 4
 CBUF_ENTRY_BYTES = 128
@@ -17,6 +20,8 @@ RK_MIN_WIDE_FEATURE_GRAINS = 80
 RK_KN_LINE_STRIDE_START = 512
 PC_CHAIN_TAIL_QWORDS = 4  # enable_npu_units_and_set_next_pc_addr() returns up to 4 QWORDs
 OUTPUT_FP16 = False  # set by --out fp16
+GEMM_INPUT_BANKS = RK_CBUF_BANKS - 2  # reserve 2 banks for the current GEMM layout
+GEMM_MAX_ALIGN_IN = RK_CBUF_BANKS * MIN_CHANNEL_TILE  # 12 groups of 32 channels
 
 class reg:
     # --- Stream/Target IDs (shifted into bits 48-63) ---
@@ -229,6 +234,15 @@ def _gemm_layout(m, n, k):
     align_in = max(aligned_k, align_out)
     eff_k = align_in if align_in != aligned_k else k
     return align_in, align_out, eff_k
+
+def _gemm_output_indices(m, n, align_out, out_fp16):
+    row_stride = align_out * 2 if out_fp16 else align_out
+    row_start = np.arange(m, dtype=np.int64) * row_stride
+    if out_fp16:
+        col_idx = (np.arange(n, dtype=np.int64) // 16) * 32 + (np.arange(n, dtype=np.int64) % 16)
+    else:
+        col_idx = np.arange(n, dtype=np.int64)
+    return row_start[:, None] + col_idx[None, :]
 
 def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma, out_fp16=False):
     align_in, align_out, eff_k = _gemm_layout(m, n, k)
@@ -466,38 +480,37 @@ def run_gemm(m, n, k, a_matrix, b_matrix, out_fp16=False):
 
     # Prepare task_regs with split M
     task_regs = []
-    # TODO fix hardcoded 10/12 for input
-    m_tile =  10 * CBUF_BANK_SIZE // input_row_bytes if align_in <= 12 * 32 else 1    # 12-group line/notch for 32-aligned channel
+    # Keep the current 10-bank input budget, but derive it from the 12-bank CBUF geometry.
+    m_tile = GEMM_INPUT_BANKS * CBUF_BANK_SIZE // input_row_bytes if align_in <= GEMM_MAX_ALIGN_IN else 1
     for start in range(0, m, m_tile):
+        tile_m = min(m_tile, m - start)
         tiled_input_dma = input_mem_create.dma_addr + start * input_row_bytes
         tiled_output_dma = output_mem_create.dma_addr + start * row_stride_bytes
-        task_regs.append(make_gemm_regs(m_tile, n, k, tiled_input_dma, weight_mem_create.dma_addr, tiled_output_dma, out_fp16=out_fp16))
+        task_regs.append(make_gemm_regs(tile_m, n, k, tiled_input_dma, weight_mem_create.dma_addr, tiled_output_dma, out_fp16=out_fp16))
     assert len(task_regs) <= tasks_mem_create.size // ctypes.sizeof(struct_rknpu_task), "task buffer too small"
 
     write_regs_to_npu_task(task_regs)
-    npu_submit(tasks_mem_create.obj_addr, task_count=len(task_regs),
-           flags=((1 << 0) |                          # RKNPU_JOB_PC
-                  ((1 if out_fp16 else 0) << 1) |     # RKNPU_JOB_BLOCK (needed for fp16)
-                  (1 << 2)))                          # RKNPU_JOB_PINGPONG
-    if out_fp16:
-        # TODO: hack! shd not use sleep
-        import time
-        if out_fp16:
-            time.sleep(max(0.005, m * n * k * 3e-8))
-
     out_nbytes = max(256, m * row_stride_bytes)
-    output = np.frombuffer(output_map, dtype=out_dtype, count=out_nbytes // out_bytes).copy()
+    output = np.frombuffer(output_map, dtype=out_dtype, count=out_nbytes // out_bytes)
+    if out_fp16:
+        output[:] = np.nan
+    submit_flags = RKNPU_JOB_PC | RKNPU_JOB_PINGPONG
+    # deep experiments why fp32 failed with RKNPU_JOB_BLOCK
+    if out_fp16:
+        submit_flags |= RKNPU_JOB_BLOCK
+    if npu_submit(tasks_mem_create.obj_addr, task_count=len(task_regs), flags=submit_flags) < 0:
+        raise RuntimeError("npu_submit failed")
 
     if out_fp16:
-        result = np.zeros((m, n), dtype=out_dtype)
-        for mi in range(m):
-            base = mi * row_stride_elems
-            for ni in range(n):
-                result[mi, ni] = output[base + (ni // 16) * 32 + (ni % 16)]
+        expected = _gemm_output_indices(m, n, align_out, True)
+        result = output[expected].copy().reshape(m, n)
+        if not np.isfinite(result).all():
+            raise RuntimeError("fp16 output incomplete after blocking submit")
         return result
-    else:
-        row_start = np.arange(m) * row_stride_elems
-        return output[row_start[:, None] + np.arange(n)]
+
+    output = output.copy()
+    row_start = np.arange(m) * row_stride_elems
+    return output[row_start[:, None] + np.arange(n)]
 
 if __name__ == "__main__":
     out_fp16 = "--out" in sys.argv and sys.argv[sys.argv.index("--out") + 1] == "fp16"
