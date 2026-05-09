@@ -1,4 +1,4 @@
-import os, mmap, ctypes, numpy as np
+import os, mmap, sys, ctypes, numpy as np
 from fcntl import ioctl
 
 RKNPU_MEM_KERNEL_MAPPING = 8
@@ -16,6 +16,7 @@ RK_LINE_STRIDE_GROUP_CAP = 13
 RK_MIN_WIDE_FEATURE_GRAINS = 80 
 RK_KN_LINE_STRIDE_START = 512
 PC_CHAIN_TAIL_QWORDS = 4  # enable_npu_units_and_set_next_pc_addr() returns up to 4 QWORDs
+OUTPUT_FP16 = False  # set by --out fp16
 
 class reg:
     # --- Stream/Target IDs (shifted into bits 48-63) ---
@@ -199,7 +200,10 @@ def npu_submit(task_obj_addr, task_count=1, flags=0x1):
     submit_struct.subcore_task[0] = rknpu_subcore_task(task_start=0, task_number=task_count)
     submit_struct.subcore_task[1] = rknpu_subcore_task(task_start=task_count, task_number=0)
     submit_struct.subcore_task[2] = rknpu_subcore_task(task_start=task_count, task_number=0)
-    return ioctl(fd, DRM_IOCTL_RKNPU_SUBMIT, submit_struct)
+    ret = ioctl(fd, DRM_IOCTL_RKNPU_SUBMIT, submit_struct)
+    if ret < 0:
+        print(f"npu_submit failed: ret={ret}")
+    return ret
 
 fd = os.open(f"/dev/dri/card1", os.O_RDWR)
 task_map, tasks_mem_create = mem_allocate(fd, size=64*1024, flags=RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
@@ -226,9 +230,11 @@ def _gemm_layout(m, n, k):
     eff_k = align_in if align_in != aligned_k else k
     return align_in, align_out, eff_k
 
-def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
+def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma, out_fp16=False):
     align_in, align_out, eff_k = _gemm_layout(m, n, k)
     input_row_bytes = align_in * FP16_BYTES
+    out_precision = 2 if out_fp16 else 5
+    size_e = 1 if out_fp16 else 3
 
     # Pre-loads two banks worth of rows, even becoz NVDLA CSC does paired-atomics
     even_rows_per_two_banks = (_ceil_div(2 * CBUF_BANK_SIZE, input_row_bytes) + 1) & ~1   
@@ -326,7 +332,7 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
                 (2 << 1))                             # DPU_FEATURE_MODE_CFG_MODE
         ),
         E(reg.DPU,  reg.DATA_FORMAT,
-                ((5 << 29) |                          # DPU_DATA_FORMAT_OUT_PRECISION
+                ((out_precision << 29) |              # DPU_DATA_FORMAT_OUT_PRECISION
                 (2 << 26) |                           # DPU_DATA_FORMAT_PROC_PRECISION
                 2)                                    # DPU_DATA_FORMAT_IN_PRECISION
         ),
@@ -351,9 +357,9 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
                 1)                                    # DPU_BS_CFG_BS_BYPASS
         ),
         E(reg.DPU,  reg.BS_OW_CFG,
-                ((3 << 8) |                           # DPU_BS_OW_CFG_SIZE_E_2
-                (3 << 5)  |                           # DPU_BS_OW_CFG_SIZE_E_1
-                (3 << 2)  |                           # DPU_BS_OW_CFG_SIZE_E_0
+                ((size_e << 8) |                      # DPU_BS_OW_CFG_SIZE_E_2
+                (size_e << 5)  |                      # DPU_BS_OW_CFG_SIZE_E_1
+                (size_e << 2)  |                      # DPU_BS_OW_CFG_SIZE_E_0
                 (1 << 1))                             # DPU_BS_OW_CFG_OD_BYPASS
         ),
         E(reg.DPU,  reg.WDMA_SIZE_0, align_out - 1),
@@ -375,9 +381,14 @@ def make_gemm_regs(m, n, k, in_dma, wt_dma, out_dma):
                 (1 << 1)  |                           # DPU_EW_CFG_EW_OP_BYPASS
                 1)                                    # DPU_EW_CFG_EW_BYPASS
         ),
+    ]
+    if out_fp16:
+        npu_regs.append(E(reg.DPU, reg.OUT_CVT_SCALE,
+                ((1 << 16) | 1)                        # DPU_OUT_CVT_SCALE (FP32TOFP16_EN)
+        ))
+    npu_regs += [
         E(reg.DPU,  reg.SURFACE_ADD,
-                ((1 * 4) << 4)                        # DPU_SURFACE_ADD = DPU_DST_SURF_STRIDE*4
-                # TODO is times 4 really needed
+                ((1 * 4) << 4)                        # DPU_SURFACE_ADD
         ),
     ]
     return npu_regs
@@ -388,10 +399,17 @@ def write_regs_to_npu_task(task_regs):
                             (6 << 1) |                           # PC_OPERATION_ENABLE_RESERVED_0 = units to enable(DPU/CNA/PPU), info not in TRM
                             1)                                   # PC_OPERATION_ENABLE_OP_EN
 
-        if next_offset is None: return [ enable_npu_units ]
+        if next_offset is None:
+            # PC chain tail: NOP + reg_amounts=0 + VERSION + enable (matching mtx512 format)
+            return [
+                E(0x0001, 0, 0),                                  # NOP separator
+                E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, 0),       # PC_REGISTER_AMOUNTS = 0 (end chain)
+                E(reg.VERSION, 0, 0),                            # VERSION (OP_40 equivalent)
+                enable_npu_units,
+            ]
         next_addr = regcmd_mem_create.dma_addr + next_offset* ctypes.sizeof(ctypes.c_uint64)
         return [
-            E(reg.PC_REG, reg.PC_BASE_ADDRESS, next_addr & 0xFFFFFFF0), # rounds down to nearest multiple of 16
+            E(reg.PC_REG, reg.PC_BASE_ADDRESS, next_addr & 0xFFFFFFF0),
             E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, _ceil_div(next_task_regs_len, 2) + 1),
             E(reg.VERSION, 0, 0),
             enable_npu_units
@@ -419,17 +437,19 @@ def write_regs_to_npu_task(task_regs):
         # write flag for npu_tasks
         npu_tasks[idx].regcmd_addr = regcmd_mem_create.dma_addr + base * ctypes.sizeof(ctypes.c_uint64)
         npu_tasks[idx].regcfg_amount = len(regs)
-        npu_tasks[idx].op_idx = 4
-        npu_tasks[idx].enable_mask = 0x18                  # Downstream raw GEMM task descriptor mask.
+        npu_tasks[idx].op_idx = 0
+        npu_tasks[idx].enable_mask = 0xd                   # PC | CNA | DPU enable
         npu_tasks[idx].int_mask = (1 << 8) | (1 << 9)      # PC_INTERRUPT_MASK_DPU_0 | DPU_1.
         npu_tasks[idx].int_clear = 0x1ffff                 # Downstream RKNPU_INT_CLEAR clears all driver status bits.
         
-def run_gemm(m, n, k, a_matrix, b_matrix):
+def run_gemm(m, n, k, a_matrix, b_matrix, out_fp16=False):
     align_in, align_out, _ = _gemm_layout(m, n, k)
-    input_row_bytes  = align_in  * FP16_BYTES     
-    output_row_bytes = align_out * FP32_BYTES   
+    input_row_bytes  = align_in  * FP16_BYTES
+    out_bytes = FP16_BYTES if out_fp16 else FP32_BYTES
+    out_dtype = np.float16 if out_fp16 else np.float32
+    row_stride_bytes = align_out * 4
+    row_stride_elems = align_out * 2 if out_fp16 else align_out
 
-    # pack_input_row_major
     input_packed = np.zeros(align_in * m, dtype=np.float16)
     input_packed.reshape(m, align_in)[:, :k] = a_matrix[:, :k]
     input_packed = input_packed.view(np.uint16).tolist()
@@ -453,24 +473,37 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
     m_tile =  10 * CBUF_BANK_SIZE // input_row_bytes if align_in <= 12 * 32 else 1    # 12-group line/notch for 32-aligned channel
     for start in range(0, m, m_tile):
         tiled_input_dma = input_mem_create.dma_addr + start * input_row_bytes
-        tiled_output_dma = output_mem_create.dma_addr + start * output_row_bytes
-        task_regs.append(make_gemm_regs(m_tile, n, k, tiled_input_dma, weight_mem_create.dma_addr, tiled_output_dma))
+        tiled_output_dma = output_mem_create.dma_addr + start * row_stride_bytes
+        task_regs.append(make_gemm_regs(m_tile, n, k, tiled_input_dma, weight_mem_create.dma_addr, tiled_output_dma, out_fp16=out_fp16))
     assert len(task_regs) <= tasks_mem_create.size // ctypes.sizeof(struct_rknpu_task), "task buffer too small"
 
     write_regs_to_npu_task(task_regs)
     npu_submit(tasks_mem_create.obj_addr, task_count=len(task_regs),
            flags=((1 << 0) |                          # RKNPU_JOB_PC
-                  (0 << 1) |                          # RKNPU_JOB_BLOCK (absence of NONBLOCK)
+                  ((1 if out_fp16 else 0) << 1) |     # RKNPU_JOB_BLOCK (needed for fp16)
                   (1 << 2)))                          # RKNPU_JOB_PINGPONG
+    if out_fp16:
+        # TODO: hack! shd not use sleep
+        import time
+        if out_fp16:
+            time.sleep(max(0.005, m * n * k * 3e-8))
 
-    out_nbytes = max(256, ((m - 1) * align_out + n) * FP32_BYTES)
-    output = np.frombuffer(output_map, dtype=np.float32, count=out_nbytes // 4).copy()
+    out_nbytes = max(256, m * row_stride_bytes)
+    output = np.frombuffer(output_map, dtype=out_dtype, count=out_nbytes // out_bytes).copy()
 
-    # unpack_row_major
-    row_start = np.arange(m) * align_out
-    return output[row_start[:, None] + np.arange(n)]
+    if out_fp16:
+        result = np.zeros((m, n), dtype=out_dtype)
+        for mi in range(m):
+            base = mi * row_stride_elems
+            for ni in range(n):
+                result[mi, ni] = output[base + (ni // 16) * 32 + (ni % 16)]
+        return result
+    else:
+        row_start = np.arange(m) * row_stride_elems
+        return output[row_start[:, None] + np.arange(n)]
 
 if __name__ == "__main__":
+    out_fp16 = "--out" in sys.argv and sys.argv[sys.argv.index("--out") + 1] == "fp16"
     test_cases = [
         (2, 2, 1,
         np.array([[1], [3]], dtype=np.float16),
@@ -484,13 +517,13 @@ if __name__ == "__main__":
         test_cases.append((m, n, k, a, b))
 
     for m, n, k, a, b in test_cases:
-        print(f"\n{m}x{n}x{k}:")
-        r = run_gemm(m, n, k, a, b)
+        print(f"\n{m}x{n}x{k} ({'fp16' if out_fp16 else 'fp32'}):")
+        r = run_gemm(m, n, k, a, b, out_fp16=out_fp16)
         if r is None:
             continue
-        expected = a @ b
+        expected = (a @ b).astype(np.float16) if out_fp16 else a @ b
         ok = np.allclose(r, expected, atol=0.1)
-        md = np.max(np.abs(r - expected))
+        md = np.max(np.abs(r.astype(np.float64) - expected.astype(np.float64)))
         print(f"  {'PASS' if ok else 'FAIL'} (max_diff={md:.4f})")
         assert ok , f"test shape {m, n, k} failed"
     os.close(fd)
