@@ -1,15 +1,22 @@
+import os, mmap, sys, ctypes, numpy as np
 from fcntl import ioctl
-import os, mmap, sys
-import ctypes
-import numpy as np
+
+RKNPU_MEM_KERNEL_MAPPING = 8
+RKNPU_MEM_NON_CACHEABLE = 0
+RKNPU_ACT_RESET = 1
+RKNPU_JOB_PC = 1 << 0
+RKNPU_JOB_BLOCK = 1 << 1
+RKNPU_JOB_PINGPONG = 1 << 2
 
 class reg:
     # --- Stream/Target IDs (shifted into bits 48-63) ---
-    TARGET_CNA  = 0x0201   # CNA (Convolution/Matrix unit)
-    TARGET_CORE = 0x0801   # CORE (Matrix compute engine)
-    TARGET_DPU  = 0x1001   # DPU (Elementwise/DPU unit)
-    TARGET_RDMA = 0x2001   # RDMA (Read DMA for inputs/weights)
-    TARGET_PC   = 0x0081   # PC (Program Control / operation enable)
+    CNA  = 0x0201   # CNA (Convolution/Matrix unit)
+    CORE = 0x0801   # CORE (Matrix compute engine)
+    DPU  = 0x1001   # DPU (Elementwise/DPU unit)
+    RDMA = 0x2001   # RDMA (Read DMA for inputs/weights)
+    PC   = 0x0081   # PC (Program Control / operation enable)
+    PC_REG = 0x0101 # PC chain registers
+    VERSION = 0x0041
 
     # --- PC (0x0000) ---
     OPERATION_ENABLE    = 0x0008   # PC operation enable
@@ -74,10 +81,6 @@ class reg:
     CORE_DATAOUT_SIZE_1    = 0x3018   # CORE dataout size 1 (channel)
     CORE_RESERVED_3030     = 0x3030   # CORE reserved (must be zeroed)
 
-RKNPU_MEM_KERNEL_MAPPING = 8
-RKNPU_MEM_NON_CACHEABLE = 0
-RKNPU_ACT_RESET = 1
-
 fd = os.open(f"/dev/dri/card1", os.O_RDWR)
 
 class rknpu_mem_create(ctypes.Structure):
@@ -127,13 +130,6 @@ class rknpu_submit(ctypes.Structure):
         ("subcore_task", rknpu_subcore_task * 5),
     ]
 
-def _IOWR(type_, nr, size):
-    return (3 << 30) | (ord(type_) << 8) | (nr << 0) | (size << 16)
-DRM_IOCTL_RKNPU_MEM_CREATE = _IOWR('d', 0x42, ctypes.sizeof(rknpu_mem_create))
-DRM_IOCTL_RKNPU_MEM_MAP = _IOWR('d', 0x43, ctypes.sizeof(rknpu_mem_map))
-DRM_IOCTL_RKNPU_SUBMIT = _IOWR('d', 0x41, ctypes.sizeof(rknpu_submit))
-DRM_IOCTL_RKNPU_ACTION = _IOWR('d', 0x40, ctypes.sizeof(rknpu_action))
-
 class struct_rknpu_task(ctypes.Structure):
     _fields_ = [
         ("flags", ctypes.c_uint32),
@@ -147,51 +143,49 @@ class struct_rknpu_task(ctypes.Structure):
         ("regcmd_addr", ctypes.c_uint64),
     ]
 
-def mem_allocate(fd, size, flags=0):
-    mem_create = rknpu_mem_create(
-        flags=flags, #0x10 | 0x2,  # KERNEL_MAPPING | NON_CACHEABLE
-        size=size
-    )
-    ret = ioctl(fd, DRM_IOCTL_RKNPU_MEM_CREATE, mem_create)
-    print(f"ret={ret}, handle={mem_create.handle}, obj_addr={mem_create.obj_addr:#x}, dma_addr={mem_create.dma_addr:#x}")
+def _IOWR(type_, nr, size):
+    return (3 << 30) | (ord(type_) << 8) | (nr << 0) | (size << 16)
+DRM_IOCTL_RKNPU_MEM_CREATE = _IOWR('d', 0x42, ctypes.sizeof(rknpu_mem_create))
+DRM_IOCTL_RKNPU_MEM_MAP = _IOWR('d', 0x43, ctypes.sizeof(rknpu_mem_map))
+DRM_IOCTL_RKNPU_SUBMIT = _IOWR('d', 0x41, ctypes.sizeof(rknpu_submit))
+DRM_IOCTL_RKNPU_ACTION = _IOWR('d', 0x40, ctypes.sizeof(rknpu_action))
 
-    # Map memory to access from userspace
+def mem_allocate(fd, size, flags=0):
+    mem_create = rknpu_mem_create(flags=flags, size=size)
+    ioctl(fd, DRM_IOCTL_RKNPU_MEM_CREATE, mem_create)
     mem_map = rknpu_mem_map(handle=mem_create.handle)
     ioctl(fd, DRM_IOCTL_RKNPU_MEM_MAP, mem_map)
     buf = mmap.mmap(fd, mem_create.size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=mem_map.offset)
-    print(f"Memory mapped at offset={mem_map.offset:#x}")
     return buf, mem_create
 
-def submit(task_obj_addr):
-    submit_struct = rknpu_submit(
-        flags=0x1 | 0x2 | 0x4,  # RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG
-        timeout=6000,
-        task_start=0,
-        task_number=1,
-        task_counter=0,
-        priority=0,
-        task_obj_addr=task_obj_addr,
-        iommu_domain_id=0,
-        reserved=0,
-        task_base_addr=0,
-        hw_elapse_time=0,
-        core_mask=1,
-        fence_fd=-1,
-    )
-    # struct len is 5 but only 3 NPU core
-    submit_struct.subcore_task[0] = rknpu_subcore_task(task_start=0, task_number=1)
-    submit_struct.subcore_task[1] = rknpu_subcore_task(task_start=1, task_number=0)
-    submit_struct.subcore_task[2] = rknpu_subcore_task(task_start=2, task_number=0)
-    submit_struct.subcore_task[3] = rknpu_subcore_task(task_start=0, task_number=0)
-    submit_struct.subcore_task[4] = rknpu_subcore_task(task_start=0, task_number=0)
+def npu_reset(fd):
+    return ioctl(fd, DRM_IOCTL_RKNPU_ACTION, rknpu_action(flags=RKNPU_ACT_RESET, value=0))
 
+def npu_submit(task_obj_addr, task_count=1, flags=0x1 | 0x2 | 0x4):
+    npu_reset(fd)
+    submit_struct = rknpu_submit(
+        flags=flags, timeout=6000, task_start=0, task_number=task_count,
+        task_counter=0, priority=0, task_obj_addr=task_obj_addr,
+        iommu_domain_id=0, reserved=0, task_base_addr=0, hw_elapse_time=0, core_mask=1, fence_fd=-1,
+    )
+    submit_struct.subcore_task[0] = rknpu_subcore_task(task_start=0, task_number=task_count)
+    submit_struct.subcore_task[1] = rknpu_subcore_task(task_start=task_count, task_number=0)
+    submit_struct.subcore_task[2] = rknpu_subcore_task(task_start=task_count, task_number=0)
     return ioctl(fd, DRM_IOCTL_RKNPU_SUBMIT, submit_struct)
 
-def reset_npu(fd):
-    action = rknpu_action(flags=RKNPU_ACT_RESET, value=0)
-    ret = ioctl(fd, DRM_IOCTL_RKNPU_ACTION, action)
-    print(f"reset_npu ret={ret}")
-    return ret
+task_map, tasks_mem_create = mem_allocate(fd, size=1024, flags=RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
+regcmd_map, regcmd_mem_create = mem_allocate(fd, size=1024, flags=RKNPU_MEM_NON_CACHEABLE)
+input_map, input_mem_create = mem_allocate(fd, size=4*1024*1024, flags=RKNPU_MEM_NON_CACHEABLE)
+weight_map, weight_mem_create = mem_allocate(fd, size=4*1024*1024, flags=RKNPU_MEM_NON_CACHEABLE)
+output_map, output_mem_create = mem_allocate(fd, size=4*1024*1024, flags=RKNPU_MEM_NON_CACHEABLE)
+npu_tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
+npu_regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
+
+def _align_up(x, align):
+    return (x + align - 1) // align * align
+
+def E(target, reg_addr, value):
+    return (target << 48) | ((value & 0xFFFFFFFF) << 16) | reg_addr
 
 # EW_CFG values for each op
 # Base config: data_mode=1, data_size=2, relu_bypass=1, lut_bypass=1, op_src=1
@@ -202,58 +196,77 @@ EW_CFG_SUB  = _EW_BASE | (4 << 16)
 EW_CFG_MAX  = _EW_BASE
 EW_CFG_NEG  = EW_CFG_MUL
 
-task_map, tasks_mem_create = mem_allocate(fd, size=1024, flags=RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
-regcmd_map, regcmd_mem_create = mem_allocate(fd, size=1024, flags=RKNPU_MEM_NON_CACHEABLE)
-input_map, input_mem_create = mem_allocate(fd, size=4*1024*1024, flags=RKNPU_MEM_NON_CACHEABLE)
-weight_map, weight_mem_create = mem_allocate(fd, size=4*1024*1024, flags=RKNPU_MEM_NON_CACHEABLE)
-output_map, output_mem_create = mem_allocate(fd, size=4*1024*1024, flags=RKNPU_MEM_NON_CACHEABLE)
+def write_regs_to_npu_task(npu_regs):
+    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), 0, task_map.size())
+    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), 0, regcmd_map.size())
 
-tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
-regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
+    tail = [
+        E(reg.PC_REG, 0x0010, 0),
+        E(reg.PC_REG, 0x0014, 0),
+        E(reg.VERSION, 0, 0),
+        E(reg.PC, reg.OPERATION_ENABLE, 0x18),
+    ]
+    for i, qword in enumerate(npu_regs):
+        npu_regcmd[i] = qword
+    for i, qword in enumerate(tail):
+        npu_regcmd[len(npu_regs) + i] = qword
 
-def write_regs(npu_regs, clear_count):
-    for i in range(clear_count):
-        regcmd[i] = 0
-    for i in range(len(npu_regs)):
-        regcmd[i] = npu_regs[i]
-
-def setup_task(op_idx, enable_mask, reg_count):
-    tasks[0].flags  = 0;
-    tasks[0].op_idx = op_idx;
-    tasks[0].enable_mask = enable_mask;
-    tasks[0].int_mask = 0x300;
-    tasks[0].int_clear = 0x1ffff;
-    tasks[0].int_status = 0;
-    tasks[0].regcfg_amount = reg_count
-    tasks[0].regcfg_offset = 0;
-    tasks[0].regcmd_addr = regcmd_mem_create.dma_addr
-
+    npu_tasks[0].regcmd_addr = regcmd_mem_create.dma_addr
+    npu_tasks[0].regcfg_amount = len(npu_regs)
+    npu_tasks[0].op_idx = 4
+    npu_tasks[0].enable_mask = 0x18
+    npu_tasks[0].int_mask = (1 << 8) | (1 << 9)
+    npu_tasks[0].int_clear = 0x1ffff
 
 def run_op(ew_cfg_val, a_vals, b_vals, neg_op=False, fdiv_op=False):
     n = len(a_vals)
     dataout_width = (n + 7) // 8 - 1
 
-    out_cvt = 1 if fdiv_op else 0x10001
-    feat_cfg = 0x00017841 if fdiv_op else 0x00017849
     npu_regs = [
-        (reg.TARGET_DPU  << 48) | (0x000001e5 << 16) | reg.FEATURE_MODE_CFG,
-        (reg.TARGET_DPU  << 48) | (0x48000002 << 16) | reg.DATA_FORMAT,
-        (reg.TARGET_DPU  << 48) | (dataout_width << 16) | reg.DATA_CUBE_WIDTH,
-        (reg.TARGET_DPU  << 48) | (0x00070007 << 16) | reg.DATA_CUBE_CHANNEL,
-        (reg.TARGET_DPU  << 48) | (ew_cfg_val << 16) | reg.EW_CFG,
-        (reg.TARGET_DPU  << 48) | (out_cvt << 16) | reg.OUT_CVT_SCALE,
-        (reg.TARGET_RDMA << 48) | (dataout_width << 16) | reg.RDMA_DATA_CUBE_WIDTH,
-        (reg.TARGET_RDMA << 48) | (0x00000000 << 16) | reg.RDMA_DATA_CUBE_HEIGHT,
-        (reg.TARGET_RDMA << 48) | (0x00000007 << 16) | reg.RDMA_DATA_CUBE_CHANNEL,
-        (reg.TARGET_RDMA << 48) | (0x40000008 << 16) | reg.RDMA_ERDMA_CFG,
-        (reg.TARGET_DPU  << 48) | ((output_mem_create.dma_addr & 0xFFFFFFFF) << 16) | reg.DST_BASE_ADDR,
-        (reg.TARGET_RDMA << 48) | ((input_mem_create.dma_addr & 0xFFFFFFFF) << 16) | reg.RDMA_SRC_BASE_ADDR,
-        (reg.TARGET_RDMA << 48) | ((weight_mem_create.dma_addr & 0xFFFFFFFF) << 16) | reg.RDMA_EW_BASE_ADDR,
-        (reg.TARGET_RDMA << 48) | (feat_cfg << 16) | reg.RDMA_FEATURE_MODE_CFG,
-        (reg.TARGET_PC   << 48) | (0x00000018 << 16) | reg.OPERATION_ENABLE,
+        E(reg.DPU,  reg.FEATURE_MODE_CFG,
+            ((15 << 5) |                          # DPU_FEATURE_MODE_CFG_BURST_LEN
+             (2 << 1)  |                          # DPU_FEATURE_MODE_CFG_OUTPUT_MODE
+             1)                                    # DPU_FEATURE_MODE_CFG_FLYING_MODE
+        ),
+        E(reg.DPU,  reg.DATA_FORMAT,
+            ((2 << 29) |                          # DPU_DATA_FORMAT_OUT_PRECISION(fp16)
+             (2 << 26) |                          # DPU_DATA_FORMAT_IN_PRECISION(fp16)
+             2)                                    # DPU_DATA_FORMAT_PROC_PRECISION(fp16)
+        ),
+        E(reg.DPU,  reg.DATA_CUBE_WIDTH, dataout_width),   # DPU_DATA_CUBE_WIDTH_WIDTH
+        E(reg.DPU,  reg.DATA_CUBE_HEIGHT, 0),               # DPU_DATA_CUBE_HEIGHT_HEIGHT
+        E(reg.DPU,  reg.DATA_CUBE_NOTCH, 0),                # DPU_DATA_CUBE_NOTCH
+        E(reg.DPU,  reg.DATA_CUBE_CHANNEL,
+            ((7 << 16) |                          # DPU_DATA_CUBE_CHANNEL_ORIG_CHANNEL
+             7)                                    # DPU_DATA_CUBE_CHANNEL_CHANNEL
+        ),
+        E(reg.DPU,  reg.EW_CFG, ew_cfg_val),      # DPU_EW_CFG (set per op)
+        E(reg.DPU,  reg.OUT_CVT_SCALE,
+            (1 if fdiv_op else                     # DPU_OUT_CVT_SCALE_OUT_CVT_SCALE
+             ((1 << 16) | 1))                      # DPU_OUT_CVT_SCALE_FP32TOFP16_EN | scale
+        ),
+        E(reg.RDMA, reg.RDMA_DATA_CUBE_WIDTH, dataout_width),  # RDMA width
+        E(reg.RDMA, reg.RDMA_DATA_CUBE_HEIGHT, 0),             # RDMA height
+        E(reg.RDMA, reg.RDMA_DATA_CUBE_CHANNEL,
+            7                                     # RDMA channel (8 elements per atom)
+        ),
+        E(reg.RDMA, reg.RDMA_ERDMA_CFG,
+            ((1 << 30) |                          # DPU_RDMA_RDMA_ERDMA_CFG_ERDMA_DATA_MODE
+             (2 << 2))                            # DPU_RDMA_RDMA_ERDMA_CFG_ERDMA_DATA_SIZE
+        ),
+        E(reg.DPU,  reg.DST_BASE_ADDR, output_mem_create.dma_addr ),
+        E(reg.RDMA, reg.RDMA_SRC_BASE_ADDR, input_mem_create.dma_addr ),
+        E(reg.RDMA, reg.RDMA_EW_BASE_ADDR, weight_mem_create.dma_addr ),
+        E(reg.RDMA, reg.RDMA_FEATURE_MODE_CFG,
+            ((2 << 15) |                          # DPU_RDMA_RDMA_FEATURE_MODE_CFG_IN_PRECISION(fp16)
+             (15 << 11) |                         # DPU_RDMA_RDMA_FEATURE_MODE_CFG_BURST_LEN
+             (2 << 5)  |                          # DPU_RDMA_RDMA_FEATURE_MODE_CFG_PROC_PRECISION(fp16)
+             ((not fdiv_op) << 3) |               # DPU_RDMA_RDMA_FEATURE_MODE_CFG_MRDMA_FP16TOFP32_EN
+             1)                                    # DPU_RDMA_RDMA_FEATURE_MODE_CFG_FLYING_MODE
+        ),
     ]
 
-    write_regs(npu_regs, 16)
+    write_regs_to_npu_task(npu_regs)
 
     a_packed = np.array(a_vals, dtype=np.float16).view(np.uint16)
     ct_inputs = (ctypes.c_uint16 * n).from_buffer(input_map)
@@ -264,11 +277,7 @@ def run_op(ew_cfg_val, a_vals, b_vals, neg_op=False, fdiv_op=False):
     ct_weights = (ctypes.c_uint16 * n).from_buffer(weight_map)
     ct_weights[:] = w_packed.tolist()
 
-    setup_task(4, 0x18, len(npu_regs))
-
-    reset_npu(fd)
-    ret = submit(tasks_mem_create.obj_addr)
-    print(f"SUBMIT ret={ret}")
+    npu_submit(tasks_mem_create.obj_addr)
 
     return np.frombuffer(output_map, dtype=np.float16, count=n).copy().tolist()
 
@@ -283,12 +292,6 @@ OPS = {
 }
 
 if __name__ == "__main__":
-    a = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], dtype=np.float16)
-    b = np.array([8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0], dtype=np.float16)
-    c = np.array([2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0], dtype=np.float16)
-
-    b_vals_map = {"ADD": b, "MUL": b, "SUB": b, "MAX": c, "NEG": b, "FDIV": c}
-
     mode = sys.argv[1].upper() if len(sys.argv) > 1 else "ALL"
 
     if mode == "ALL":
@@ -299,11 +302,24 @@ if __name__ == "__main__":
         print(f"Unknown mode '{mode}'. Options: ALL, {', '.join(OPS.keys())}")
         sys.exit(1)
 
+    np.random.seed(42)
     for op_name, (ew_cfg_val, expected_fn, kw) in run_list:
-        r = run_op(ew_cfg_val=ew_cfg_val, a_vals=a, b_vals=b_vals_map[op_name], **kw)
-        r_arr = np.array(r, dtype=np.float16)
-        expected = expected_fn(a, b_vals_map[op_name])
-        match = np.allclose(r_arr, expected, atol=0.1)
-        print(f"{op_name:4s} NPU={r_arr} expected={expected} {'PASS' if match else 'FAIL'}")
+        for n in [1, 2, 3, 4, 5, 8, 16, 32]:
+            a_vals = np.random.uniform(-5, 5, n).astype(np.float16)
+            if op_name == "FDIV":
+                b_vals = np.random.uniform(0.5, 5, n).astype(np.float16)
+            elif op_name == "MAX":
+                b_vals = np.random.uniform(-5, 5, n).astype(np.float16)
+            else:
+                b_vals = np.random.uniform(-5, 5, n).astype(np.float16)
+
+            r = run_op(ew_cfg_val=ew_cfg_val, a_vals=a_vals, b_vals=b_vals, **kw)
+            r_arr = np.array(r, dtype=np.float16)
+            expected = expected_fn(a_vals, b_vals)
+            match = np.allclose(r_arr, expected, atol=0.1)
+            md = np.max(np.abs(r_arr.astype(np.float64) - expected.astype(np.float64)))
+            ok = "PASS" if match else "FAIL"
+            print(f"{op_name:4s} n={n:2d}: {ok}  max_diff={md:.6f}")
+            assert match, f"{op_name} n={n} failed"
 
     os.close(fd)

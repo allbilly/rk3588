@@ -15,6 +15,7 @@ RK_LINE_STRIDE_GROUP_CAP = 13
 # minimum pipeline depth needed to keep the CSC→CMAC→CACC path fed, <80 result is wrong
 RK_MIN_WIDE_FEATURE_GRAINS = 80 
 RK_KN_LINE_STRIDE_START = 512
+PC_CHAIN_TAIL_QWORDS = 4  # enable_npu_units_and_set_next_pc_addr() returns up to 4 QWORDs
 
 class reg:
     # --- Stream/Target IDs (shifted into bits 48-63) ---
@@ -400,7 +401,7 @@ def write_regs_to_npu_task(task_regs):
     offset = 0
     for regs in task_regs:
         offsets.append(offset)
-        offset += _align_up(len(regs) + 4, 2)
+        offset += _align_up(len(regs) + PC_CHAIN_TAIL_QWORDS, 2)
     assert offset <= regcmd_mem_create.size // ctypes.sizeof(ctypes.c_uint64), "regcmd buffer too small"
 
     # chain mutilple tasks in one npu_submit

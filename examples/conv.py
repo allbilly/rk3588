@@ -17,6 +17,7 @@ CBUF_BANK_SIZE = CBUF_ENTRIES_PER_BANK * CBUF_ENTRY_BYTES
 # strides corrupt the tail, while the regular c16 path is fine at 1024.
 RK_MAX_CONV_FLAT_STRIDE = 992
 UNPACK_C2 = FP16_ATOM_ELEMENTS // FP16_BYTES
+PC_CHAIN_TAIL_QWORDS = 4  # enable_npu_units() returns 4 QWORDs: PC_BASE_ADDRESS, PC_REGISTER_AMOUNTS, VERSION, OPERATION_ENABLE
 
 class reg:
     # --- Stream/Target IDs (shifted into bits 48-63) ---
@@ -541,6 +542,7 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
         E(reg.DPU, reg.DST_SURF_STRIDE, out_width_stride << 4), # DPU_DST_SURF_STRIDE_DST_SURF_STRIDE
         E(reg.DPU, reg.DATA_CUBE_WIDTH, out_w - 1),             # DPU_DATA_CUBE_WIDTH_WIDTH
         E(reg.DPU, reg.DATA_CUBE_HEIGHT, out_h - 1),            # DPU_DATA_CUBE_HEIGHT_HEIGHT
+        E(reg.DPU, reg.DATA_CUBE_NOTCH, 0),                    # Must be set 0, otherwise corrupt next run
         E(reg.DPU, reg.DATA_CUBE_CHANNEL,
             ((out_c - 1 << 16) |            # DPU_DATA_CUBE_CHANNEL_ORIG_CHANNEL
              out_channel_field)),           # DPU_DATA_CUBE_CHANNEL_CHANNEL
@@ -603,7 +605,7 @@ def write_regs_to_npu_task(task_regs):
     offset = 0
     for regs in task_regs:
         offsets.append(offset)
-        offset += _align_up(len(regs) + 4, 2)
+        offset += _align_up(len(regs) + PC_CHAIN_TAIL_QWORDS, 2)
     assert offset <= regcmd_mem_create.size // ctypes.sizeof(ctypes.c_uint64), "regcmd buffer too small"
 
     # add tail enable, write to npu_tasks
