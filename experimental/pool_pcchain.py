@@ -7,7 +7,8 @@ RKNPU_MEM_KERNEL_MAPPING = 8
 RKNPU_MEM_NON_CACHEABLE = 0
 RKNPU_ACT_RESET = 1
 RKNPU_JOB_PC = 0x1
-RKNPU_JOB_BLOCK = 0x2
+RKNPU_JOB_BLOCK = 0 << 1
+RKNPU_JOB_NONBLOCK = 1 << 1
 RKNPU_JOB_PINGPONG = 0x4
 
 POOL_OPS = ("min", "max", "avg", "globalmin", "globalmax", "globalavg")

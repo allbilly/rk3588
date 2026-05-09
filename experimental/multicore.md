@@ -358,7 +358,7 @@ Conclusion:
 - Next step should be a register diff between the official `ops_rknn` dump and `examples/gemm.py`'s emitted GEMM stream, especially around the task header and PC tail, before trying more split submits.
 
 Experiment updates after comparing `rknnops.h`:
-- `experimental/rknpu_common.py` now defines `RKNPU_JOB_BLOCK = 0x2`.
+- `experimental/rknpu_common.py` now defines `RKNPU_JOB_BLOCK = 0 << 1`; bit 1 is `RKNPU_JOB_NONBLOCK`.
 - `experimental/multicore_elementwise.py --pc-chain` now encodes `REG_PC_BASE_ADDRESS` without setting `PC_SEL`.
 - `--pc-chain` now patches `REG_PC_REGISTER_AMOUNTS` with the current segment length, matching `rknnops.h`.
 - Added `--task-op-idx` to test `op_idx=1` versus the previous `op_idx=4`.
@@ -373,7 +373,7 @@ python experimental/multicore_elementwise.py --n 4096 --ops ADD,ADD,ADD --core-m
 Result:
 
 ```text
-flags=0x7
+flags=0x5
 core_mask=0x1
 task_number=3
 subcore_task[0]=(0,3)
@@ -392,7 +392,7 @@ python experimental/multicore_elementwise.py --n 4096 --ops ADD,ADD,ADD --core-m
 Result:
 
 ```text
-flags=0x7
+flags=0x5
 core_mask=0x1
 task_number=3
 subcore_task[0]=(0,3)

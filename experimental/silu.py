@@ -146,7 +146,7 @@ def mem_allocate(fd, size, flags=0):
 
 def submit(task_obj_addr):
     submit_struct = rknpu_submit(
-        flags=0x1 | 0x2 | 0x4,  # RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG
+        flags=0x1 | 0x4,  # RKNPU_JOB_PC | RKNPU_JOB_BLOCK(0) | RKNPU_JOB_PINGPONG
         timeout=6000,
         task_start=0,
         task_number=1,

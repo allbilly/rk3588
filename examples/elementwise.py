@@ -5,7 +5,8 @@ RKNPU_MEM_KERNEL_MAPPING = 8
 RKNPU_MEM_NON_CACHEABLE = 0
 RKNPU_ACT_RESET = 1
 RKNPU_JOB_PC = 1 << 0
-RKNPU_JOB_BLOCK = 1 << 1
+RKNPU_JOB_BLOCK = 0 << 1
+RKNPU_JOB_NONBLOCK = 1 << 1
 RKNPU_JOB_PINGPONG = 1 << 2
 FP16_BYTES = 2
 FP32_BYTES = 4
@@ -167,7 +168,7 @@ def mem_allocate(fd, size, flags=0):
 def npu_reset(fd):
     return ioctl(fd, DRM_IOCTL_RKNPU_ACTION, rknpu_action(flags=RKNPU_ACT_RESET, value=0))
 
-def npu_submit(task_obj_addr, task_count=1, flags=0x1 | 0x2 | 0x4):
+def npu_submit(task_obj_addr, task_count=1, flags=RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG):
     npu_reset(fd)
     submit_struct = rknpu_submit(
         flags=flags, timeout=6000, task_start=0, task_number=task_count,

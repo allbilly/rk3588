@@ -5,7 +5,9 @@ RKNPU_MEM_KERNEL_MAPPING = 8
 RKNPU_MEM_NON_CACHEABLE = 0
 RKNPU_ACT_RESET = 1
 RKNPU_JOB_PC = 1 << 0
-RKNPU_JOB_BLOCK = 1 << 1
+# check where is source, is the source wrong?
+RKNPU_JOB_BLOCK = 0 << 1
+RKNPU_JOB_NONBLOCK = 1 << 1
 RKNPU_JOB_PINGPONG = 1 << 2
 FP16_BYTES = 2
 FP32_BYTES = 4
@@ -494,10 +496,7 @@ def run_gemm(m, n, k, a_matrix, b_matrix, out_fp16=False):
     output = np.frombuffer(output_map, dtype=out_dtype, count=out_nbytes // out_bytes)
     if out_fp16:
         output[:] = np.nan
-    submit_flags = RKNPU_JOB_PC | RKNPU_JOB_PINGPONG
-    # deep experiments why fp32 failed with RKNPU_JOB_BLOCK
-    if out_fp16:
-        submit_flags |= RKNPU_JOB_BLOCK
+    submit_flags = RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG
     if npu_submit(tasks_mem_create.obj_addr, task_count=len(task_regs), flags=submit_flags) < 0:
         raise RuntimeError("npu_submit failed")
 

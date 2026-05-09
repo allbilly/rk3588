@@ -64,7 +64,7 @@ def reset_npu(fd):
   return rt.reset_npu(fd)
 
 def submit(fd, task_obj_addr):
-  req = rknpu_submit(flags=0x1 | 0x2 | 0x4, timeout=6000, task_start=0, task_number=1,
+  req = rknpu_submit(flags=0x1 | 0x4, timeout=6000, task_start=0, task_number=1,
                     task_counter=0, priority=0, task_obj_addr=task_obj_addr, regcfg_obj_addr=0,
                     task_base_addr=0, user_data=0, core_mask=1, fence_fd=-1)
   req.subcore_task[0] = rknpu_subcore_task(task_start=0, task_number=1)

@@ -257,7 +257,7 @@ before submit instead of patching an opaque qword blob.
 The conv multi-task replay needs:
 
 ```text
-flags = RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG = 0x7
+flags = RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG = 0x5
 mode  = core0
 task descriptors from the captured RKNN task buffer
 ```
