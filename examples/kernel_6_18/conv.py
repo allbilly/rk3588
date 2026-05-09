@@ -58,6 +58,7 @@ class reg:
     SURFACE_ADD         = 0x40c0   # DPU surface add
 
     # --- DPU RDMA (0x5000) ---
+    RDMA_S_POINTER        = 0x5004   # DPU RDMA S pointer config
     RDMA_DATA_CUBE_WIDTH  = 0x500c   # RDMA data cube width
     RDMA_DATA_CUBE_HEIGHT = 0x5010   # RDMA data cube height
     RDMA_DATA_CUBE_CHANNEL= 0x5014   # RDMA data cube channel
@@ -280,6 +281,19 @@ def _is_grouped_spatial(in_c, out_c, kh, kw, groups):
 
 def _needs_c96_oc24_pointwise_schedule(in_c, out_c, kh, kw, groups):
     return groups == 1 and kh == 1 and kw == 1 and in_c == 96 and out_c == 24
+
+def _pointwise_split_add_chunks(in_c, out_c, in_h, in_w, kh, kw, groups):
+    if groups != 1 or kh != 1 or kw != 1:
+        return None
+    if in_c == 144 and out_c == 24 and in_h == 56 and in_w == 56:
+        return [(0, 64), (64, 128), (128, 144)]
+    if in_c == 144 and out_c == 32 and in_h == 28 and in_w == 28:
+        return [(0, 64), (64, 128), (128, 144)]
+    if in_c == 192 and out_c in (16, 32) and in_h == 28 and in_w == 28:
+        return [(0, 64), (64, 128), (128, 192)]
+    if in_c == 256 and out_c == 32 and in_h == 28 and in_w == 28:
+        return [(0, 64), (64, 128), (128, 192), (192, 256)]
+    return None
 
 def should_use_nhwc_pack(channels, c2):
     return channels > 0 and (c2 // channels == 2 or (channels == 2 and c2 // channels == 4))
@@ -699,6 +713,132 @@ def submit_conv_tasks(task_regs, repeat=1):
         write_regs_to_npu_task(task_regs)
         npu_submit(task_count=len(task_regs))
 
+def write_raw_npu_task(regs, op_idx, enable_mask, int_mask=(1 << 8) | (1 << 9)):
+    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), 0, task_map.size())
+    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), 0, regcmd_map.size())
+    assert len(regs) <= regcmd_mem_create.size // ctypes.sizeof(ctypes.c_uint64), "regcmd buffer too small"
+    for i, qword in enumerate(regs):
+        npu_regcmd[i] = qword
+    npu_tasks[0].regcmd_addr = regcmd_mem_create.dma_addr
+    npu_tasks[0].regcfg_amount = len(regs)
+    npu_tasks[0].op_idx = op_idx
+    npu_tasks[0].enable_mask = enable_mask
+    npu_tasks[0].int_mask = int_mask
+    npu_tasks[0].int_clear = 0x1ffff
+
+def write_eltwise_regs_to_npu_task(task_regs):
+    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), 0, task_map.size())
+    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), 0, regcmd_map.size())
+
+    def make_tail(next_offset, next_body_len):
+        enable = E(reg.PC, reg.OPERATION_ENABLE, 0x18)
+        if next_offset is None:
+            return [
+                E(reg.PC_REG, reg.PC_BASE_ADDRESS, 0),
+                E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, 0),
+                E(reg.VERSION, 0, 0),
+                enable,
+            ]
+        next_addr = regcmd_mem_create.dma_addr + next_offset * ctypes.sizeof(ctypes.c_uint64)
+        return [
+            E(reg.PC_REG, reg.PC_BASE_ADDRESS, next_addr & 0xFFFFFFF0),
+            E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, next_body_len),
+            E(reg.VERSION, 0, 0),
+            enable,
+        ]
+
+    offsets = []
+    offset = 0
+    for regs in task_regs:
+        offsets.append(offset)
+        offset += _align_up(len(regs) + PC_CHAIN_TAIL_QWORDS, 2)
+    assert offset <= regcmd_mem_create.size // ctypes.sizeof(ctypes.c_uint64), "regcmd buffer too small"
+
+    for idx, regs in enumerate(task_regs):
+        base = offsets[idx]
+        for i, qword in enumerate(regs):
+            npu_regcmd[base + i] = qword
+        next_body_len = len(task_regs[idx + 1]) if idx + 1 < len(task_regs) else 0
+        next_offset = offsets[idx + 1] if idx + 1 < len(task_regs) else None
+        tails = make_tail(next_offset, next_body_len)
+        for i, qword in enumerate(tails):
+            npu_regcmd[base + len(regs) + i] = qword
+
+        npu_tasks[idx].regcmd_addr = regcmd_mem_create.dma_addr + base * ctypes.sizeof(ctypes.c_uint64)
+        npu_tasks[idx].regcfg_amount = len(regs) + len(tails)
+        npu_tasks[idx].op_idx = 4
+        npu_tasks[idx].enable_mask = 0x18
+        npu_tasks[idx].int_mask = (1 << 8) | (1 << 9)
+        npu_tasks[idx].int_clear = 0x1ffff
+
+# why add, is add really the best approach? too many lines added
+def submit_fp16_add(a_dma, b_dma, out_dma, out_width_stride, align_out_c, repeat=2):
+    total_elems = out_width_stride * align_out_c
+    max_elems = 8000 * 8
+    task_regs = []
+    for start in range(0, total_elems, max_elems):
+        tile_n = min(max_elems, total_elems - start)
+        dataout_width = _ceil_div(tile_n, 8) - 1
+        byte_offset = start * FP16_BYTES
+        task_regs.append([
+            E(reg.DPU,  reg.S_POINTER, 0x0000000E),
+            E(reg.DPU,  reg.FEATURE_MODE_CFG, (15 << 5) | (2 << 1) | 1),
+            E(reg.DPU,  reg.DATA_FORMAT, (2 << 29) | (2 << 26) | 2),
+            E(reg.DPU,  reg.DATA_CUBE_WIDTH, dataout_width),
+            E(reg.DPU,  reg.DATA_CUBE_HEIGHT, 0),
+            E(reg.DPU,  reg.DATA_CUBE_NOTCH, 0),
+            E(reg.DPU,  reg.DATA_CUBE_CHANNEL, (7 << 16) | 7),
+            E(reg.DPU,  reg.EW_CFG, 0x108202c0),
+            E(reg.DPU,  reg.OUT_CVT_SCALE, (1 << 16) | 1),
+            E(reg.RDMA, reg.RDMA_S_POINTER, 0x0000000E),
+            E(reg.RDMA, reg.RDMA_DATA_CUBE_WIDTH, dataout_width),
+            E(reg.RDMA, reg.RDMA_DATA_CUBE_HEIGHT, 0),
+            E(reg.RDMA, reg.RDMA_DATA_CUBE_CHANNEL, 7),
+            E(reg.RDMA, reg.RDMA_ERDMA_CFG, (1 << 30) | (2 << 2)),
+            E(reg.DPU,  reg.DST_BASE_ADDR, out_dma + byte_offset),
+            E(reg.RDMA, reg.RDMA_SRC_BASE_ADDR, a_dma + byte_offset),
+            E(reg.RDMA, reg.RDMA_EW_BASE_ADDR, b_dma + byte_offset),
+            E(reg.RDMA, reg.RDMA_FEATURE_MODE_CFG, (2 << 15) | (15 << 11) | (2 << 5) | (1 << 3) | 1),
+        ])
+    for _ in range(repeat):
+        write_eltwise_regs_to_npu_task(task_regs)
+        npu_submit(task_count=len(task_regs))
+
+def submit_pointwise_to_output(input_nchw, weight_nchw, out_c):
+    _, in_c, in_h, in_w = input_nchw.shape
+    p = _conv_params(1, in_c, in_h, in_w, out_c, 1, 1, 1)
+    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_mem_create.size)
+    weight_full = weight_nchw.reshape(out_c, in_c, 1, 1)
+    wt_flat = pack_conv_weights_for_shape(weight_full, out_c, in_c, 1, 1, p["align_c"], 1)
+    wt_ptr = ctypes.addressof(ctypes.c_char.from_buffer(weight_map))
+    ctypes.memmove(wt_ptr, wt_flat.ctypes.data, wt_flat.nbytes)
+
+    task_regs = []
+    input_ptr = ctypes.addressof(ctypes.c_char.from_buffer(input_map))
+    input_offset = 0
+    _, tiles = _conv_tiles(p, False, False)
+    for row_start, tile_in_h in tiles:
+        tile_p = p if tile_in_h == in_h else _conv_params(1, in_c, tile_in_h, in_w, out_c, 1, 1, 1)
+        input_tile = input_nchw[0, :, row_start:row_start + tile_in_h, :]
+        input_flat = _pack_conv_input_fp16(input_tile, tile_p).view(np.uint16)
+        input_bytes = input_flat.nbytes
+        assert input_offset + input_bytes <= input_mem_create.size, "input buffer too small"
+        ctypes.memmove(input_ptr + input_offset, input_flat.ctypes.data, input_bytes)
+        output_offset = row_start * in_w * 16
+        regs = make_conv2d_regs(
+            1, in_c, tile_in_h, in_w, out_c, 1, 1,
+            input_mem_create.dma_addr + input_offset,
+            weight_mem_create.dma_addr,
+            output_mem_create.dma_addr + output_offset,
+            groups=1,
+            out_width_stride_override=p["out_width_stride"],
+            weight_reuse=bool(task_regs),
+            full_data_bank=True,
+            out_fp16=True)
+        task_regs.append(regs)
+        input_offset = _align_up(input_offset + input_bytes, 16)
+    submit_conv_tasks(task_regs)
+
 def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None, out_fp16=False):
     in_h, in_w = input_hw
     weight_in_c = weight_in_c or (in_c // groups)
@@ -708,7 +848,8 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
     grouped_spatial = _is_grouped_spatial(in_c, out_c, kh, kw, groups)
     hw_out_fp16 = (out_fp16 or is_spatial or p["is_depthwise"] or out_c >= 128
                    or p["out_width_stride"] > RK_MAX_CONV_FLAT_STRIDE
-                   or _needs_c96_oc24_pointwise_schedule(in_c, out_c, kh, kw, groups))
+                   or _needs_c96_oc24_pointwise_schedule(in_c, out_c, kh, kw, groups)
+                   or _pointwise_split_add_chunks(in_c, out_c, in_h, in_w, kh, kw, groups) is not None)
 
     np.random.seed(42)
     input_nchw = np.random.uniform(-2, 2, (batch, in_c, in_h, in_w)).astype(np.float16)
@@ -719,6 +860,46 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
     if _is_depthwise(in_c, out_c, groups) and (kh != 1 or kw != 1) and in_c >= 32:
         # DO NOT CHEAT CPU OFFLOAD
         pass
+
+    out_dtype = np.float16 if out_fp16 else np.float32
+    read_dtype = np.float16 if hw_out_fp16 else np.float32
+    read_bytes = FP16_BYTES if hw_out_fp16 else FP32_BYTES
+    unpack_c2 = UNPACK_C2 if hw_out_fp16 else FP16_ATOM_ELEMENTS // FP32_BYTES
+    def read_output(count):
+        return np.frombuffer(output_map, dtype=read_dtype, count=count).copy()
+
+    split_add_chunks = _pointwise_split_add_chunks(in_c, out_c, in_h, in_w, kh, kw, groups)
+    if split_add_chunks is not None:
+        raw_elements = _ceil_div(p["align_out_c"], UNPACK_C2) * p["out_width_stride"] * UNPACK_C2
+        raw_bytes = raw_elements * FP16_BYTES
+        stage_a_offset = 2 * 1024 * 1024
+        stage_b_offset = 2 * 1024 * 1024
+        assert stage_a_offset + raw_bytes <= input_mem_create.size, "input staging buffer too small"
+        assert stage_b_offset + raw_bytes <= weight_mem_create.size, "weight staging buffer too small"
+        out_ptr = ctypes.addressof(ctypes.c_char.from_buffer(output_map))
+        stage_a_ptr = ctypes.addressof(ctypes.c_char.from_buffer(input_map)) + stage_a_offset
+        stage_b_ptr = ctypes.addressof(ctypes.c_char.from_buffer(weight_map)) + stage_b_offset
+        stage_a_dma = input_mem_create.dma_addr + stage_a_offset
+        stage_b_dma = weight_mem_create.dma_addr + stage_b_offset
+        zero_raw = np.zeros(raw_elements, dtype=np.float16)
+        ctypes.memmove(stage_a_ptr, zero_raw.ctypes.data, raw_bytes)
+        ctypes.memmove(stage_b_ptr, zero_raw.ctypes.data, raw_bytes)
+        submit_fp16_add(stage_a_dma, stage_b_dma, output_mem_create.dma_addr, p["out_width_stride"], p["align_out_c"], repeat=1)
+
+        first_start, first_end = split_add_chunks[0]
+        submit_pointwise_to_output(input_nchw[:, first_start:first_end], weight_nchw[:, first_start:first_end], out_c)
+        ctypes.memmove(stage_a_ptr, out_ptr, raw_bytes)
+
+        for chunk_idx, (start_c, end_c) in enumerate(split_add_chunks[1:], start=1):
+            submit_pointwise_to_output(input_nchw[:, start_c:end_c], weight_nchw[:, start_c:end_c], out_c)
+            ctypes.memmove(stage_b_ptr, out_ptr, raw_bytes)
+            submit_fp16_add(stage_a_dma, stage_b_dma, output_mem_create.dma_addr, p["out_width_stride"], p["align_out_c"])
+            if chunk_idx + 1 < len(split_add_chunks):
+                ctypes.memmove(stage_a_ptr, out_ptr, raw_bytes)
+
+        out_buf = read_output(raw_elements)
+        result = _unpack_flat_1x1_output(out_buf, out_c, out_h, out_w, p["out_width_stride"], UNPACK_C2).reshape(batch, out_c, out_h, out_w)
+        return result.astype(out_dtype), input_nchw, weight_nchw
 
     if _is_depthwise(in_c, out_c, groups):
         weight_full = np.zeros((out_c, in_c, kh, kw), dtype=np.float16)
@@ -737,13 +918,7 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
     wt_ptr = ctypes.addressof(ctypes.c_char.from_buffer(weight_map))
     ctypes.memmove(wt_ptr, wt_flat.ctypes.data, wt_flat.nbytes)
 
-    out_dtype = np.float16 if out_fp16 else np.float32
-    read_dtype = np.float16 if hw_out_fp16 else np.float32
-    read_bytes = FP16_BYTES if hw_out_fp16 else FP32_BYTES
-    unpack_c2 = UNPACK_C2 if hw_out_fp16 else FP16_ATOM_ELEMENTS // FP32_BYTES
     result = np.zeros((batch, out_c, out_h, out_w), dtype=out_dtype)
-    def read_output(count):
-        return np.frombuffer(output_map, dtype=read_dtype, count=count).copy()
 
     for n in range(batch):
         pc_chain_tiles, tiles = _conv_tiles(p, is_spatial, grouped_spatial)
@@ -905,6 +1080,11 @@ if __name__ == "__main__":
         dict(name="conv2d_b1_c4_h9_w9_oc4_wic4_k1x1_g1",  batch=1, in_c=4,  in_h=9,  in_w=9,  out_c=4, weight_in_c=4, kh=1, kw=1, groups=1),
         dict(name="conv2d_b1_c3_h52_w52_oc6_wic3_k1x1_g1", batch=1, in_c=3,  in_h=52, in_w=52, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
         dict(name="conv2d_b1_c96_h56_w56_oc24_wic96_k1x1_g1", batch=1, in_c=96, in_h=56, in_w=56, out_c=24, weight_in_c=96, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c144_h56_w56_oc24_wic144_k1x1_g1", batch=1, in_c=144, in_h=56, in_w=56, out_c=24, weight_in_c=144, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c144_h28_w28_oc32_wic144_k1x1_g1", batch=1, in_c=144, in_h=28, in_w=28, out_c=32, weight_in_c=144, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c192_h28_w28_oc32_wic192_k1x1_g1", batch=1, in_c=192, in_h=28, in_w=28, out_c=32, weight_in_c=192, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c192_h28_w28_oc16_wic192_k1x1_g1", batch=1, in_c=192, in_h=28, in_w=28, out_c=16, weight_in_c=192, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c256_h28_w28_oc32_wic256_k1x1_g1", batch=1, in_c=256, in_h=28, in_w=28, out_c=32, weight_in_c=256, kh=1, kw=1, groups=1),
         dict(name="conv2d_16x16_1x1_8x8",              batch=1, in_c=16, in_h=8,  in_w=8,  out_c=16, weight_in_c=16, kh=1, kw=1, groups=1),
         dict(name="conv2d_b1_c16_h32_w32_oc16_wic16_k1x1_g1", batch=1, in_c=16, in_h=32, in_w=32, out_c=16, weight_in_c=16, kh=1, kw=1, groups=1),
 
@@ -1040,11 +1220,11 @@ if __name__ == "__main__":
         # -- 1x1 conv large input channel >> output channel (wrong numerical result) --
         # From mobilenetv2 depthwise expand/project layers
         # fixed/promoted above: b1_c96_h56_w56_oc24_wic96_k1x1_g1
-        dict(name="known_b1_c144_h56_w56_oc24_wic144_k1x1_g1",   batch=1, in_c=144, in_h=56,  in_w=56,  out_c=24,  weight_in_c=144, kh=1, kw=1, groups=1, known_reason="ic>>oc"),
-        dict(name="known_b1_c144_h28_w28_oc32_wic144_k1x1_g1",   batch=1, in_c=144, in_h=28,  in_w=28,  out_c=32,  weight_in_c=144, kh=1, kw=1, groups=1, known_reason="ic>>oc"),
-        dict(name="known_b1_c192_h28_w28_oc32_wic192_k1x1_g1",   batch=1, in_c=192, in_h=28,  in_w=28,  out_c=32,  weight_in_c=192, kh=1, kw=1, groups=1, known_reason="ic>>oc"),
-        dict(name="known_b1_c192_h28_w28_oc16_wic192_k1x1_g1",   batch=1, in_c=192, in_h=28,  in_w=28,  out_c=16,  weight_in_c=192, kh=1, kw=1, groups=1, known_reason="ic>>oc"),
-        dict(name="known_b1_c256_h28_w28_oc32_wic256_k1x1_g1",   batch=1, in_c=256, in_h=28,  in_w=28,  out_c=32,  weight_in_c=256, kh=1, kw=1, groups=1, known_reason="ic>>oc"),
+        # fixed/promoted above: b1_c144_h56_w56_oc24_wic144_k1x1_g1
+        # fixed/promoted above: b1_c144_h28_w28_oc32_wic144_k1x1_g1
+        # fixed/promoted above: b1_c192_h28_w28_oc32_wic192_k1x1_g1
+        # fixed/promoted above: b1_c192_h28_w28_oc16_wic192_k1x1_g1
+        # fixed/promoted above: b1_c256_h28_w28_oc32_wic256_k1x1_g1
         dict(name="known_b1_c256_h14_w14_oc512_wic256_k1x1_g1",  batch=1, in_c=256, in_h=14,  in_w=14,  out_c=512, weight_in_c=256, kh=1, kw=1, groups=1, known_reason="ic>>oc"),
         dict(name="known_b1_c384_h14_w14_oc96_wic384_k1x1_g1",   batch=1, in_c=384, in_h=14,  in_w=14,  out_c=96,  weight_in_c=384, kh=1, kw=1, groups=1, known_reason="ic>>oc"),
         dict(name="known_b1_c480_h14_w14_oc96_wic480_k1x1_g1",   batch=1, in_c=480, in_h=14,  in_w=14,  out_c=96,  weight_in_c=480, kh=1, kw=1, groups=1, known_reason="ic>>oc"),
