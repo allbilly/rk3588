@@ -178,7 +178,7 @@ def _output_width_stride(in_channels, out_channels, kernel_h, kernel_w, groups, 
     # FP16/INT16 delivery in 16-element payloads; these stride cases come from
     # working RK conv schedules and submit tests.
     if kernel_h == 1 and kernel_w == 1:
-        return out_atoms if out_atoms < 4 else align_up_int(out_atoms, 4)
+        return out_w if out_w < 4 else align_up_int(out_w, 4)
     if in_channels == 3 and out_channels == 6 and kernel_h == 3:
         if kernel_w == 3: return 16
         if groups == 1 and kernel_w == 1: return 24
@@ -412,13 +412,16 @@ def unpack_nc1hwc2_fp16(src, batch, channels, height, width, c2, width_stride):
 def _validate_npu_result(result, inp, wt, in_c, out_c, kh, kw, groups):
     batch, oc, oh, ow = result.shape
     expected = np.zeros((batch, oc, oh, ow), dtype=np.float16)
+    oc_per_group = out_c // groups
+    ic_per_group = in_c // groups
     for n in range(batch):
-        for o in range(oc):
-            for c in range(in_c):
-                wi = 0 if (groups > 1 and groups == in_c and groups == out_c) else c
-                for i in range(kh):
-                    for j in range(kw):
-                        expected[n, o] += inp[n, c, i:i+oh, j:j+ow] * float(wt[o, wi, i, j])
+        for g in range(groups):
+            for o in range(g * oc_per_group, (g + 1) * oc_per_group):
+                for ic_local in range(ic_per_group):
+                    c = g * ic_per_group + ic_local
+                    for i in range(kh):
+                        for j in range(kw):
+                            expected[n, o] += inp[n, c, i:i+oh, j:j+ow] * float(wt[o, ic_local, i, j])
     match = np.allclose(result, expected, atol=0.1) and not np.any(np.isinf(result))
     md = float(np.max(np.abs(result - expected))) if not np.any(np.isinf(result)) else float('inf')
     print(f"  VALIDATE: {'PASS' if match else 'FAIL'} (max_diff={md:.4f})")
@@ -567,7 +570,7 @@ def _pack_weights_for_submit(params, weight_ochw, packed_weight_size):
 
 def _unpack_output(params, out_packed, is_1x1):
     unpack_c2 = _output_unpack_c2(params)
-    h, w, stride = (1, params['out_h'] * params['out_w'], params['out_width_stride']) if is_1x1 else (params['out_h'], params['out_w'], params['out_w'])
+    h, w, stride = (params['out_h'], params['out_w'], params['out_width_stride']) if is_1x1 else (params['out_h'], params['out_w'], params['out_w'])
     flat = unpack_nc1hwc2_fp16(out_packed, params['batch'], params['out_channels'], h, w, unpack_c2, stride)
     return flat.reshape(params['batch'], params['out_channels'], params['out_h'], params['out_w'])
 
@@ -1041,18 +1044,38 @@ def _pad_pointwise_channels(input_nchw, weight_ochw, params, original_in_c, pad_
     weight_padded[:, :original_in_c] = weight_ochw.reshape(params['out_channels'], original_in_c, params['kernel_h'] * params['kernel_w'])
     return input_padded.reshape(-1), weight_padded.reshape(-1)
 
-def _run_conv2d_spatial_decomposed(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups):
+def _conv_output_hw(in_h, in_w, kernel_h, kernel_w, stride=1, padding=(0, 0, 0, 0)):
+    pad_top, pad_bottom, pad_left, pad_right = padding
+    out_h = ((in_h + pad_top + pad_bottom - kernel_h) // stride) + 1
+    out_w = ((in_w + pad_left + pad_right - kernel_w) // stride) + 1
+    return out_h, out_w
+
+
+def _run_conv2d_spatial_decomposed(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups,
+                                   stride=1, padding=(0, 0, 0, 0)):
     """Run kh*kw convolution as exact-order 1x1 NPU submits.
     Direct non-1x1 programming still has shape-dependent partial/numerical
     behavior in this RK schedule. Local CSC supports kernel_height*kernel_width
     iteration, but this fallback avoids the unverified RK direct-spatial cases
-    while matching test_conv's fp16 accumulation order."""
+    while matching test_conv's fp16 accumulation order.
+
+    Optional stride/padding lets this path model Mesa/TFLite shape semantics
+    without relying on direct spatial hardware programming."""
     np.random.seed(42)
     batch, in_h, in_w = 1, input_hw[0], input_hw[1]
-    out_h, out_w = in_h - kernel_h + 1, in_w - kernel_w + 1
+    out_h, out_w = _conv_output_hw(in_h, in_w, kernel_h, kernel_w, stride, padding)
+    if out_h <= 0 or out_w <= 0:
+        raise ValueError(f"invalid output for input={input_hw} kernel={kernel_h}x{kernel_w} stride={stride} padding={padding}")
     input_nchw = np.random.randn(batch, in_channels, in_h, in_w).astype(np.float16)
     weight_ochw = np.random.randn(
         out_channels, in_channels // groups, kernel_h, kernel_w).astype(np.float16)
+    pad_top, pad_bottom, pad_left, pad_right = padding
+    if any(padding):
+        input_work = np.pad(input_nchw,
+                            ((0, 0), (0, 0), (pad_top, pad_bottom), (pad_left, pad_right)),
+                            mode='constant')
+    else:
+        input_work = input_nchw
     result = np.zeros((batch, out_channels, out_h, out_w), dtype=np.float16)
     oc_per_group = out_channels // groups
     ic_per_group = in_channels // groups
@@ -1063,15 +1086,29 @@ def _run_conv2d_spatial_decomposed(in_channels, out_channels, kernel_h, kernel_w
             ic = group * ic_per_group + ic_local
             for kh_idx in range(kernel_h):
                 for kw_idx in range(kernel_w):
-                    input_crop = input_nchw[:, ic:ic + 1,
-                                            kh_idx:kh_idx + out_h,
-                                            kw_idx:kw_idx + out_w].copy()
+                    input_crop = input_work[:, ic:ic + 1,
+                                            kh_idx:kh_idx + stride * out_h:stride,
+                                            kw_idx:kw_idx + stride * out_w:stride].copy()
                     weight_1x1 = weight_ochw[oc_start:oc_end, ic_local:ic_local + 1,
                                              kh_idx:kh_idx + 1, kw_idx:kw_idx + 1].copy()
                     result[:, oc_start:oc_end] += _npu_submit_single_input_pointwise(input_crop, weight_1x1)
     return result, input_nchw, weight_ochw
 
-def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1):
+def run_conv2d(in_channels, out_channels, kernel_h, kernel_w, input_hw, groups=1,
+               stride=1, padding=(0, 0, 0, 0)):
+    if stride != 1 or any(padding):
+        if DRY_RUN:
+            out_h, out_w = _conv_output_hw(input_hw[0], input_hw[1], kernel_h, kernel_w, stride, padding)
+            print(f"\n=== CONV2D MESA-SHAPE DRY RUN ===")
+            print(f"  in=(1,{in_channels},{input_hw[0]},{input_hw[1]}) "
+                  f"out=(1,{out_channels},{out_h},{out_w}) kernel=({kernel_h},{kernel_w}) "
+                  f"stride={stride} padding={padding} groups={groups}")
+            print("  submit path: decomposed 1x1 NPU submits")
+            return None, None, None
+        return _run_conv2d_spatial_decomposed(
+            in_channels, out_channels, kernel_h, kernel_w, input_hw, groups,
+            stride=stride, padding=padding)
+
     original_in_c = in_channels
     is_1x1 = (kernel_h == 1 and kernel_w == 1)
     pad_to_c = POINTWISE_PIXEL_CHANNELS if (is_1x1 and in_channels < POINTWISE_PIXEL_CHANNELS) else None
