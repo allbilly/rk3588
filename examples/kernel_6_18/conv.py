@@ -293,6 +293,8 @@ def _pointwise_split_add_chunks(in_c, out_c, in_h, in_w, kh, kw, groups):
         return [(0, 64), (64, 128), (128, 192)]
     if in_c == 256 and out_c == 32 and in_h == 28 and in_w == 28:
         return [(0, 64), (64, 128), (128, 192), (192, 256)]
+    if in_c >= 128 and out_c <= 32:
+        return [(start, min(start + 64, in_c)) for start in range(0, in_c, 64)]
     return None
 
 def should_use_nhwc_pack(channels, c2):
@@ -328,7 +330,7 @@ def _conv_params(batch, in_c, in_h, in_w, out_c, kh, kw, groups):
     is_spatial = (kh != 1 or kw != 1)
     out_h = in_h - kh + 1
     out_w = in_w - kw + 1
-    align_c = _conv_align_c(in_c, groups, out_c)
+    align_c = 32 if (not is_spatial and groups == 1 and in_c >= 64) else _conv_align_c(in_c, groups, out_c)
     align_out_c = max(16, _align_up(out_c, 16))
     width_stride = _align_up(in_w, max(1, _ceil_div(16, align_c)))
     out_atoms = max(1, out_h * out_w)
@@ -375,11 +377,12 @@ def _pack_default(weight, out_c, in_c, kh, kw, c2_out):
 
 def _pack_pointwise_wide(weight, out_c, in_c):
     aligned_in_c = max(32, _align_up(in_c, 32))
-    padded = np.zeros((out_c, aligned_in_c), dtype=np.float16)
+    aligned_out_c = _align_up(out_c, 16) if out_c >= 48 else out_c
+    padded = np.zeros((aligned_out_c, aligned_in_c), dtype=np.float16)
     padded[:out_c, :in_c] = weight[:, :in_c, 0, 0]
     return np.concatenate([
         padded[oc:oc + 16].reshape(-1, aligned_in_c // 32, 32).transpose(1, 0, 2).ravel()
-        for oc in range(0, out_c, 16)
+        for oc in range(0, aligned_out_c, 16)
     ])
 
 def _pack_dw_spatial_major(weight, out_c, in_c, kh, kw, c2_out):
@@ -410,7 +413,7 @@ def _pack_conv_input_fp16(input_nchw, p):
         return out.ravel()
 
     c2 = p["input_pack_c2"]
-    c1 = _ceil_div(in_c, c2)
+    c1 = _ceil_div(_align_up(in_c, p["align_c"]), c2)
     padded = np.zeros((c1 * c2, in_h, p["width_stride"]), dtype=np.float16)
     padded[:in_c, :, :in_w] = input_nchw
     return padded.reshape(c1, c2, in_h, p["width_stride"]).transpose(0, 2, 3, 1).ravel()
@@ -475,7 +478,7 @@ def _tile_data_bank(p, tile_in_h):
 def _conv_tiles(p, is_spatial, grouped_spatial):
     if not is_spatial:
         small_channel = p["in_c"] <= 4 and not p["is_depthwise"]
-        channel_tiled = p["out_c"] == 64 or p["out_c"] >= 128
+        channel_tiled = p["out_c"] >= 48
         if _needs_c96_oc24_pointwise_schedule(p["in_c"], p["out_c"], p["kh"], p["kw"], p["groups"]):
             tile_h = min(p["out_h"], 20)
         elif small_channel:
@@ -842,18 +845,20 @@ def submit_pointwise_to_output(input_nchw, weight_nchw, out_c):
 def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None, out_fp16=False):
     in_h, in_w = input_hw
     weight_in_c = weight_in_c or (in_c // groups)
-    p = _conv_params(1, in_c, in_h, in_w, out_c, kh, kw, groups)
+    logical_out_c = out_c
+    hw_sched_out_c = _align_up(out_c, 16) if (groups == 1 and kh == 1 and kw == 1 and in_c >= 64 and out_c >= 48) else out_c
+    p = _conv_params(1, in_c, in_h, in_w, hw_sched_out_c, kh, kw, groups)
     is_spatial = (kh != 1 or kw != 1)
     out_h, out_w = p["out_h"], p["out_w"]
     grouped_spatial = _is_grouped_spatial(in_c, out_c, kh, kw, groups)
-    hw_out_fp16 = (out_fp16 or is_spatial or p["is_depthwise"] or out_c >= 128
+    hw_out_fp16 = (out_fp16 or is_spatial or p["is_depthwise"] or hw_sched_out_c >= 128
                    or p["out_width_stride"] > RK_MAX_CONV_FLAT_STRIDE
                    or _needs_c96_oc24_pointwise_schedule(in_c, out_c, kh, kw, groups)
                    or _pointwise_split_add_chunks(in_c, out_c, in_h, in_w, kh, kw, groups) is not None)
 
     np.random.seed(42)
     input_nchw = np.random.uniform(-2, 2, (batch, in_c, in_h, in_w)).astype(np.float16)
-    weight_nchw = np.random.uniform(-2, 2, (out_c, weight_in_c, kh, kw)).astype(np.float16)
+    weight_nchw = np.random.uniform(-2, 2, (logical_out_c, weight_in_c, kh, kw)).astype(np.float16)
     if groups == 1 and kh == 1 and kw == 1 and in_c >= 64:
         # DO NOT CHEAT CPU OFFLOAD
         pass
@@ -906,7 +911,7 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
         for oc in range(out_c):
             weight_full[oc, oc] = weight_nchw[oc, 0]
     else:
-        weight_full = _expand_grouped_weights(weight_nchw, in_c, out_c, kh, kw, groups)
+        weight_full = _expand_grouped_weights(weight_nchw, in_c, logical_out_c, kh, kw, groups)
     if grouped_spatial:
         weight_full = _reorder_grouped_spatial_weights_block16(weight_full, out_c, in_c, kh, kw)
 
@@ -914,11 +919,11 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
         wt_flat = np.zeros((kh * kw * _align_up(in_c, p["align_c"]) * out_c), dtype=np.float16)
         wt_flat[:out_c] = weight_nchw[:, 0, 0, 0]
     else:
-        wt_flat = pack_conv_weights_for_shape(weight_full, out_c, in_c, kh, kw, p["align_c"], groups)
+        wt_flat = pack_conv_weights_for_shape(weight_full, logical_out_c, in_c, kh, kw, p["align_c"], groups)
     wt_ptr = ctypes.addressof(ctypes.c_char.from_buffer(weight_map))
     ctypes.memmove(wt_ptr, wt_flat.ctypes.data, wt_flat.nbytes)
 
-    result = np.zeros((batch, out_c, out_h, out_w), dtype=out_dtype)
+    result = np.zeros((batch, hw_sched_out_c, out_h, out_w), dtype=out_dtype)
 
     for n in range(batch):
         pc_chain_tiles, tiles = _conv_tiles(p, is_spatial, grouped_spatial)
@@ -930,7 +935,7 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
             task_regs = []
             input_offset = 0
             output_channel_tile_size = 512 if compact_tail else 16
-            output_channel_tiles = (not is_spatial and (out_c == 64 or out_c >= 128))
+            output_channel_tiles = (not is_spatial and hw_sched_out_c >= 48)
             depthwise_channel_tiles = p["is_depthwise"] and out_c >= 32
             if compact_tail:
                 warmup_regs = make_conv2d_regs(
@@ -985,13 +990,14 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
                         result[n, ch_start:ch_start + ch_tile, row_start:row_start + tile_out_h, :] = _unpack_flat_1x1_output(
                             out_buf, ch_tile, tile_out_h, out_w, p["out_width_stride"], unpack_c2)
                 elif output_channel_tiles:
-                    aligned_in_c = _align_up(in_c, p["align_c"])
-                    for oc_start in range(0, out_c, output_channel_tile_size):
-                        oc_tile = min(output_channel_tile_size, out_c - oc_start)
+                    aligned_in_c = max(32, _align_up(in_c, 32)) if (kh == 1 and kw == 1 and groups == 1 and in_c >= 64) else _align_up(in_c, p["align_c"])
+                    for oc_start in range(0, hw_sched_out_c, output_channel_tile_size):
+                        oc_tile = min(output_channel_tile_size, hw_sched_out_c - oc_start)
+                        hw_oc_tile = oc_tile
                         weight_offset = oc_start * kh * kw * aligned_in_c * FP16_BYTES
                         surface_offset = (oc_start // 16) * p["out_width_stride"] * 16 * read_bytes
                         regs = make_conv2d_regs(
-                            1, in_c, tile_in_h, in_w, oc_tile, kh, kw,
+                            1, in_c, tile_in_h, in_w, hw_oc_tile, kh, kw,
                             input_mem_create.dma_addr + input_offset,
                             weight_mem_create.dma_addr + weight_offset,
                             output_mem_create.dma_addr + output_offset + surface_offset,
@@ -1054,8 +1060,8 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
         if pc_chain_tiles and not depthwise_channel_tiles:
             out_c1 = _ceil_div(p["align_out_c"], unpack_c2)
             out_buf = read_output(out_c1 * p["out_width_stride"] * unpack_c2)
-            result[n] = _unpack_flat_1x1_output(out_buf, out_c, out_h, out_w, p["out_width_stride"], unpack_c2)
-    return result, input_nchw, weight_nchw
+            result[n] = _unpack_flat_1x1_output(out_buf, hw_sched_out_c, out_h, out_w, p["out_width_stride"], unpack_c2)
+    return result[:, :logical_out_c], input_nchw, weight_nchw
 
 def compute_expected_nchw(input_nchw, weight_nchw, batch, in_c, in_h, in_w, out_c, kh, kw, groups=1):
     out_h, out_w = in_h - kh + 1, in_w - kw + 1
@@ -1208,14 +1214,6 @@ if __name__ == "__main__":
         dict(name="1x3_68x68_k1",  batch=1, in_c=3, in_h=68, in_w=68, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
         dict(name="1x3_70x70_k1",  batch=1, in_c=3, in_h=70, in_w=70, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
         dict(name="1x3_72x72_k1",  batch=1, in_c=3, in_h=72, in_w=72, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-    ]
-    shapes_sweep = [dict(name=f"conv2d_1x3_{n}x{n}_k1", batch=1, in_c=3, in_h=n, in_w=n, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1) for n in range(2, 400, 2)]
-    # shapes += shapes_sweep
-    # -- Known-issue / reference shapes (non-blocking, report-only) --
-    known_issue_shapes = [
-        # Shapes that pass Mesa/TFLite custom TFLite but fail mainline conv.py.
-        # Mesa runs quantized padded/strided models: these exact stride-1 valid-conv
-        # shapes from extracted Mesa graphs reveal conv.py regression behavior.
 
         # -- 1x1 conv large input channel >> output channel (wrong numerical result) --
         # From mobilenetv2 depthwise expand/project layers
@@ -1262,6 +1260,12 @@ if __name__ == "__main__":
         dict(name="known_b1_c128_h28_w28_oc256_wic128_k1x1_g1",  batch=1, in_c=128, in_h=28,  in_w=28,  out_c=256, weight_in_c=128, kh=1, kw=1, groups=1),
         dict(name="known_b1_c256_h28_w28_oc256_wic256_k1x1_g1",  batch=1, in_c=256, in_h=28,  in_w=28,  out_c=256, weight_in_c=256, kh=1, kw=1, groups=1),
         dict(name="known_b1_c3_h224_w224_oc32_wic3_k3x3_g1",     batch=1, in_c=3,   in_h=224, in_w=224, out_c=32,  weight_in_c=3,   kh=3, kw=3, groups=1),
+    ]
+    shapes_sweep = [dict(name=f"conv2d_1x3_{n}x{n}_k1", batch=1, in_c=3, in_h=n, in_w=n, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1) for n in range(2, 400, 2)]
+    # shapes += shapes_sweep
+    # -- Known-issue / reference shapes (non-blocking, report-only) --
+    known_issue_shapes = [
+
     ]
     shapes += known_issue_shapes
 
