@@ -1,3 +1,8 @@
+we are working on cleaning up conv_compile.py reference to conv.py
+test with
+python3 examples/kernel_6_18/conv_compile.py --conv-py-shapes
+
+
 # How conv_mesa.py works 
 ```
 EMIT(REG_CNA_CONV_CON3, CNA_CONV_CON3_CONV_X_STRIDE(task->stride_x) |

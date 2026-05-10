@@ -31,137 +31,148 @@ BPE = 1                     # bytes per element for uint8
 # Register targets and addresses (conv.py-style)
 # ---------------------------------------------------------------------------
 class reg:
-    PC                        = 0x0081
-    PC_REG                    = 0x0101
-    CNA                       = 0x0201
-    CORE                      = 0x0801
-    DPU                       = 0x1001
-    RDMA                      = 0x2001
-    VERSION                   = 0x0041
-    OPERATION_ENABLE          = 0x0008
-    PC_BASE_ADDRESS           = 0x0010
-    PC_REGISTER_AMOUNTS       = 0x0014
-    CNA_CONV_CON1             = 0x100c
-    CNA_CONV_CON2             = 0x1010
-    CNA_CONV_CON3             = 0x1014
-    CNA_DATA_SIZE0            = 0x1020
-    CNA_DATA_SIZE1            = 0x1024
-    CNA_DATA_SIZE2            = 0x1028
-    CNA_DATA_SIZE3            = 0x102c
-    CNA_WEIGHT_SIZE0          = 0x1030
-    CNA_WEIGHT_SIZE1          = 0x1034
-    CNA_WEIGHT_SIZE2          = 0x1038
-    CNA_CBUF_CON0             = 0x1040
-    CNA_CBUF_CON1             = 0x1044
-    CNA_CVT_CON0              = 0x104c
-    CNA_CVT_CON1              = 0x1050
-    CNA_CVT_CON2              = 0x1054
-    CNA_CVT_CON3              = 0x1058
-    CNA_CVT_CON4              = 0x105c
-    CNA_FC_CON0               = 0x1060
-    CNA_FC_CON1               = 0x1064
-    CNA_PAD_CON0              = 0x1068
-    CNA_FEATURE_DATA_ADDR     = 0x1070
-    CNA_FC_CON2               = 0x1074
-    CNA_DMA_CON0              = 0x1078
-    CNA_DMA_CON1              = 0x107c
-    CNA_DMA_CON2              = 0x1080
-    CNA_FC_DATA_SIZE0         = 0x1084
-    CNA_FC_DATA_SIZE1         = 0x1088
-    CNA_DCOMP_CTRL            = 0x1100
-    CNA_DCOMP_REGNUM          = 0x1104
-    CNA_DCOMP_ADDR0           = 0x1110
-    CNA_DCOMP_AMOUNT0         = 0x1140
-    CNA_DCOMP_AMOUNT1         = 0x1144
-    CNA_DCOMP_AMOUNT2         = 0x1148
-    CNA_DCOMP_AMOUNT3         = 0x114c
-    CNA_DCOMP_AMOUNT4         = 0x1150
-    CNA_DCOMP_AMOUNT5         = 0x1154
-    CNA_DCOMP_AMOUNT6         = 0x1158
-    CNA_DCOMP_AMOUNT7         = 0x115c
-    CNA_DCOMP_AMOUNT8         = 0x1160
-    CNA_DCOMP_AMOUNT9         = 0x1164
-    CNA_DCOMP_AMOUNT10        = 0x1168
-    CNA_DCOMP_AMOUNT11        = 0x116c
-    CNA_DCOMP_AMOUNT12        = 0x1170
-    CNA_DCOMP_AMOUNT13        = 0x1174
-    CNA_DCOMP_AMOUNT14        = 0x1178
-    CNA_DCOMP_AMOUNT15        = 0x117c
-    CNA_CVT_CON5              = 0x1180
-    CNA_PAD_CON1              = 0x1184
-    CORE_MISC_CFG             = 0x3010
-    CORE_DATAOUT_SIZE_0       = 0x3014
-    CORE_DATAOUT_SIZE_1       = 0x3018
-    CORE_CLIP_TRUNCATE        = 0x301c
-    CORE_RESERVED_3030        = 0x3030   # write 0 to clear stale state
-    S_POINTER                 = 0x4004
-    FEATURE_MODE_CFG          = 0x400c
-    DATA_FORMAT               = 0x4010
-    OFFSET_PEND               = 0x4014
-    DST_BASE_ADDR             = 0x4020
-    DST_SURF_STRIDE           = 0x4024
-    DATA_CUBE_WIDTH           = 0x4030
-    DATA_CUBE_HEIGHT          = 0x4034
-    DATA_CUBE_NOTCH_ADDR      = 0x4038
-    DATA_CUBE_CHANNEL         = 0x403c
-    BS_CFG                    = 0x4040
-    BS_ALU_CFG                = 0x4044
-    BS_MUL_CFG                = 0x4048
-    BS_RELUX_CMP_VALUE        = 0x404c
-    BS_OW_CFG                 = 0x4050
-    BS_OW_OP                  = 0x4054
-    WDMA_SIZE_0               = 0x4058
-    WDMA_SIZE_1               = 0x405c
-    BN_CFG                    = 0x4060
-    BN_ALU_CFG                = 0x4064
-    BN_MUL_CFG                = 0x4068
-    BN_RELUX_CMP_VALUE        = 0x406c
-    EW_CFG                    = 0x4070
-    EW_CVT_OFFSET_VALUE       = 0x4074
-    EW_CVT_SCALE_VALUE        = 0x4078
-    EW_RELUX_CMP_VALUE        = 0x407c
-    OUT_CVT_OFFSET            = 0x4080
-    OUT_CVT_SCALE             = 0x4084
-    OUT_CVT_SHIFT             = 0x4088
-    EW_OP_VALUE_0             = 0x4090
-    EW_OP_VALUE_1             = 0x4094
-    EW_OP_VALUE_2             = 0x4098
-    EW_OP_VALUE_3             = 0x409c
-    EW_OP_VALUE_4             = 0x40a0
-    EW_OP_VALUE_5             = 0x40a4
-    EW_OP_VALUE_6             = 0x40a8
-    EW_OP_VALUE_7             = 0x40ac
-    SURFACE_ADD               = 0x40c0
-    LUT_ACCESS_CFG            = 0x40d0
-    LUT_ACCESS_DATA           = 0x40d4
-    LUT_CFG                   = 0x40d8
-    LUT_INFO                  = 0x40dc
-    LUT_LE_START              = 0x40e0
-    LUT_LE_END                = 0x40e4
-    LUT_LO_START              = 0x40e8
-    LUT_LO_END                = 0x40ec
-    LUT_LE_SLOPE_SCALE        = 0x40f0
-    LUT_LE_SLOPE_SHIFT        = 0x40f4
-    LUT_LO_SLOPE_SCALE        = 0x40f8
-    LUT_LO_SLOPE_SHIFT        = 0x40fc
-    RDMA_S_POINTER            = 0x5004
-    RDMA_DATA_CUBE_WIDTH      = 0x500c
-    RDMA_DATA_CUBE_HEIGHT     = 0x5010
-    RDMA_DATA_CUBE_CHANNEL    = 0x5014
-    RDMA_SRC_BASE_ADDR        = 0x5018
-    RDMA_BRDMA_CFG            = 0x501c
-    RDMA_BS_BASE_ADDR         = 0x5020
-    RDMA_NRDMA_CFG            = 0x5028
-    RDMA_BN_BASE_ADDR         = 0x502c
-    RDMA_ERDMA_CFG            = 0x5034
-    RDMA_EW_BASE_ADDR         = 0x5038
-    RDMA_EW_SURF_STRIDE       = 0x5040
-    RDMA_FEATURE_MODE_CFG     = 0x5044
-    RDMA_SRC_DMA_CFG          = 0x5048
-    RDMA_SURF_NOTCH           = 0x504c
-    RDMA_PAD_CFG              = 0x5064
-    RDMA_WEIGHT               = 0x5068
-    RDMA_EW_SURF_NOTCH        = 0x506c
+    # --- Stream/Target IDs (shifted into bits 48-63) ---
+    PC                        = 0x0081   # PC (Program Control / operation enable)
+    PC_REG                    = 0x0101   # PC chain registers
+    CNA                       = 0x0201   # CNA (Convolution/Matrix unit)
+    CORE                      = 0x0801   # CORE (Matrix compute engine)
+    DPU                       = 0x1001   # DPU (Elementwise/DPU unit)
+    RDMA                      = 0x2001   # RDMA (Read DMA for DPU inputs)
+    VERSION                   = 0x0041   # Version/readback target
+
+    # --- PC (0x0000) ---
+    OPERATION_ENABLE          = 0x0008   # PC operation enable
+    PC_BASE_ADDRESS           = 0x0010   # next regcmd DMA address for PC chain
+    PC_REGISTER_AMOUNTS       = 0x0014   # next regcmd fetch amount for PC chain
+
+    # --- CNA (0x1000) ---
+    CNA_CONV_CON1             = 0x100c   # CNA convolution control 1
+    CNA_CONV_CON2             = 0x1010   # CNA convolution control 2 (grains)
+    CNA_CONV_CON3             = 0x1014   # CNA convolution control 3 (stride)
+    CNA_DATA_SIZE0            = 0x1020   # CNA input data size 0
+    CNA_DATA_SIZE1            = 0x1024   # CNA input data size 1 (channel)
+    CNA_DATA_SIZE2            = 0x1028   # CNA output data size 2
+    CNA_DATA_SIZE3            = 0x102c   # CNA output data size 3 (atomics)
+    CNA_WEIGHT_SIZE0          = 0x1030   # CNA weight total size
+    CNA_WEIGHT_SIZE1          = 0x1034   # CNA weight per-kernel size
+    CNA_WEIGHT_SIZE2          = 0x1038   # CNA weight dims (width/height/kernels)
+    CNA_CBUF_CON0             = 0x1040   # CNA CBUF config 0 (banks)
+    CNA_CBUF_CON1             = 0x1044   # CNA CBUF config 1 (entries)
+    CNA_CVT_CON0              = 0x104c   # CNA convert config 0
+    CNA_CVT_CON1              = 0x1050   # CNA convert config 1 (scale/offset 0)
+    CNA_CVT_CON2              = 0x1054   # CNA convert config 2 (scale/offset 1)
+    CNA_CVT_CON3              = 0x1058   # CNA convert config 3 (scale/offset 2)
+    CNA_CVT_CON4              = 0x105c   # CNA convert config 4 (scale/offset 3)
+    CNA_FC_CON0               = 0x1060   # CNA FC control 0
+    CNA_FC_CON1               = 0x1064   # CNA FC control 1
+    CNA_PAD_CON0              = 0x1068   # CNA padding config 0 (left/top)
+    CNA_FEATURE_DATA_ADDR     = 0x1070   # CNA feature data base address
+    CNA_FC_CON2               = 0x1074   # CNA FC control 2
+    CNA_DMA_CON0              = 0x1078   # CNA DMA control 0 (burst)
+    CNA_DMA_CON1              = 0x107c   # CNA DMA control 1 (line stride)
+    CNA_DMA_CON2              = 0x1080   # CNA DMA control 2 (surface stride)
+    CNA_FC_DATA_SIZE0         = 0x1084   # CNA FC data size 0
+    CNA_FC_DATA_SIZE1         = 0x1088   # CNA FC data size 1 (channel)
+    CNA_DCOMP_CTRL            = 0x1100   # CNA weight decompress control
+    CNA_DCOMP_REGNUM          = 0x1104   # CNA weight decompress register count
+    CNA_DCOMP_ADDR0           = 0x1110   # CNA weight decompress address 0
+    CNA_DCOMP_AMOUNT0         = 0x1140   # CNA weight decompress amount 0
+    CNA_DCOMP_AMOUNT1         = 0x1144   # CNA weight decompress amount 1
+    CNA_DCOMP_AMOUNT2         = 0x1148   # CNA weight decompress amount 2
+    CNA_DCOMP_AMOUNT3         = 0x114c   # CNA weight decompress amount 3
+    CNA_DCOMP_AMOUNT4         = 0x1150   # CNA weight decompress amount 4
+    CNA_DCOMP_AMOUNT5         = 0x1154   # CNA weight decompress amount 5
+    CNA_DCOMP_AMOUNT6         = 0x1158   # CNA weight decompress amount 6
+    CNA_DCOMP_AMOUNT7         = 0x115c   # CNA weight decompress amount 7
+    CNA_DCOMP_AMOUNT8         = 0x1160   # CNA weight decompress amount 8
+    CNA_DCOMP_AMOUNT9         = 0x1164   # CNA weight decompress amount 9
+    CNA_DCOMP_AMOUNT10        = 0x1168   # CNA weight decompress amount 10
+    CNA_DCOMP_AMOUNT11        = 0x116c   # CNA weight decompress amount 11
+    CNA_DCOMP_AMOUNT12        = 0x1170   # CNA weight decompress amount 12
+    CNA_DCOMP_AMOUNT13        = 0x1174   # CNA weight decompress amount 13
+    CNA_DCOMP_AMOUNT14        = 0x1178   # CNA weight decompress amount 14
+    CNA_DCOMP_AMOUNT15        = 0x117c   # CNA weight decompress amount 15
+    CNA_CVT_CON5              = 0x1180   # CNA convert config 5 (mask)
+    CNA_PAD_CON1              = 0x1184   # CNA padding config 1 (pad value)
+
+    # --- CORE (0x3000) ---
+    CORE_MISC_CFG             = 0x3010   # CORE misc config
+    CORE_DATAOUT_SIZE_0       = 0x3014   # CORE dataout size 0 (height/width)
+    CORE_DATAOUT_SIZE_1       = 0x3018   # CORE dataout size 1 (channel)
+    CORE_CLIP_TRUNCATE        = 0x301c   # CORE clip truncate config
+    CORE_RESERVED_3030        = 0x3030   # CORE reserved (write 0 to clear stale state)
+
+    # --- DPU (0x4000) ---
+    S_POINTER                 = 0x4004   # DPU S pointer config (pp/exec)
+    FEATURE_MODE_CFG          = 0x400c   # DPU feature mode config
+    DATA_FORMAT               = 0x4010   # DPU data format config
+    OFFSET_PEND               = 0x4014   # DPU offset pending config
+    DST_BASE_ADDR             = 0x4020   # DPU destination base address
+    DST_SURF_STRIDE           = 0x4024   # DPU destination surface stride
+    DATA_CUBE_WIDTH           = 0x4030   # DPU data cube width
+    DATA_CUBE_HEIGHT          = 0x4034   # DPU data cube height
+    DATA_CUBE_NOTCH_ADDR      = 0x4038   # DPU data cube notch address
+    DATA_CUBE_CHANNEL         = 0x403c   # DPU data cube channel
+    BS_CFG                    = 0x4040   # DPU batch/scale config
+    BS_ALU_CFG                = 0x4044   # DPU batch/scale ALU config
+    BS_MUL_CFG                = 0x4048   # DPU batch/scale multiply config
+    BS_RELUX_CMP_VALUE        = 0x404c   # DPU batch/scale ReLU-X compare value
+    BS_OW_CFG                 = 0x4050   # DPU batch/scale OW config
+    BS_OW_OP                  = 0x4054   # DPU batch/scale OW operation
+    WDMA_SIZE_0               = 0x4058   # DPU write DMA size 0
+    WDMA_SIZE_1               = 0x405c   # DPU write DMA size 1
+    BN_CFG                    = 0x4060   # DPU batch norm config
+    BN_ALU_CFG                = 0x4064   # DPU batch norm ALU config
+    BN_MUL_CFG                = 0x4068   # DPU batch norm multiply config
+    BN_RELUX_CMP_VALUE        = 0x406c   # DPU batch norm ReLU-X compare value
+    EW_CFG                    = 0x4070   # DPU elementwise config
+    EW_CVT_OFFSET_VALUE       = 0x4074   # DPU EW convert offset value
+    EW_CVT_SCALE_VALUE        = 0x4078   # DPU EW convert scale value
+    EW_RELUX_CMP_VALUE        = 0x407c   # DPU EW ReLU-X compare value
+    OUT_CVT_OFFSET            = 0x4080   # DPU output conversion offset
+    OUT_CVT_SCALE             = 0x4084   # DPU output conversion scale
+    OUT_CVT_SHIFT             = 0x4088   # DPU output conversion shift
+    EW_OP_VALUE_0             = 0x4090   # DPU EW operation value 0
+    EW_OP_VALUE_1             = 0x4094   # DPU EW operation value 1
+    EW_OP_VALUE_2             = 0x4098   # DPU EW operation value 2
+    EW_OP_VALUE_3             = 0x409c   # DPU EW operation value 3
+    EW_OP_VALUE_4             = 0x40a0   # DPU EW operation value 4
+    EW_OP_VALUE_5             = 0x40a4   # DPU EW operation value 5
+    EW_OP_VALUE_6             = 0x40a8   # DPU EW operation value 6
+    EW_OP_VALUE_7             = 0x40ac   # DPU EW operation value 7
+    SURFACE_ADD               = 0x40c0   # DPU surface add
+    LUT_ACCESS_CFG            = 0x40d0   # DPU LUT access config
+    LUT_ACCESS_DATA           = 0x40d4   # DPU LUT access data
+    LUT_CFG                   = 0x40d8   # DPU LUT config
+    LUT_INFO                  = 0x40dc   # DPU LUT info
+    LUT_LE_START              = 0x40e0   # DPU LUT LE start
+    LUT_LE_END                = 0x40e4   # DPU LUT LE end
+    LUT_LO_START              = 0x40e8   # DPU LUT LO start
+    LUT_LO_END                = 0x40ec   # DPU LUT LO end
+    LUT_LE_SLOPE_SCALE        = 0x40f0   # DPU LUT LE slope scale
+    LUT_LE_SLOPE_SHIFT        = 0x40f4   # DPU LUT LE slope shift
+    LUT_LO_SLOPE_SCALE        = 0x40f8   # DPU LUT LO slope scale
+    LUT_LO_SLOPE_SHIFT        = 0x40fc   # DPU LUT LO slope shift
+
+    # --- DPU RDMA (0x5000) ---
+    RDMA_S_POINTER            = 0x5004   # DPU RDMA S pointer config
+    RDMA_DATA_CUBE_WIDTH      = 0x500c   # RDMA data cube width
+    RDMA_DATA_CUBE_HEIGHT     = 0x5010   # RDMA data cube height
+    RDMA_DATA_CUBE_CHANNEL    = 0x5014   # RDMA data cube channel
+    RDMA_SRC_BASE_ADDR        = 0x5018   # RDMA source base address
+    RDMA_BRDMA_CFG            = 0x501c   # RDMA BRDMA config
+    RDMA_BS_BASE_ADDR         = 0x5020   # RDMA batch/scale base address
+    RDMA_NRDMA_CFG            = 0x5028   # RDMA NRDMA config
+    RDMA_BN_BASE_ADDR         = 0x502c   # RDMA batch norm base address
+    RDMA_ERDMA_CFG            = 0x5034   # RDMA ERDMA config
+    RDMA_EW_BASE_ADDR         = 0x5038   # RDMA EW base address
+    RDMA_EW_SURF_STRIDE       = 0x5040   # RDMA EW surface stride
+    RDMA_FEATURE_MODE_CFG     = 0x5044   # RDMA feature mode config
+    RDMA_SRC_DMA_CFG          = 0x5048   # RDMA source DMA config
+    RDMA_SURF_NOTCH           = 0x504c   # RDMA surface notch
+    RDMA_PAD_CFG              = 0x5064   # RDMA padding config
+    RDMA_WEIGHT               = 0x5068   # RDMA weight config
+    RDMA_EW_SURF_NOTCH        = 0x506c   # RDMA EW surface notch
 
 # ---------------------------------------------------------------------------
 # Register field macro helpers (transliterated from rkt_registers.h)
@@ -926,19 +937,15 @@ def split_tasks_like_mesa(op):
 
         cur.bottom_slice = min(cur.bottom_slice, op.input_height - 1)
         cur.input_height = cur.bottom_slice - cur.top_slice + 1
-
         cur.output_width = (cur.input_width + cur.pad_left + cur.pad_right -
                             op.weights_width) // op.stride + 1
         cur.output_height = (cur.input_height + cur.pad_top + cur.pad_bottom -
                              op.weights_height) // op.stride + 1
         cur.atomic_count = cur.output_width * cur.output_height
-
         cur.input_offset = calc_line_stride(op.input_width) * cur.top_slice
         cur.output_offset = calc_line_stride(op.output_width) * output_height_processed
-
         cur.input_banks = available_input_banks
         cur.weights_banks = available_weights_banks
-
         output_height_processed += cur.output_height
 
 # ---------------------------------------------------------------------------
@@ -957,23 +964,11 @@ def emit_regcmd_like_mesa(op, task_num, input_phys_addr, output_phys_addr,
     task = op.tasks[task_num]
     num_tasks = len(op.tasks)
     offset = task.output_zero_point - 0x80
-    npu_regs = []
-
-    def emit(addr, value):
-        target = _get_target(addr) + 0x1
-        npu_regs.append(E(target, addr, value))
-
-    def emit_raw(target, addr, value):
-        npu_regs.append(E(target, addr, value))
 
     con0 = (CNA_CBUF_CON0_WEIGHT_BANK(task.weights_banks) |
             CNA_CBUF_CON0_DATA_BANK(task.input_banks))
     if task_num > 0 and op.reuse_weights_cbuf:
         con0 |= CNA_CBUF_CON0_WEIGHT_REUSE(1)
-
-    emit(reg.CNA_CBUF_CON0, con0)
-    emit(reg.CNA_DCOMP_REGNUM, CNA_DCOMP_REGNUM_DCOMP_REGNUM(0))
-    emit(reg.CNA_DCOMP_CTRL, 0)
 
     con1 = 0
     if task.input_channels_real == 1:
@@ -981,47 +976,6 @@ def emit_regcmd_like_mesa(op, task_num, input_phys_addr, output_phys_addr,
                  CNA_CONV_CON1_ARGB_IN(8))
     if op.depthwise:
         con1 |= CNA_CONV_CON1_CONV_MODE(3)
-
-    emit(reg.CNA_CONV_CON1, con1)
-
-    emit(reg.S_POINTER,
-         DPU_S_POINTER_POINTER_PP_MODE(1) | DPU_S_POINTER_EXECUTER_PP_EN(1) |
-         DPU_S_POINTER_POINTER_PP_EN(1))
-
-    emit(reg.RDMA_S_POINTER,
-         DPU_RDMA_RDMA_S_POINTER_POINTER_PP_MODE(1) |
-         DPU_RDMA_RDMA_S_POINTER_EXECUTER_PP_EN(1) |
-         DPU_RDMA_RDMA_S_POINTER_POINTER_PP_EN(1))
-
-    emit(reg.CNA_CONV_CON1, con1)
-    emit(reg.CNA_CONV_CON2, CNA_CONV_CON2_FEATURE_GRAINS(50 + task.stride_y + 1))
-    emit(reg.CNA_CONV_CON3,
-         CNA_CONV_CON3_CONV_X_STRIDE(task.stride_x) |
-         CNA_CONV_CON3_CONV_Y_STRIDE(task.stride_y))
-    emit(reg.CNA_DATA_SIZE0,
-         CNA_DATA_SIZE0_DATAIN_WIDTH(task.input_width) |
-         CNA_DATA_SIZE0_DATAIN_HEIGHT(task.input_height))
-    emit(reg.CNA_DATA_SIZE1,
-         CNA_DATA_SIZE1_DATAIN_CHANNEL_REAL(task.input_channels_real - 1) |
-         CNA_DATA_SIZE1_DATAIN_CHANNEL(task.input_channels))
-    emit(reg.CNA_DATA_SIZE2,
-         CNA_DATA_SIZE2_DATAOUT_WIDTH(task.output_width))
-    emit(reg.CNA_DATA_SIZE3,
-         CNA_DATA_SIZE3_DATAOUT_ATOMICS(task.atomic_count))
-    emit(reg.CNA_WEIGHT_SIZE0,
-         CNA_WEIGHT_SIZE0_WEIGHT_BYTES(
-             task.weights_width * task.weights_height *
-             task.input_channels * task.weights_kernels))
-    emit(reg.CNA_WEIGHT_SIZE1,
-         CNA_WEIGHT_SIZE1_WEIGHT_BYTES_PER_KERNEL(
-             task.weights_width * task.weights_height * task.input_channels))
-    emit(reg.CNA_WEIGHT_SIZE2,
-         CNA_WEIGHT_SIZE2_WEIGHT_WIDTH(task.weights_width) |
-         CNA_WEIGHT_SIZE2_WEIGHT_HEIGHT(task.weights_height) |
-         CNA_WEIGHT_SIZE2_WEIGHT_KERNELS(task.weights_kernels))
-
-    emit(reg.CNA_CBUF_CON0, con0)
-    emit(reg.CNA_CBUF_CON1, CNA_CBUF_CON1_DATA_ENTRIES(task.input_data_entries))
 
     if task.input_channels_real == 1:
         trunc = 14
@@ -1032,61 +986,34 @@ def emit_regcmd_like_mesa(op, task_num, input_phys_addr, output_phys_addr,
             trunc = 15
             scale = 32388
 
-        emit(reg.CNA_CVT_CON0,
-             CNA_CVT_CON0_CVT_TRUNCATE_3(trunc) |
-             CNA_CVT_CON0_CVT_TRUNCATE_2(trunc) |
-             CNA_CVT_CON0_CVT_TRUNCATE_1(trunc) |
-             CNA_CVT_CON0_CVT_TRUNCATE_0(trunc))
-        emit(reg.CNA_CVT_CON1,
-             CNA_CVT_CON1_CVT_SCALE0(scale) | CNA_CVT_CON1_CVT_OFFSET0(coff))
-        emit(reg.CNA_CVT_CON2,
-             CNA_CVT_CON2_CVT_SCALE1(scale) | CNA_CVT_CON2_CVT_OFFSET1(coff))
-        emit(reg.CNA_CVT_CON3,
-             CNA_CVT_CON3_CVT_SCALE2(scale) | CNA_CVT_CON3_CVT_OFFSET2(coff))
-        emit(reg.CNA_CVT_CON4,
-             CNA_CVT_CON4_CVT_SCALE3(scale) | CNA_CVT_CON4_CVT_OFFSET3(coff))
+        cvt_regs = [
+            E(reg.CNA, reg.CNA_CVT_CON0,
+              CNA_CVT_CON0_CVT_TRUNCATE_3(trunc) |
+              CNA_CVT_CON0_CVT_TRUNCATE_2(trunc) |
+              CNA_CVT_CON0_CVT_TRUNCATE_1(trunc) |
+              CNA_CVT_CON0_CVT_TRUNCATE_0(trunc)),
+            E(reg.CNA, reg.CNA_CVT_CON1,
+              CNA_CVT_CON1_CVT_SCALE0(scale) | CNA_CVT_CON1_CVT_OFFSET0(coff)),
+            E(reg.CNA, reg.CNA_CVT_CON2,
+              CNA_CVT_CON2_CVT_SCALE1(scale) | CNA_CVT_CON2_CVT_OFFSET1(coff)),
+            E(reg.CNA, reg.CNA_CVT_CON3,
+              CNA_CVT_CON3_CVT_SCALE2(scale) | CNA_CVT_CON3_CVT_OFFSET2(coff)),
+            E(reg.CNA, reg.CNA_CVT_CON4,
+              CNA_CVT_CON4_CVT_SCALE3(scale) | CNA_CVT_CON4_CVT_OFFSET3(coff)),
+        ]
     else:
-        emit(reg.CNA_CVT_CON0,
-             CNA_CVT_CON0_DATA_SIGN(1) | CNA_CVT_CON0_CVT_TYPE(1) |
-             CNA_CVT_CON0_CVT_BYPASS(1))
-        emit(reg.CNA_CVT_CON1, CNA_CVT_CON1_CVT_SCALE0(1))
-        emit(reg.CNA_CVT_CON2, CNA_CVT_CON2_CVT_SCALE1(1))
-        emit(reg.CNA_CVT_CON3, CNA_CVT_CON3_CVT_SCALE2(1))
-        emit(reg.CNA_CVT_CON4, CNA_CVT_CON4_CVT_SCALE3(1))
-
-    emit(reg.CNA_FC_CON0, 0)
-    emit(reg.CNA_FC_CON1, 0)
-    emit(reg.CNA_PAD_CON0,
-         CNA_PAD_CON0_PAD_LEFT(task.pad_left) |
-         CNA_PAD_CON0_PAD_TOP(task.pad_top))
+        cvt_regs = [
+            E(reg.CNA, reg.CNA_CVT_CON0,
+              CNA_CVT_CON0_DATA_SIGN(1) | CNA_CVT_CON0_CVT_TYPE(1) |
+              CNA_CVT_CON0_CVT_BYPASS(1)),
+            E(reg.CNA, reg.CNA_CVT_CON1, CNA_CVT_CON1_CVT_SCALE0(1)),
+            E(reg.CNA, reg.CNA_CVT_CON2, CNA_CVT_CON2_CVT_SCALE1(1)),
+            E(reg.CNA, reg.CNA_CVT_CON3, CNA_CVT_CON3_CVT_SCALE2(1)),
+            E(reg.CNA, reg.CNA_CVT_CON4, CNA_CVT_CON4_CVT_SCALE3(1)),
+        ]
 
     feat_addr = input_phys_addr + task.input_offset
-    emit(reg.CNA_FEATURE_DATA_ADDR, feat_addr & 0xFFFFFFFF)
-
-    emit(reg.CNA_FC_CON2, 0)
-    emit(reg.CNA_DMA_CON0,
-         CNA_DMA_CON0_WEIGHT_BURST_LEN(15) |
-         CNA_DMA_CON0_DATA_BURST_LEN(15))
-    emit(reg.CNA_DMA_CON1, CNA_DMA_CON1_LINE_STRIDE(task.input_line_stride))
-    emit(reg.CNA_DMA_CON2, CNA_DMA_CON2_SURF_STRIDE(task.input_surface_stride))
-
-    emit(reg.CNA_FC_DATA_SIZE0,
-         CNA_FC_DATA_SIZE0_DMA_WIDTH(op.input_width) |
-         CNA_FC_DATA_SIZE0_DMA_HEIGHT(task.input_height))
-    emit(reg.CNA_FC_DATA_SIZE1,
-         CNA_FC_DATA_SIZE1_DMA_CHANNEL(task.input_channels))
-    emit(reg.CNA_DCOMP_CTRL, 0)
-    emit(reg.CNA_DCOMP_REGNUM, 0)
-    emit(reg.CNA_DCOMP_ADDR0, CNA_DCOMP_ADDR0_DECOMPRESS_ADDR0(weight_phys_addr & 0xFFFFFFFF))
-
-    for regoff in [0x40, 0x44, 0x48, 0x4c, 0x50, 0x54, 0x58, 0x5c,
-                   0x60, 0x64, 0x68, 0x6c, 0x70, 0x74, 0x78, 0x7c]:
-        emit(0x1110 + regoff, 0)
-
-    if task.input_channels_real == 1:
-        emit(reg.CNA_CVT_CON5, CNA_CVT_CON5_PER_CHANNEL_CVT_EN(65535))
-    else:
-        emit(reg.CNA_CVT_CON5, CNA_CVT_CON5_PER_CHANNEL_CVT_EN(0))
+    cvt_con5 = 65535 if task.input_channels_real == 1 else 0
 
     w3 = task.weights_width >= 3
     izp = task.input_zero_point
@@ -1101,81 +1028,25 @@ def emit_regcmd_like_mesa(op, task_num, input_phys_addr, output_phys_addr,
     if op.depthwise and izp == 0x8b:
         pad_con1 = 0x0b0b
 
-    emit(reg.CNA_PAD_CON1, CNA_PAD_CON1_PAD_VALUE(pad_con1))
-
     misc_cfg = CORE_MISC_CFG_QD_EN(1)
     if op.depthwise:
         misc_cfg |= CORE_MISC_CFG_DW_EN(1)
-    emit(reg.CORE_MISC_CFG, misc_cfg)
-    emit(reg.CORE_DATAOUT_SIZE_0,
-         CORE_DATAOUT_SIZE_0_DATAOUT_HEIGHT(task.output_height - 1) |
-         CORE_DATAOUT_SIZE_0_DATAOUT_WIDTH(task.output_width - 1))
-    emit(reg.CORE_DATAOUT_SIZE_1,
-         CORE_DATAOUT_SIZE_1_DATAOUT_CHANNEL(task.output_channels - 1))
-    emit(reg.CORE_CLIP_TRUNCATE,
-         CORE_CLIP_TRUNCATE_CLIP_TRUNCATE(op.truncate_bits))
-    emit_raw(reg.CORE | 0x1, 0x3030, 0)
 
     feat_mode_cfg = (DPU_FEATURE_MODE_CFG_BURST_LEN(15) |
                      DPU_FEATURE_MODE_CFG_OUTPUT_MODE(2))
     if op.depthwise:
         feat_mode_cfg |= DPU_FEATURE_MODE_CFG_CONV_MODE(3)
-    emit(reg.FEATURE_MODE_CFG, feat_mode_cfg)
-
-    emit(reg.DATA_FORMAT, 0)
-    emit(reg.OFFSET_PEND, 0)
 
     dst_addr = output_phys_addr + task.output_offset
-    emit(reg.DST_BASE_ADDR, dst_addr & 0xFFFFFFFF)
-    emit(reg.DST_SURF_STRIDE,
-         DPU_DST_SURF_STRIDE_DST_SURF_STRIDE(task.output_surface_stride))
-    emit(reg.DATA_CUBE_WIDTH,
-         DPU_DATA_CUBE_WIDTH_WIDTH(task.output_width - 1))
-    emit(reg.DATA_CUBE_HEIGHT,
-         DPU_DATA_CUBE_HEIGHT_HEIGHT(task.output_height - 1))
-    emit(reg.DATA_CUBE_NOTCH_ADDR, 0)
-    emit(reg.DATA_CUBE_CHANNEL,
-         DPU_DATA_CUBE_CHANNEL_ORIG_CHANNEL(task.output_channels_real - 1) |
-         DPU_DATA_CUBE_CHANNEL_CHANNEL(task.output_channels - 1))
-
-    emit(reg.BS_CFG,
-         DPU_BS_CFG_BS_ALU_ALGO(2) | DPU_BS_CFG_BS_ALU_SRC(1) |
-         DPU_BS_CFG_BS_RELU_BYPASS(1) | DPU_BS_CFG_BS_MUL_BYPASS(1))
-    emit(reg.BS_ALU_CFG, 0)
-    emit(reg.BS_MUL_CFG, 0)
-    emit(reg.BS_RELUX_CMP_VALUE, 0)
 
     if op.depthwise:
-        emit(reg.BS_OW_CFG,
-             DPU_BS_OW_CFG_SIZE_E_2(3) | DPU_BS_OW_CFG_SIZE_E_1(3) |
-             DPU_BS_OW_CFG_SIZE_E_0(3))
+        bs_ow_cfg = (DPU_BS_OW_CFG_SIZE_E_2(3) | DPU_BS_OW_CFG_SIZE_E_1(3) |
+                     DPU_BS_OW_CFG_SIZE_E_0(3))
     else:
-        emit(reg.BS_OW_CFG,
-             DPU_BS_OW_CFG_SIZE_E_2(1) | DPU_BS_OW_CFG_SIZE_E_1(1) |
-             DPU_BS_OW_CFG_SIZE_E_0(1))
-
-    emit(reg.BS_OW_OP, DPU_BS_OW_OP_OW_OP(0x80 - task.weights_zero_point))
-
-    emit(reg.WDMA_SIZE_0,
-         DPU_WDMA_SIZE_0_CHANNEL_WDMA(task.output_channels - 1))
-    emit(reg.WDMA_SIZE_1,
-         DPU_WDMA_SIZE_1_HEIGHT_WDMA(task.output_height - 1) |
-         DPU_WDMA_SIZE_1_WIDTH_WDMA(task.output_width - 1))
-    emit(reg.BN_CFG,
-         DPU_BN_CFG_BN_RELU_BYPASS(1) | DPU_BN_CFG_BN_MUL_BYPASS(1) |
-         DPU_BN_CFG_BN_ALU_BYPASS(1) | DPU_BN_CFG_BN_BYPASS(1))
-    emit(reg.BN_ALU_CFG, 0)
-    emit(reg.BN_MUL_CFG, 0)
-    emit(reg.BN_RELUX_CMP_VALUE, 0)
+        bs_ow_cfg = (DPU_BS_OW_CFG_SIZE_E_2(1) | DPU_BS_OW_CFG_SIZE_E_1(1) |
+                     DPU_BS_OW_CFG_SIZE_E_0(1))
 
     if op.add_tensor != -1:
-        emit(reg.EW_CFG,
-             DPU_EW_CFG_EW_CVT_TYPE(1) | DPU_EW_CFG_EW_DATA_MODE(1) |
-             DPU_EW_CFG_EDATA_SIZE(1) | DPU_EW_CFG_EW_ALU_ALGO(2) |
-             DPU_EW_CFG_EW_RELU_BYPASS(1) | DPU_EW_CFG_EW_LUT_BYPASS(1) |
-             DPU_EW_CFG_EW_OP_SRC(1))
-        emit(reg.EW_CVT_OFFSET_VALUE, op.addition_offset)
-
         add_scale_map = {
             0.090192: 299.671889248, 0.399250: 1326.499209406,
             0.364902: 780.34375,     0.422037: 715.5625,
@@ -1198,11 +1069,6 @@ def emit_regcmd_like_mesa(op, task_num, input_phys_addr, output_phys_addr,
         if scale < 1 << 14:
             scale |= 1 << 14
 
-        emit(reg.EW_CVT_SCALE_VALUE,
-             DPU_EW_CVT_SCALE_VALUE_EW_OP_CVT_SHIFT(add_shift - 1) |
-             DPU_EW_CVT_SCALE_VALUE_EW_OP_CVT_SCALE(scale))
-        emit(reg.EW_RELUX_CMP_VALUE, 0x0)
-
         add_scale_out = {
             0.213016: (0x4, 25914, 24), 0.244231: (0x1, 28927, 24),
             0.283416: (0x6, 26050, 24), 0.171151: (0xfffffffd, 28937, 24),
@@ -1217,19 +1083,21 @@ def emit_regcmd_like_mesa(op, task_num, input_phys_addr, output_phys_addr,
             if fabs(op.addition_scale - k) < 0.00001:
                 out_off, out_scale, out_shift = o, s, sh
                 break
-        emit(reg.OUT_CVT_OFFSET, out_off)
-        emit(reg.OUT_CVT_SCALE, DPU_OUT_CVT_SCALE_OUT_CVT_SCALE(out_scale))
-        emit(reg.OUT_CVT_SHIFT, DPU_OUT_CVT_SHIFT_OUT_CVT_SHIFT(out_shift))
+        ew_regs = [
+            E(reg.DPU, reg.EW_CFG,
+              DPU_EW_CFG_EW_CVT_TYPE(1) | DPU_EW_CFG_EW_DATA_MODE(1) |
+              DPU_EW_CFG_EDATA_SIZE(1) | DPU_EW_CFG_EW_ALU_ALGO(2) |
+              DPU_EW_CFG_EW_RELU_BYPASS(1) | DPU_EW_CFG_EW_LUT_BYPASS(1) |
+              DPU_EW_CFG_EW_OP_SRC(1)),
+            E(reg.DPU, reg.EW_CVT_OFFSET_VALUE, op.addition_offset),
+            E(reg.DPU, reg.EW_CVT_SCALE_VALUE,
+              DPU_EW_CVT_SCALE_VALUE_EW_OP_CVT_SHIFT(add_shift - 1) |
+              DPU_EW_CVT_SCALE_VALUE_EW_OP_CVT_SCALE(scale)),
+            E(reg.DPU, reg.OUT_CVT_OFFSET, out_off),
+            E(reg.DPU, reg.OUT_CVT_SCALE, DPU_OUT_CVT_SCALE_OUT_CVT_SCALE(out_scale)),
+            E(reg.DPU, reg.OUT_CVT_SHIFT, DPU_OUT_CVT_SHIFT_OUT_CVT_SHIFT(out_shift)),
+        ]
     else:
-        emit(reg.EW_CFG,
-             DPU_EW_CFG_EW_RELU_BYPASS(1) | DPU_EW_CFG_EW_OP_CVT_BYPASS(1) |
-             DPU_EW_CFG_EW_LUT_BYPASS(1) | DPU_EW_CFG_EW_OP_BYPASS(1) |
-             DPU_EW_CFG_EW_BYPASS(1))
-        emit(reg.EW_CVT_OFFSET_VALUE, 0)
-        emit(reg.EW_CVT_SCALE_VALUE, DPU_EW_CVT_SCALE_VALUE_EW_OP_CVT_SCALE(1))
-        emit(reg.EW_RELUX_CMP_VALUE, 0)
-        emit(reg.OUT_CVT_OFFSET, offset)
-
         conv_scale = (task.input_scale * task.weights_scale) / task.output_scale
         scale_bits = fui(conv_scale)
         shift = 127 + 31 - 32 - (scale_bits >> 23) + 16
@@ -1239,64 +1107,42 @@ def emit_regcmd_like_mesa(op, task_num, input_phys_addr, output_phys_addr,
         if scale < 1 << 14:
             scale |= 1 << 14
 
-        emit(reg.OUT_CVT_SCALE, DPU_OUT_CVT_SCALE_OUT_CVT_SCALE(scale))
-        emit(reg.OUT_CVT_SHIFT, DPU_OUT_CVT_SHIFT_OUT_CVT_SHIFT(shift - 1))
-
-    for r in (reg.EW_OP_VALUE_0, reg.EW_OP_VALUE_1, reg.EW_OP_VALUE_2,
-              reg.EW_OP_VALUE_3, reg.EW_OP_VALUE_4, reg.EW_OP_VALUE_5,
-              reg.EW_OP_VALUE_6, reg.EW_OP_VALUE_7):
-        emit(r, 0)
-
-    emit(reg.SURFACE_ADD,
-         DPU_SURFACE_ADD_SURF_ADD(task.surfaces_per_row))
-    emit_raw(reg.DPU | 0x1, 0x40c4, 0)
-    emit(reg.LUT_ACCESS_CFG, 0)
-    emit(reg.LUT_ACCESS_DATA, 0)
-    emit(reg.LUT_CFG, 0)
-    emit(reg.LUT_INFO, 0)
-    emit(reg.LUT_LE_START, 0)
-    emit(reg.LUT_LE_END, 0)
-    emit(reg.LUT_LO_START, 0)
-    emit(reg.LUT_LO_END, 0)
-    emit(reg.LUT_LE_SLOPE_SCALE, 0)
-    emit(reg.LUT_LE_SLOPE_SHIFT, 0)
-    emit(reg.LUT_LO_SLOPE_SCALE, 0)
-    emit(reg.LUT_LO_SLOPE_SHIFT, 0)
-
-    emit(reg.RDMA_DATA_CUBE_WIDTH,
-         DPU_RDMA_RDMA_DATA_CUBE_WIDTH_WIDTH(task.output_width - 1))
-    emit(reg.RDMA_DATA_CUBE_HEIGHT,
-         DPU_RDMA_RDMA_DATA_CUBE_HEIGHT_HEIGHT(task.output_height - 1))
-    emit(reg.RDMA_DATA_CUBE_CHANNEL,
-         DPU_RDMA_RDMA_DATA_CUBE_CHANNEL_CHANNEL(task.output_channels - 1))
+        ew_regs = [
+            E(reg.DPU, reg.EW_CFG,
+              DPU_EW_CFG_EW_RELU_BYPASS(1) | DPU_EW_CFG_EW_OP_CVT_BYPASS(1) |
+              DPU_EW_CFG_EW_LUT_BYPASS(1) | DPU_EW_CFG_EW_OP_BYPASS(1) |
+              DPU_EW_CFG_EW_BYPASS(1)),
+            E(reg.DPU, reg.EW_CVT_SCALE_VALUE, DPU_EW_CVT_SCALE_VALUE_EW_OP_CVT_SCALE(1)),
+            E(reg.DPU, reg.OUT_CVT_OFFSET, offset),
+            E(reg.DPU, reg.OUT_CVT_SCALE, DPU_OUT_CVT_SCALE_OUT_CVT_SCALE(scale)),
+            E(reg.DPU, reg.OUT_CVT_SHIFT, DPU_OUT_CVT_SHIFT_OUT_CVT_SHIFT(shift - 1)),
+        ]
 
     if op.add_tensor != -1:
-        emit(reg.RDMA_SRC_BASE_ADDR,
-             (output_phys_addr + task.output_offset) & 0xFFFFFFFF)
+        rdma_src_regs = [
+            E(reg.RDMA, reg.RDMA_SRC_BASE_ADDR,
+              (output_phys_addr + task.output_offset) & 0xFFFFFFFF),
+        ]
     else:
-        emit(reg.RDMA_SRC_BASE_ADDR, 0)
-
-    emit(reg.RDMA_BRDMA_CFG,
-         DPU_RDMA_RDMA_BRDMA_CFG_BRDMA_DATA_USE(1))
-    emit(reg.RDMA_BS_BASE_ADDR, bias_phys_addr & 0xFFFFFFFF)
-    emit(reg.RDMA_NRDMA_CFG, 0)
-    emit(reg.RDMA_BN_BASE_ADDR, 0)
+        rdma_src_regs = []
 
     ew_stride = max(op.output_width * op.output_height, 12)
     if op.add_tensor != -1:
-        emit(reg.RDMA_ERDMA_CFG,
-             DPU_RDMA_RDMA_ERDMA_CFG_ERDMA_DATA_MODE(1) |
-             DPU_RDMA_RDMA_ERDMA_CFG_ERDMA_DATA_SIZE(1))
         ew_base_offset = op.output_width * op.output_height * ATOMIC_K_SIZE
-        emit(reg.RDMA_EW_BASE_ADDR,
-             ((output_phys_addr + task.output_offset + ew_base_offset) & 0xFFFFFFFF))
-        emit(reg.RDMA_EW_SURF_STRIDE,
-             DPU_RDMA_RDMA_EW_SURF_STRIDE_EW_SURF_STRIDE(ew_stride))
+        rdma_erdma_regs = [
+            E(reg.RDMA, reg.RDMA_ERDMA_CFG,
+              DPU_RDMA_RDMA_ERDMA_CFG_ERDMA_DATA_MODE(1) |
+              DPU_RDMA_RDMA_ERDMA_CFG_ERDMA_DATA_SIZE(1)),
+            E(reg.RDMA, reg.RDMA_EW_BASE_ADDR,
+              ((output_phys_addr + task.output_offset + ew_base_offset) & 0xFFFFFFFF)),
+            E(reg.RDMA, reg.RDMA_EW_SURF_STRIDE,
+              DPU_RDMA_RDMA_EW_SURF_STRIDE_EW_SURF_STRIDE(ew_stride)),
+        ]
     else:
-        emit(reg.RDMA_ERDMA_CFG,
-             DPU_RDMA_RDMA_ERDMA_CFG_ERDMA_DISABLE(1))
-        emit(reg.RDMA_EW_BASE_ADDR, 0)
-        emit(reg.RDMA_EW_SURF_STRIDE, 0)
+        rdma_erdma_regs = [
+            E(reg.RDMA, reg.RDMA_ERDMA_CFG,
+              DPU_RDMA_RDMA_ERDMA_CFG_ERDMA_DISABLE(1)),
+        ]
 
     rdma_feat = DPU_RDMA_RDMA_FEATURE_MODE_CFG_BURST_LEN(15)
     if op.add_tensor != -1:
@@ -1306,38 +1152,126 @@ def emit_regcmd_like_mesa(op, task_num, input_phys_addr, output_phys_addr,
     if op.depthwise:
         rdma_feat |= DPU_RDMA_RDMA_FEATURE_MODE_CFG_CONV_MODE(3)
 
-    emit(reg.RDMA_FEATURE_MODE_CFG, rdma_feat)
-    emit(reg.RDMA_SRC_DMA_CFG, 0)
-
     surf_notch = ew_stride + task.output_width * (op.output_height - task.output_height)
     if op.input_width == 3:
         surf_notch = 15
 
     if op.add_tensor != -1:
-        emit(reg.RDMA_SURF_NOTCH,
-             DPU_RDMA_RDMA_SURF_NOTCH_SURF_NOTCH_ADDR(surf_notch))
-    else:
-        emit(reg.RDMA_SURF_NOTCH, 0)
+        rdma_src_regs.extend([
+            E(reg.RDMA, reg.RDMA_SURF_NOTCH,
+              DPU_RDMA_RDMA_SURF_NOTCH_SURF_NOTCH_ADDR(surf_notch)),
+            E(reg.RDMA, reg.RDMA_EW_SURF_NOTCH,
+              DPU_RDMA_RDMA_EW_SURF_NOTCH_EW_SURF_NOTCH(surf_notch)),
+        ])
+    pc_base_reg = 0x0 if num_tasks == 1 else E(reg.PC_REG, reg.PC_BASE_ADDRESS, 0)
 
-    emit(reg.RDMA_PAD_CFG, 0)
-    emit(reg.RDMA_WEIGHT,
-         DPU_RDMA_RDMA_WEIGHT_E_WEIGHT(1) | DPU_RDMA_RDMA_WEIGHT_N_WEIGHT(1) |
-         DPU_RDMA_RDMA_WEIGHT_B_WEIGHT(1) | DPU_RDMA_RDMA_WEIGHT_M_WEIGHT(1))
-
-    if op.add_tensor != -1:
-        emit(reg.RDMA_EW_SURF_NOTCH,
-             DPU_RDMA_RDMA_EW_SURF_NOTCH_EW_SURF_NOTCH(surf_notch))
-    else:
-        emit(reg.RDMA_EW_SURF_NOTCH, 0x0)
-
-    if num_tasks == 1:
-        npu_regs.append(0x0)  # placeholder for single-task mode
-    else:
-        emit(reg.PC_BASE_ADDRESS, 0)  # placeholder, patched later
-    emit(reg.PC_REGISTER_AMOUNTS, 0)  # placeholder, patched later
-    npu_regs.append(E(reg.VERSION, 0, 0))  # version sentinel
-    emit_raw(reg.PC, reg.OPERATION_ENABLE,
-             PC_OPERATION_ENABLE_RESERVED_0(14) | PC_OPERATION_ENABLE_OP_EN(1))
+    npu_regs = [
+        E(reg.DPU, reg.S_POINTER,
+          DPU_S_POINTER_POINTER_PP_MODE(1) | DPU_S_POINTER_EXECUTER_PP_EN(1) |
+          DPU_S_POINTER_POINTER_PP_EN(1)),
+        E(reg.RDMA, reg.RDMA_S_POINTER,
+          DPU_RDMA_RDMA_S_POINTER_POINTER_PP_MODE(1) |
+          DPU_RDMA_RDMA_S_POINTER_EXECUTER_PP_EN(1) |
+          DPU_RDMA_RDMA_S_POINTER_POINTER_PP_EN(1)),
+        E(reg.CNA, reg.CNA_CONV_CON1, con1),
+        E(reg.CNA, reg.CNA_CONV_CON2, CNA_CONV_CON2_FEATURE_GRAINS(50 + task.stride_y + 1)),
+        E(reg.CNA, reg.CNA_CONV_CON3,
+          CNA_CONV_CON3_CONV_X_STRIDE(task.stride_x) |
+          CNA_CONV_CON3_CONV_Y_STRIDE(task.stride_y)),
+        E(reg.CNA, reg.CNA_DATA_SIZE0,
+          CNA_DATA_SIZE0_DATAIN_WIDTH(task.input_width) |
+          CNA_DATA_SIZE0_DATAIN_HEIGHT(task.input_height)),
+        E(reg.CNA, reg.CNA_DATA_SIZE1,
+          CNA_DATA_SIZE1_DATAIN_CHANNEL_REAL(task.input_channels_real - 1) |
+          CNA_DATA_SIZE1_DATAIN_CHANNEL(task.input_channels)),
+        E(reg.CNA, reg.CNA_DATA_SIZE2, CNA_DATA_SIZE2_DATAOUT_WIDTH(task.output_width)),
+        E(reg.CNA, reg.CNA_DATA_SIZE3, CNA_DATA_SIZE3_DATAOUT_ATOMICS(task.atomic_count)),
+        E(reg.CNA, reg.CNA_WEIGHT_SIZE0,
+          CNA_WEIGHT_SIZE0_WEIGHT_BYTES(
+              task.weights_width * task.weights_height *
+              task.input_channels * task.weights_kernels)),
+        E(reg.CNA, reg.CNA_WEIGHT_SIZE1,
+          CNA_WEIGHT_SIZE1_WEIGHT_BYTES_PER_KERNEL(
+              task.weights_width * task.weights_height * task.input_channels)),
+        E(reg.CNA, reg.CNA_WEIGHT_SIZE2,
+          CNA_WEIGHT_SIZE2_WEIGHT_WIDTH(task.weights_width) |
+          CNA_WEIGHT_SIZE2_WEIGHT_HEIGHT(task.weights_height) |
+          CNA_WEIGHT_SIZE2_WEIGHT_KERNELS(task.weights_kernels)),
+        E(reg.CNA, reg.CNA_CBUF_CON0, con0),
+        E(reg.CNA, reg.CNA_CBUF_CON1, CNA_CBUF_CON1_DATA_ENTRIES(task.input_data_entries)),
+        *cvt_regs,
+        E(reg.CNA, reg.CNA_PAD_CON0,
+          CNA_PAD_CON0_PAD_LEFT(task.pad_left) |
+          CNA_PAD_CON0_PAD_TOP(task.pad_top)),
+        E(reg.CNA, reg.CNA_FEATURE_DATA_ADDR, feat_addr & 0xFFFFFFFF),
+        E(reg.CNA, reg.CNA_DMA_CON0,
+          CNA_DMA_CON0_WEIGHT_BURST_LEN(15) |
+          CNA_DMA_CON0_DATA_BURST_LEN(15)),
+        E(reg.CNA, reg.CNA_DMA_CON1, CNA_DMA_CON1_LINE_STRIDE(task.input_line_stride)),
+        E(reg.CNA, reg.CNA_DMA_CON2, CNA_DMA_CON2_SURF_STRIDE(task.input_surface_stride)),
+        E(reg.CNA, reg.CNA_FC_DATA_SIZE0,
+          CNA_FC_DATA_SIZE0_DMA_WIDTH(op.input_width) |
+          CNA_FC_DATA_SIZE0_DMA_HEIGHT(task.input_height)),
+        E(reg.CNA, reg.CNA_FC_DATA_SIZE1, CNA_FC_DATA_SIZE1_DMA_CHANNEL(task.input_channels)),
+        E(reg.CNA, reg.CNA_DCOMP_ADDR0, CNA_DCOMP_ADDR0_DECOMPRESS_ADDR0(weight_phys_addr & 0xFFFFFFFF)),
+        E(reg.CNA, reg.CNA_CVT_CON5, CNA_CVT_CON5_PER_CHANNEL_CVT_EN(cvt_con5)),
+        E(reg.CNA, reg.CNA_PAD_CON1, CNA_PAD_CON1_PAD_VALUE(pad_con1)),
+        E(reg.CORE, reg.CORE_MISC_CFG, misc_cfg),
+        E(reg.CORE, reg.CORE_DATAOUT_SIZE_0,
+          CORE_DATAOUT_SIZE_0_DATAOUT_HEIGHT(task.output_height - 1) |
+          CORE_DATAOUT_SIZE_0_DATAOUT_WIDTH(task.output_width - 1)),
+        E(reg.CORE, reg.CORE_DATAOUT_SIZE_1,
+          CORE_DATAOUT_SIZE_1_DATAOUT_CHANNEL(task.output_channels - 1)),
+        E(reg.CORE, reg.CORE_CLIP_TRUNCATE,
+          CORE_CLIP_TRUNCATE_CLIP_TRUNCATE(op.truncate_bits)),
+        E(reg.CORE, 0x3030, 0),
+        E(reg.DPU, reg.FEATURE_MODE_CFG, feat_mode_cfg),
+        E(reg.DPU, reg.DATA_FORMAT, 0),
+        E(reg.DPU, reg.DST_BASE_ADDR, dst_addr & 0xFFFFFFFF),
+        E(reg.DPU, reg.DST_SURF_STRIDE,
+          DPU_DST_SURF_STRIDE_DST_SURF_STRIDE(task.output_surface_stride)),
+        E(reg.DPU, reg.DATA_CUBE_WIDTH,
+          DPU_DATA_CUBE_WIDTH_WIDTH(task.output_width - 1)),
+        E(reg.DPU, reg.DATA_CUBE_HEIGHT,
+          DPU_DATA_CUBE_HEIGHT_HEIGHT(task.output_height - 1)),
+        E(reg.DPU, reg.DATA_CUBE_NOTCH_ADDR, 0),
+        E(reg.DPU, reg.DATA_CUBE_CHANNEL,
+          DPU_DATA_CUBE_CHANNEL_ORIG_CHANNEL(task.output_channels_real - 1) |
+          DPU_DATA_CUBE_CHANNEL_CHANNEL(task.output_channels - 1)),
+        E(reg.DPU, reg.BS_CFG,
+          DPU_BS_CFG_BS_ALU_ALGO(2) | DPU_BS_CFG_BS_ALU_SRC(1) |
+          DPU_BS_CFG_BS_RELU_BYPASS(1) | DPU_BS_CFG_BS_MUL_BYPASS(1)),
+        E(reg.DPU, reg.BS_OW_CFG, bs_ow_cfg),
+        E(reg.DPU, reg.BS_OW_OP, DPU_BS_OW_OP_OW_OP(0x80 - task.weights_zero_point)),
+        E(reg.DPU, reg.WDMA_SIZE_0,
+          DPU_WDMA_SIZE_0_CHANNEL_WDMA(task.output_channels - 1)),
+        E(reg.DPU, reg.WDMA_SIZE_1,
+          DPU_WDMA_SIZE_1_HEIGHT_WDMA(task.output_height - 1) |
+          DPU_WDMA_SIZE_1_WIDTH_WDMA(task.output_width - 1)),
+        E(reg.DPU, reg.BN_CFG,
+          DPU_BN_CFG_BN_RELU_BYPASS(1) | DPU_BN_CFG_BN_MUL_BYPASS(1) |
+          DPU_BN_CFG_BN_ALU_BYPASS(1) | DPU_BN_CFG_BN_BYPASS(1)),
+        *ew_regs,
+        E(reg.DPU, reg.SURFACE_ADD,
+          DPU_SURFACE_ADD_SURF_ADD(task.surfaces_per_row)),
+        E(reg.RDMA, reg.RDMA_DATA_CUBE_WIDTH,
+          DPU_RDMA_RDMA_DATA_CUBE_WIDTH_WIDTH(task.output_width - 1)),
+        E(reg.RDMA, reg.RDMA_DATA_CUBE_HEIGHT,
+          DPU_RDMA_RDMA_DATA_CUBE_HEIGHT_HEIGHT(task.output_height - 1)),
+        E(reg.RDMA, reg.RDMA_DATA_CUBE_CHANNEL,
+          DPU_RDMA_RDMA_DATA_CUBE_CHANNEL_CHANNEL(task.output_channels - 1)),
+        *rdma_src_regs,
+        E(reg.RDMA, reg.RDMA_BRDMA_CFG,
+          DPU_RDMA_RDMA_BRDMA_CFG_BRDMA_DATA_USE(1)),
+        E(reg.RDMA, reg.RDMA_BS_BASE_ADDR, bias_phys_addr & 0xFFFFFFFF),
+        *rdma_erdma_regs,
+        E(reg.RDMA, reg.RDMA_FEATURE_MODE_CFG, rdma_feat),
+        pc_base_reg,  # placeholder for single-task mode, patched for multi-task mode
+        E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, 0),  # placeholder, patched later
+        E(reg.VERSION, 0, 0),  # version sentinel
+        E(reg.PC, reg.OPERATION_ENABLE,
+          PC_OPERATION_ENABLE_RESERVED_0(14) | PC_OPERATION_ENABLE_OP_EN(1)),
+    ]
 
     return npu_regs
 
@@ -1890,7 +1824,6 @@ def load_conv_py_shapes():
                 return shapes
     raise RuntimeError("Could not find literal shapes list in conv.py")
 
-
 def conv_py_shape_to_mesa_case(shape):
     """Translate one conv.py FP16 shape row into Mesa-style quantized semantics."""
     batch = shape["batch"]
@@ -1924,7 +1857,6 @@ def conv_py_shape_to_mesa_case(shape):
                 bias_shape=bias_shape, pad=0, stride=1, depthwise=depthwise,
                 groups=groups), None
 
-
 def run_quantized_case(fd, shape):
     np.random.seed(42)
     input_nhwc = np.random.randint(0, 256, shape["input_shape"], dtype=np.uint8)
@@ -1948,10 +1880,6 @@ def run_quantized_case(fd, shape):
     diff = int(np.max(np.abs(result.astype(np.int32) - expected.astype(np.int32))))
     return diff
 
-
-# ---------------------------------------------------------------------------
-# Shape runner
-# ---------------------------------------------------------------------------
 def shape_matrix_runner(fd):
     """Run a list of known TFLite conv shapes through the Mesa-equivalent pipeline."""
 
@@ -1986,7 +1914,6 @@ def shape_matrix_runner(fd):
             failed += 1
     print(f"Built-in matrix: {len(shapes) - failed} PASS, {failed} FAIL")
 
-
 def conv_py_shape_matrix_runner(fd):
     """Run every conv.py test row that has Mesa-equivalent quantized semantics."""
     conv_shapes = load_conv_py_shapes()
@@ -1998,7 +1925,6 @@ def conv_py_shape_matrix_runner(fd):
             skipped.append((s["name"], reason))
         else:
             cases.append(case)
-
     name_width = max(len(s["name"]) for s in conv_shapes) if conv_shapes else 1
     passed = failed = 0
     print(f"Running {len(cases)} Mesa-equivalent cases extracted from conv.py ({len(skipped)} skipped) ...")
@@ -2017,15 +1943,12 @@ def conv_py_shape_matrix_runner(fd):
         except Exception as e:
             failed += 1
             print(f"ERROR: {e}")
-
     if skipped:
         print("Skipped conv.py rows outside this Mesa-clone contract:")
         for name, reason in skipped:
             print(f"  {name:<{name_width}s} SKIP ({reason})")
-
     print(f"conv.py-derived Mesa matrix: {passed} PASS, {failed} FAIL, {len(skipped)} SKIP")
     return failed
-
 
 if __name__ == "__main__":
     fd = _open_rocket_device()
