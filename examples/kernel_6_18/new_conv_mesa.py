@@ -1749,6 +1749,54 @@ def run_mesa_conv_im2col(fd, input_nhwc, weight_ohwi, biases,
     return np.concatenate(outputs, axis=0), last_op
 
 
+def run_mesa_case(fd, input_nhwc, weight_ohwi, biases,
+                  input_zero_point=0, input_scale=1.0/255,
+                  weight_zero_point=0, weight_scale=1.0/255,
+                  output_zero_point=0, output_scale=1.0/255,
+                  pad_top=0, pad_bottom=0, pad_left=0, pad_right=0,
+                  stride=1, depthwise=False, groups=1):
+    """Run batch/grouped cases as serial NPU convolutions."""
+    batch, _, _, in_c = input_nhwc.shape
+    out_c = in_c if depthwise else weight_ohwi.shape[0]
+    batch_outputs = []
+    last_op = None
+
+    for batch_index in range(batch):
+        sample = input_nhwc[batch_index:batch_index + 1]
+        if groups == 1 or depthwise:
+            result, last_op = run_mesa_conv(
+                fd, sample, weight_ohwi, biases,
+                input_zero_point=input_zero_point, input_scale=input_scale,
+                weight_zero_point=weight_zero_point, weight_scale=weight_scale,
+                output_zero_point=output_zero_point, output_scale=output_scale,
+                pad_top=pad_top, pad_bottom=pad_bottom,
+                pad_left=pad_left, pad_right=pad_right,
+                stride=stride, depthwise=depthwise)
+        else:
+            input_per_group = in_c // groups
+            output_per_group = out_c // groups
+            group_outputs = []
+            for group in range(groups):
+                input_start = group * input_per_group
+                input_end = input_start + input_per_group
+                output_start = group * output_per_group
+                output_end = output_start + output_per_group
+                group_result, last_op = run_mesa_conv(
+                    fd, sample[:, :, :, input_start:input_end],
+                    weight_ohwi[output_start:output_end], biases[output_start:output_end],
+                    input_zero_point=input_zero_point, input_scale=input_scale,
+                    weight_zero_point=weight_zero_point, weight_scale=weight_scale,
+                    output_zero_point=output_zero_point, output_scale=output_scale,
+                    pad_top=pad_top, pad_bottom=pad_bottom,
+                    pad_left=pad_left, pad_right=pad_right,
+                    stride=stride, depthwise=False)
+                group_outputs.append(group_result)
+            result = np.concatenate(group_outputs, axis=2)
+        batch_outputs.append(result)
+
+    return np.stack(batch_outputs, axis=0), last_op
+
+
 # ---------------------------------------------------------------------------
 # CPU quantized reference
 # ---------------------------------------------------------------------------
@@ -1756,11 +1804,40 @@ def compute_expected_quantized(input_nhwc, weight_ohwi, biases,
                                 input_zero_point, weight_zero_point,
                                 output_zero_point,
                                 pad_top=0, pad_bottom=0, pad_left=0, pad_right=0,
-                                stride=1, depthwise=False):
+                                stride=1, depthwise=False, groups=1):
     """Simulate quantized convolution on CPU for comparison."""
-    _, in_h, in_w, in_c = input_nhwc.shape
+    batch, in_h, in_w, in_c = input_nhwc.shape
     oc, kw, kh, ic = weight_ohwi.shape
     output_channels = ic if depthwise else oc
+
+    if batch > 1:
+        return np.concatenate([
+            compute_expected_quantized(
+                input_nhwc[b:b + 1], weight_ohwi, biases,
+                input_zero_point, weight_zero_point, output_zero_point,
+                pad_top=pad_top, pad_bottom=pad_bottom,
+                pad_left=pad_left, pad_right=pad_right,
+                stride=stride, depthwise=depthwise, groups=groups)
+            for b in range(batch)
+        ], axis=0)
+
+    if groups != 1 and not depthwise:
+        input_per_group = in_c // groups
+        output_per_group = oc // groups
+        outputs = []
+        for group in range(groups):
+            input_start = group * input_per_group
+            input_end = input_start + input_per_group
+            output_start = group * output_per_group
+            output_end = output_start + output_per_group
+            outputs.append(compute_expected_quantized(
+                input_nhwc[:, :, :, input_start:input_end],
+                weight_ohwi[output_start:output_end], biases[output_start:output_end],
+                input_zero_point, weight_zero_point, output_zero_point,
+                pad_top=pad_top, pad_bottom=pad_bottom,
+                pad_left=pad_left, pad_right=pad_right,
+                stride=stride, depthwise=False, groups=1))
+        return np.concatenate(outputs, axis=3)
 
     out_h = (in_h + pad_top + pad_bottom - kh) // stride + 1
     out_w = (in_w + pad_left + pad_right - kw) // stride + 1
@@ -1831,27 +1908,28 @@ def conv_py_shape_to_mesa_case(shape):
     kw = shape["kw"]
     groups = shape["groups"]
 
-    if batch != 1:
-        return None, "batch>1 unsupported by Mesa clone runner"
     if shape["in_h"] < kh or shape["in_w"] < kw:
         return None, "invalid output shape"
+    if in_c % groups != 0 or out_c % groups != 0:
+        return None, "invalid grouped channel counts"
 
     depthwise = groups == in_c == out_c and weight_in_c == 1
-    if groups != 1 and not depthwise:
-        return None, "arbitrary grouped convolution is outside Mesa clone scope"
 
-    input_shape = (1, shape["in_h"], shape["in_w"], in_c)
+    input_shape = (batch, shape["in_h"], shape["in_w"], in_c)
     if depthwise:
         weight_shape = (1, kw, kh, in_c)
         bias_shape = (in_c,)
     else:
-        if weight_in_c != in_c:
-            return None, "weight_in_c does not match normal input channels"
+        if weight_in_c != in_c // groups:
+            return None, "weight_in_c does not match grouped input channels"
         weight_shape = (out_c, kw, kh, in_c)
+        if groups != 1:
+            weight_shape = (out_c, kw, kh, weight_in_c)
         bias_shape = (out_c,)
 
     return dict(name=shape["name"], input_shape=input_shape, weight_shape=weight_shape,
-                bias_shape=bias_shape, pad=0, stride=1, depthwise=depthwise), None
+                bias_shape=bias_shape, pad=0, stride=1, depthwise=depthwise,
+                groups=groups), None
 
 
 def run_quantized_case(fd, shape):
@@ -1860,19 +1938,21 @@ def run_quantized_case(fd, shape):
     weight_ohwi = np.random.randint(0, 256, shape["weight_shape"], dtype=np.uint8)
     biases = np.random.randint(-128, 128, shape["bias_shape"], dtype=np.int32)
 
-    result, op = run_mesa_conv(
+    result, op = run_mesa_case(
         fd, input_nhwc, weight_ohwi, biases,
         pad_top=shape["pad"], pad_bottom=shape["pad"],
         pad_left=shape["pad"], pad_right=shape["pad"],
-        stride=shape["stride"], depthwise=shape["depthwise"])
+        stride=shape["stride"], depthwise=shape["depthwise"],
+        groups=shape.get("groups", 1))
 
     expected = compute_expected_quantized(
         input_nhwc, weight_ohwi, biases, 0, 0, 0,
         pad_top=shape["pad"], pad_bottom=shape["pad"],
         pad_left=shape["pad"], pad_right=shape["pad"],
-        stride=shape["stride"], depthwise=shape["depthwise"])
+        stride=shape["stride"], depthwise=shape["depthwise"],
+        groups=shape.get("groups", 1))
 
-    diff = int(np.max(np.abs(result.astype(np.int32) - expected[0].astype(np.int32))))
+    diff = int(np.max(np.abs(result.astype(np.int32) - expected.astype(np.int32))))
     return diff
 
 
