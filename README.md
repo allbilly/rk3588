@@ -29,6 +29,9 @@ Weight/Feature   MAC Array      Post-Proc      Pooling        Operation
 └─────────┘   in struct_rknpu_task (0xd for conv, 0x18 for gemm).
 ```
 
+The programming model is mulitple NPU submits -> mulitple tasks in one submit -> mulitple ops in one task 
+And a well programmed task could fuse CONV+ELEMENTWISE+BN+BS+RELU+POOL inside one task.
+
 TODO
 - fork and add more regsiters to [mesa rocket](https://gitlab.freedesktop.org/mesa/mesa/-/tree/main/src/gallium/drivers/rocket)
 - check [NVDLA/vp](https://github.com/nvdla/vp)  
