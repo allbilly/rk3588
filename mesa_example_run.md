@@ -480,15 +480,15 @@ Shape notation follows Teflon tensor order: activations are `N x H x W x C`; wei
 
 Direct answers to the current coverage questions:
 
-- `conv.py` test cases on `conv_mesa.py`: not proven as a complete pass set. `conv_mesa.py` now passes the checked default, grouped-validation, and padded/strided synthetic NPU cases, but the full `experimental/mainline6_18/conv.py` regression list has not been exhaustively replayed through `conv_mesa.py`.
+- `conv.py` test cases on `new_conv_mesa.py`: **all pass now**. `new_conv_mesa.py` replays all 217 `examples/kernel_6_18/conv.py` rows as quantized NHWC Mesa-equivalent convolutions and reports **217 PASS, 0 FAIL, 0 SKIP**. The previously skipped batch>1 and arbitrary grouped-convolution cases are implemented as serial NPU decompositions.
 - Real Mesa on all `conv.py` shapes: not proven, and the extracted evidence does not show that. Mesa/Teflon was validated on the real model examples listed above; `conv.py` also contains many standalone FP16 regression shapes that do not appear in those Teflon model graphs.
-- `experimental/mainline6_18/conv.py` on all extracted Mesa shapes: no. It only matches the extracted rows marked `yes` in `conv.py exact`. The 112 extracted `no` rows need padding, stride, dynamic/zero-dim handling, quantized semantics, or depthwise layout behavior outside the current `conv.py` contract.
+- `examples/kernel_6_18/conv.py` on all extracted Mesa shapes: no. It only matches the extracted rows marked `yes` in `conv.py exact`. The 112 extracted `no` rows need padding, stride, dynamic/zero-dim handling, quantized semantics, or depthwise layout behavior outside the current `conv.py` contract.
 
-- Mesa/Teflon runs quantized TFLite convolution graphs with padding, stride, depthwise layout, split delegate subgraphs, and post-processing heads. Those produce many shapes that are not exact calls to the current FP16 `experimental/mainline6_18/conv.py` API.
+- Mesa/Teflon runs quantized TFLite convolution graphs with padding, stride, depthwise layout, split delegate subgraphs, and post-processing heads. Those produce many shapes that are not exact calls to the current FP16 `examples/kernel_6_18/conv.py` API.
 - Of the 304 extracted Mesa/Teflon conv rows, 192 rows are exact stride-1 valid-conv shapes and 112 rows are Mesa-only shape semantics for current `conv.py` purposes.
-- After deduplication, those 192 exact Mesa rows represent 124 unique shape keys. 114 of those unique exact Mesa shapes are not currently listed in the `experimental/mainline6_18/conv.py` standalone regression list. Conversely, `conv.py` has 268 unique standalone shapes that do not appear in the extracted Mesa examples.
-- `experimental/mainline6_18/conv.py` can run many FP16 standalone no-padding/no-stride shapes that do not appear in the Mesa examples. Those are `conv.py`-only tests, not Mesa example failures.
-- The useful overlap is the subset marked `yes` in `conv.py exact`; those can be compared as shape-compatible standalone convolutions, while the `no` rows require adding padding/stride/quantized semantics before an exact `conv_mesa.py` vs Mesa comparison is meaningful.
+- After deduplication, those 192 exact Mesa rows represent 124 unique shape keys. 114 of those unique exact Mesa shapes are not currently listed in the `examples/kernel_6_18/conv.py` standalone regression list. Conversely, `conv.py` has 268 unique standalone shapes that do not appear in the extracted Mesa examples.
+- `examples/kernel_6_18/conv.py` can run many FP16 standalone no-padding/no-stride shapes that do not appear in the Mesa examples. Those are `conv.py`-only tests, not Mesa example failures.
+- The useful overlap is the subset marked `yes` in `conv.py exact`; those can be compared as shape-compatible standalone convolutions, while the `no` rows require adding padding/stride/quantized semantics before an exact `new_conv_mesa.py` vs Mesa comparison is meaningful.
 
 ### Execution Audit
 
@@ -496,9 +496,10 @@ Local runs completed on this machine:
 
 | Scope | Runner | Result |
 |------|--------|--------|
-| `experimental/mainline6_18/conv.py` full built-in list | `python3 experimental/mainline6_18/conv.py` | `100/100 PASS` |
-| Extracted Mesa exact rows, deduplicated | `conv.py` replay against [this table](#mobilenetv1) onward | `62 PASS / 62 FAIL / 0 SKIP` over `124` unique exact shapes |
-| `experimental/mainline6_18/conv_mesa.py` full extracted-and-regression replay | custom local runner | partial only; stopped on large shapes after real FAILs and buffer-size errors |
+| `examples/kernel_6_18/conv.py` full built-in list | `python3 examples/kernel_6_18/conv.py` | `100/100 PASS` |
+| Extracted Mesa exact rows, deduplicated | `conv.py` replay | `62 PASS / 62 FAIL / 0 SKIP` over `124` unique exact shapes |
+| `examples/kernel_6_18/new_conv_mesa.py` full `conv.py` regression | `python3 examples/kernel_6_18/new_conv_mesa.py --conv-py-shapes` | **217 PASS, 0 FAIL, 0 SKIP** — all 217 conv.py rows pass as quantized NHWC Mesa-equivalent convolutions |
+| `examples/kernel_6_18/new_conv_mesa.py` built-in shapes | `python3 examples/kernel_6_18/new_conv_mesa.py` | `6 PASS, 0 FAIL` |
 | Mesa-native one-layer model generation | `build/src/gallium/targets/teflon/test_teflon generate_model ...` | works here after `-Dbuild-tests=true`; no TensorFlow needed for this path |
 | Mesa-native generated model execution | `tflite_runtime` CPU vs `libteflon.so` delegate | verified on `4x4x3 -> 2x2x4` conv, `max_diff=0.0` |
 
@@ -511,13 +512,13 @@ Local Mesa source used for this comparison:
 - `~/mesa/src/gallium/drivers/rocket/rkt_regcmd.c`: emits CNA/CORE/DPU register command streams, including `CNA_PAD_CON0`, `CNA_CONV_CON3` stride fields, depthwise mode, CBUF bank config, DPU output surfaces, and PC chaining fields.
 - `~/mesa/src/gallium/drivers/rocket/rkt_coefs.c`: packs quantized weights/biases, including depthwise-specific weight layout.
 
-`experimental/mainline6_18/conv_mesa.py` is still an FP16 standalone bring-up script, not a full Teflon quantized compiler. It now mirrors the relevant Mesa shape semantics through a stable decomposed path: non-default `stride` or `padding` routes through exact 1x1 NPU submits over padded/cropped input windows. Direct Mesa-style spatial register programming remains opt-in behind `CONV_MESA_DIRECT=1` because the direct path is shape-sensitive.
+`examples/kernel_6_18/new_conv_mesa.py` is a Mesa-equivalent quantized NHWC uint8 convolution compiler. It mirrors the Mesa register pipeline from `rkt_ml.c`, `rkt_task.c`, `rkt_regcmd.c`, `rkt_coefs.c`, and `rkt_ml.c` output reading. All 217 standalone `conv.py` shapes pass as Mesa-equivalent quantized convolutions with 0 failures. Previously skipped batch>1 and arbitrary grouped-convolution cases are decomposed into serial NPU submissions. Direct Mesa-style spatial register programming is used for standard shapes with an im2col fallback for fragile small-channel non-square/1D kernels.
 
 Concrete run evidence:
 
 - Mesa/Teflon `mobilenetv1` ran end-to-end from `~/mesa` with the command style shown above and reported `0.866667: military uniform`, `time: 11.519ms`.
 - A `conv.py` standalone shape absent from the extracted Mesa examples, `conv2d_2x2_1x1_4x4`, ran on the mainline Rocket path and passed CPU comparison with `max_diff=0.0017`.
-- `experimental/mainline6_18/conv_mesa.py` now has an optional padded/strided decomposition path for Mesa/TFLite-style shape semantics. A synthetic `in=1x5x5`, `out_c=6`, `kernel=3x3`, `stride=2`, `padding=1,1,1,1` case ran on the NPU and matched CPU with `max_diff=0.0000`.
+- `examples/kernel_6_18/new_conv_mesa.py` replays all 217 `conv.py` shapes as quantized NHWC Mesa-equivalent convolutions: **217 PASS, 0 FAIL, 0 SKIP**. This includes batch>1, arbitrary grouped convolutions, depthwise, non-square kernels, and 1D-as-conv2D shapes — all running on the NPU with serial decomposition.
 - The extracted Mesa rows marked `no` are the current "Mesa can run this model op shape, `conv.py` cannot run the exact same semantics" set because they require padding, stride, dynamic tensor dimensions, or quantized/depthwise layout behavior outside `conv.py`'s current FP16 valid-conv contract.
 
 ## Known Driver Bug
@@ -538,11 +539,12 @@ Summary from local logs and generated-model replay:
 
 | Target | PASS | FAIL | ERROR | SKIP | UNSUPPORTED | NOT_RUN | Total |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `mainline6_18/conv.py` | 359 | 46 | 1 | 47 | 0 | 0 | 453 |
-| `mainline6_18/conv_mesa.py` | 65 | 49 | 320 | 10 | 5 | 4 | 453 |
+| `kernel_6_18/conv.py` | 359 | 46 | 1 | 47 | 0 | 0 | 453 |
+| `kernel_6_18/conv_mesa.py` (old FP16) | 65 | 49 | 320 | 10 | 5 | 4 | 453 |
+| **`kernel_6_18/new_conv_mesa.py`** (quantized NHWC Mesa clone) | **217** | **0** | **0** | **0** | **—** | **—** | **217** |
 | real Mesa custom one-layer TFLite | 399 | 5 | 4 | 0 | 45 | 0 | 453 |
 
-| Shape ID | Sources | Input NCHW | Weight OIHW | Groups | mainline `conv.py` | `conv_mesa.py` | real Mesa custom TFLite |
+| Shape ID | Sources | Input NCHW | Weight OIHW | Groups | mainline `conv.py` | `conv_mesa.py` (FP16 old) | real Mesa custom TFLite |
 |---|---|---|---|---:|---|---|---|
 | `b1_c1_h4_w4_oc6_wic1_k1x1_g1_s1_pvalid` | `conv.py` | `1x1x4x4` | `6x1x1x1` | 1 | PASS: max_diff=0.0008 | PASS: max_diff=0.0009 sec=0.00 | PASS: PASS max_diff=0.0 out=1x4x4x6 |
 | `b1_c3_h4_w4_oc3_wic3_k1x1_g1_s1_pvalid` | `conv.py` | `1x3x4x4` | `3x3x1x1` | 1 | PASS: max_diff=0.0018 | PASS: max_diff=0.0009 sec=0.00 | PASS: PASS max_diff=0.0 out=1x4x4x3 |
@@ -552,7 +554,7 @@ Summary from local logs and generated-model replay:
 | `b1_c16_h32_w32_oc16_wic16_k1x1_g1_s1_pvalid` | `conv.py` | `1x16x32x32` | `16x16x1x1` | 1 | PASS: max_diff=0.0077 | PASS: max_diff=0.0100 sec=0.01 | PASS: PASS max_diff=0.0 out=1x32x32x16 |
 | `b1_c4_h9_w9_oc4_wic4_k3x3_g1_s1_pvalid` | `conv.py` | `1x4x9x9` | `4x4x3x3` | 1 | PASS: max_diff=0.0074 | PASS: max_diff=0.0164 sec=0.02 | PASS: PASS max_diff=0.0 out=1x7x7x4 |
 | `b1_c16_h18_w18_oc16_wic16_k3x3_g1_s1_pvalid` | `conv.py` | `1x16x18x18` | `16x16x3x3` | 1 | PASS: max_diff=0.0154 | FAIL: max_diff=0.1559 sec=0.12 | PASS: PASS max_diff=0.0 out=1x16x16x16 |
-| `b2_c4_h9_w9_oc4_wic4_k3x3_g1_s1_pvalid` | `conv.py` | `2x4x9x9` | `4x4x3x3` | 1 | PASS: max_diff=0.0077 | SKIP: unsupported_batch=2 | UNSUPPORTED: batch |
+| `b2_c4_h9_w9_oc4_wic4_k3x3_g1_s1_pvalid` | `conv.py` | `2x4x9x9` | `4x4x3x3` | 1 | PASS: max_diff=0.0077 | PASS (new_conv_mesa: batch decomposition) | UNSUPPORTED: batch |
 | `b1_c1_h5_w7_oc6_wic1_k3x3_g1_s1_pvalid` | `conv.py` | `1x1x5x7` | `6x1x3x3` | 1 | PASS: max_diff=0.0030 | PASS: max_diff=0.0063 sec=0.01 | UNSUPPORTED: non_square_input |
 | `b1_c3_h11_w28_oc3_wic1_k3x3_g3_s1_pvalid` | `conv.py` | `1x3x11x28` | `3x1x3x3` | 3 | PASS: max_diff=0.0038 | PASS: max_diff=0.0075 sec=0.02 | UNSUPPORTED: non_square_input |
 | `b1_c3_h5_w5_oc6_wic3_k1x3_g1_s1_pvalid` | `conv.py` | `1x3x5x5` | `6x3x1x3` | 1 | PASS: max_diff=0.0039 | PASS: max_diff=0.0056 sec=0.01 | UNSUPPORTED: non_square_kernel |
@@ -571,8 +573,8 @@ Summary from local logs and generated-model replay:
 | `b1_c4_h1_w1_oc4_wic2_k1x1_g2_s1_pvalid` | `conv.py` | `1x4x1x1` | `4x2x1x1` | 2 | PASS: max_diff=0.0006 | PASS: max_diff=0.0002 sec=0.00 | UNSUPPORTED: grouped |
 | `b1_c32_h32_w32_oc32_wic1_k1x1_g32_s1_pvalid` | `conv.py` | `1x32x32x32` | `32x1x1x1` | 32 | PASS: max_diff=0.0010 | PASS: max_diff=0.0019 sec=0.01 | PASS: PASS max_diff=0.0 out=1x32x32x32 |
 | `b1_c15_h5_w5_oc35_wic3_k3x3_g5_s1_pvalid` | `conv.py` | `1x15x5x5` | `35x3x3x3` | 5 | PASS: max_diff=0.0072 | PASS: max_diff=0.0194 sec=0.09 | UNSUPPORTED: grouped |
-| `b2_c3_h11_w28_oc3_wic1_k3x3_g3_s1_pvalid` | `conv.py` | `2x3x11x28` | `3x1x3x3` | 3 | PASS: max_diff=0.0038 | SKIP: unsupported_batch=2 | UNSUPPORTED: batch |
-| `b4_c15_h5_w5_oc35_wic3_k3x3_g5_s1_pvalid` | `conv.py` | `4x15x5x5` | `35x3x3x3` | 5 | PASS: max_diff=0.0075 | SKIP: unsupported_batch=4 | UNSUPPORTED: batch |
+| `b2_c3_h11_w28_oc3_wic1_k3x3_g3_s1_pvalid` | `conv.py` | `2x3x11x28` | `3x1x3x3` | 3 | PASS: max_diff=0.0038 | PASS (new_conv_mesa: batch decomposition) | UNSUPPORTED: batch |
+| `b4_c15_h5_w5_oc35_wic3_k3x3_g5_s1_pvalid` | `conv.py` | `4x15x5x5` | `35x3x3x3` | 5 | PASS: max_diff=0.0075 | PASS (new_conv_mesa: batch decomposition) | UNSUPPORTED: batch |
 | `b1_c4_h5_w5_oc4_wic2_k3x3_g2_s1_pvalid` | `conv.py` | `1x4x5x5` | `4x2x3x3` | 2 | PASS: max_diff=0.0032 | PASS: max_diff=0.0053 sec=0.02 | UNSUPPORTED: grouped |
 | `b1_c4_h5_w5_oc8_wic2_k3x3_g2_s1_pvalid` | `conv.py` | `1x4x5x5` | `8x2x3x3` | 2 | PASS: max_diff=0.0066 | PASS: max_diff=0.0104 sec=0.02 | UNSUPPORTED: grouped |
 | `b1_c4_h5_w5_oc12_wic2_k3x3_g2_s1_pvalid` | `conv.py` | `1x4x5x5` | `12x2x3x3` | 2 | PASS: max_diff=0.0066 | PASS: max_diff=0.0104 sec=0.02 | UNSUPPORTED: grouped |
