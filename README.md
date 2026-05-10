@@ -33,6 +33,7 @@ The programming model is mulitple NPU submits -> mulitple tasks in one submit ->
 And a well programmed task could fuse CONV+ELEMENTWISE+BN+BS+RELU+POOL inside one task.
 
 TODO
+- port each op from my [C implementation](https://github.com/allbilly/npu/blob/82b4c4c7f774c15adb83fde6cd86663018b1c55c/include/rknnops.h#L1087-L1138) to examples/
 - fork and add more regsiters to [mesa rocket](https://gitlab.freedesktop.org/mesa/mesa/-/tree/main/src/gallium/drivers/rocket)
 - check [NVDLA/vp](https://github.com/nvdla/vp)  
 - op fusing examples
