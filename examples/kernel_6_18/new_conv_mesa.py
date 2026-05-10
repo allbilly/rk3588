@@ -9,7 +9,7 @@ Byte-for-byte BO and regcmd dumps against Mesa are the validation
 strategy before any numerical comparison.
 """
 
-import ctypes, glob, mmap, os, struct, sys, time
+import ast, ctypes, glob, mmap, os, struct, sys, time
 from dataclasses import dataclass, field
 from fcntl import ioctl
 from math import ceil, log, fabs
@@ -658,15 +658,17 @@ def fill_weights_like_mesa(weight_ohwi, weights_width, weights_height,
 
                             if oc_idx >= output_channels:
                                 out[n] = 0
+                                n += 1
                             elif ic_idx >= input_channels:
                                 if ij < 16 or (input_channels % 32) > 16:
                                     out[n] = (zero_point - 0x80) & 0xFF
+                                    n += 1
                                 else:
-                                    out[n] = 0
+                                    continue
                             else:
                                 val = weight_ohwi[oc_idx, x, y, ic_idx]
                                 out[n] = (int(val) - 0x80) & 0xFF
-                            n += 1
+                                n += 1
     return out
 
 # ---------------------------------------------------------------------------
@@ -836,6 +838,8 @@ def split_tasks_like_mesa(op):
     input_banks_required = calc_input_banks(op.input_width, op.input_height, op.input_channels)
     weights_banks_required = calc_weights_banks(
         op.weights_width, op.weights_height, op.input_channels, op.output_channels, op.depthwise)
+    available_weights_banks = weights_banks_required
+    available_input_banks = CBUF_BANKS - weights_banks_required
 
     pad_top = op.padding_top
     pad_bottom = op.padding_bottom
@@ -844,7 +848,6 @@ def split_tasks_like_mesa(op):
 
     if weights_banks_required + 1 < CBUF_BANKS:
         op.reuse_weights_cbuf = True
-        available_input_banks = CBUF_BANKS - weights_banks_required
     else:
         op.reuse_weights_cbuf = False
         available_input_banks = 7
@@ -1588,11 +1591,55 @@ def run_mesa_conv(fd, input_nhwc, weight_ohwi, biases,
                    weight_zero_point=0, weight_scale=1.0/255,
                    output_zero_point=0, output_scale=1.0/255,
                    pad_top=0, pad_bottom=0, pad_left=0, pad_right=0,
-                   stride=1, depthwise=False):
+                   stride=1, depthwise=False, _allow_im2col=True):
     """
     Run one convolution through the Mesa-equivalent pipeline.
     Returns output NHWC uint8 tensor.
     """
+
+    _, in_h, in_w, in_c = input_nhwc.shape
+    oc, kw, kh, _ = weight_ohwi.shape
+    out_h = (in_h + pad_top + pad_bottom - kh) // stride + 1
+    out_w = (in_w + pad_left + pad_right - kw) // stride + 1
+
+    use_im2col = (
+        _allow_im2col and stride == 1 and pad_top == 0 and pad_bottom == 0 and
+        pad_left == 0 and pad_right == 0 and
+        (((kw != 1 or kh != 1) and in_c <= 3) or
+         (in_c == 1 and (out_h == 1 or out_w == 1)))
+    )
+    if use_im2col:
+        result, op = run_mesa_conv_im2col(
+            fd, input_nhwc, weight_ohwi, biases,
+            input_zero_point=input_zero_point, input_scale=input_scale,
+            weight_zero_point=weight_zero_point, weight_scale=weight_scale,
+            output_zero_point=output_zero_point, output_scale=output_scale,
+            depthwise=depthwise)
+        return result, op
+
+    if depthwise and input_nhwc.shape[3] > 64 and (input_nhwc.shape[3] % 64) != 0:
+        outputs = []
+        for start in range(0, input_nhwc.shape[3], 64):
+            end = min(start + 64, input_nhwc.shape[3])
+            chunk_out, _ = run_mesa_conv(
+                fd, input_nhwc[:, :, :, start:end], weight_ohwi[:, :, :, start:end],
+                biases[start:end], input_zero_point=input_zero_point,
+                input_scale=input_scale, weight_zero_point=weight_zero_point,
+                weight_scale=weight_scale, output_zero_point=output_zero_point,
+                output_scale=output_scale, pad_top=pad_top, pad_bottom=pad_bottom,
+                pad_left=pad_left, pad_right=pad_right, stride=stride, depthwise=depthwise,
+                _allow_im2col=False)
+            outputs.append(chunk_out)
+
+        op = create_operation_from_args(
+            input_nhwc, weight_ohwi, biases,
+            input_zero_point, input_scale,
+            weight_zero_point, weight_scale,
+            output_zero_point, output_scale,
+            pad_top=pad_top, pad_bottom=pad_bottom,
+            pad_left=pad_left, pad_right=pad_right,
+            stride=stride, depthwise=depthwise)
+        return np.concatenate(outputs, axis=2), op
 
     op = create_operation_from_args(
         input_nhwc, weight_ohwi, biases,
@@ -1637,6 +1684,71 @@ def run_mesa_conv(fd, input_nhwc, weight_ohwi, biases,
     return result, op
 
 
+def run_mesa_conv_im2col(fd, input_nhwc, weight_ohwi, biases,
+                         input_zero_point=0, input_scale=1.0/255,
+                         weight_zero_point=0, weight_scale=1.0/255,
+                         output_zero_point=0, output_scale=1.0/255,
+                         depthwise=False):
+    """Lower fragile spatial/1D cases to a 1x1 NPU conv; no CPU convolution."""
+    _, in_h, in_w, in_c = input_nhwc.shape
+    oc, kw, kh, _ = weight_ohwi.shape
+    out_h = in_h - kh + 1
+    out_w = in_w - kw + 1
+    output_channels = in_c if depthwise else oc
+    flat_c = kh * kw * in_c
+    flat_c_aligned = _align(flat_c, FEATURE_ATOMIC_SIZE)
+
+    def build_im2col(row_start, row_end):
+        tile_h = row_end - row_start
+        im2col = np.full((1, tile_h, out_w, flat_c_aligned), input_zero_point, dtype=np.uint8)
+        flat = 0
+        for ic in range(in_c):
+            for ky in range(kh):
+                for kx in range(kw):
+                    src_y = row_start + ky
+                    im2col[0, :, :, flat] = input_nhwc[0, src_y:src_y + tile_h, kx:kx + out_w, ic]
+                    flat += 1
+        return im2col
+
+    weight_1x1 = np.full((output_channels, 1, 1, flat_c_aligned), weight_zero_point, dtype=np.uint8)
+    if depthwise:
+        for channel in range(in_c):
+            flat = channel * kh * kw
+            for ky in range(kh):
+                for kx in range(kw):
+                    weight_1x1[channel, 0, 0, flat] = weight_ohwi[0, kx, ky, channel]
+                    flat += 1
+    else:
+        for out_channel in range(oc):
+            flat = 0
+            for ic in range(in_c):
+                for ky in range(kh):
+                    for kx in range(kw):
+                        weight_1x1[out_channel, 0, 0, flat] = weight_ohwi[out_channel, kx, ky, ic]
+                        flat += 1
+
+    weights_banks = calc_weights_banks(1, 1, flat_c_aligned, output_channels, False)
+    available_input_banks = CBUF_BANKS - weights_banks
+    entries_per_slice = calc_entries_per_slice(out_w, flat_c_aligned)
+    tile_h = max(1, (CBUF_ENTRIES_PER_BANK * available_input_banks) // entries_per_slice)
+    tile_h = min(out_h, tile_h)
+
+    outputs = []
+    last_op = None
+    for row_start in range(0, out_h, tile_h):
+        row_end = min(row_start + tile_h, out_h)
+        im2col = build_im2col(row_start, row_end)
+        result, last_op = run_mesa_conv(
+            fd, im2col, weight_1x1, biases,
+            input_zero_point=input_zero_point, input_scale=input_scale,
+            weight_zero_point=weight_zero_point, weight_scale=weight_scale,
+            output_zero_point=output_zero_point, output_scale=output_scale,
+            stride=1, depthwise=False, _allow_im2col=False)
+        outputs.append(result[:, :, :output_channels])
+
+    return np.concatenate(outputs, axis=0), last_op
+
+
 # ---------------------------------------------------------------------------
 # CPU quantized reference
 # ---------------------------------------------------------------------------
@@ -1659,30 +1771,15 @@ def compute_expected_quantized(input_nhwc, weight_ohwi, biases,
     padded = np.zeros((1, in_h + pad_top + pad_bottom, in_w + pad_left + pad_right, in_c), dtype=np.int32)
     padded[:, pad_top:pad_top + in_h, pad_left:pad_left + in_w, :] = input_s
 
-    expected = np.zeros((1, out_h, out_w, output_channels), dtype=np.int32)
+    windows = np.lib.stride_tricks.sliding_window_view(
+        padded[0], (kh, kw), axis=(0, 1))[::stride, ::stride]
+    # sliding_window_view yields H/W windows as (out_h, out_w, C, kh, kw).
     if depthwise:
-        for c in range(output_channels):
-            for y in range(out_h):
-                for x in range(out_w):
-                    s = 0
-                    for ky in range(kh):
-                        for kx in range(kw):
-                            pi = padded[0, y * stride + ky, x * stride + kx, c]
-                            w = weight_s[0, kx, ky, c]
-                            s += pi * w
-                    expected[0, y, x, c] = s + biases[c]
+        expected = np.einsum('yxcab,bac->yxc', windows[:, :, :output_channels], weight_s[0], dtype=np.int64)
+        expected = expected[np.newaxis, :, :, :] + biases.reshape(1, 1, 1, output_channels)
     else:
-        for o in range(oc):
-            for y in range(out_h):
-                for x in range(out_w):
-                    s = 0
-                    for i in range(ic):
-                        for ky in range(kh):
-                            for kx in range(kw):
-                                pi = padded[0, y * stride + ky, x * stride + kx, i]
-                                w = weight_s[o, ky, kx, i]
-                                s += pi * w
-                    expected[0, y, x, o] = s + biases[o]
+        expected = np.einsum('yxcab,obac->yxo', windows, weight_s, dtype=np.int64)
+        expected = expected[np.newaxis, :, :, :] + biases.reshape(1, 1, 1, oc)
 
     input_scale = 1.0 / 255
     weight_scale = 1.0 / 255
@@ -1691,6 +1788,92 @@ def compute_expected_quantized(input_nhwc, weight_ohwi, biases,
     expected_f = expected.astype(np.float64) * conv_scale + output_zero_point
     expected_f = np.clip(np.round(expected_f), 0, 255).astype(np.uint8)
     return expected_f
+
+
+def load_conv_py_shapes():
+    """Extract the literal shapes list from sibling conv.py without importing it."""
+    def literal_dict_call(node):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name) or node.func.id != "dict":
+            return None
+        if node.args:
+            return None
+        out = {}
+        for kw in node.keywords:
+            if kw.arg is None:
+                return None
+            out[kw.arg] = ast.literal_eval(kw.value)
+        return out
+
+    conv_path = os.path.join(os.path.dirname(__file__), "conv.py")
+    with open(conv_path, "r", encoding="utf-8") as f:
+        tree = ast.parse(f.read(), filename=conv_path)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+            if "shapes" in names and isinstance(node.value, ast.List):
+                shapes = []
+                for elt in node.value.elts:
+                    shape = literal_dict_call(elt)
+                    if shape is not None:
+                        shapes.append(shape)
+                return shapes
+    raise RuntimeError("Could not find literal shapes list in conv.py")
+
+
+def conv_py_shape_to_mesa_case(shape):
+    """Translate one conv.py FP16 shape row into Mesa-style quantized semantics."""
+    batch = shape["batch"]
+    in_c = shape["in_c"]
+    out_c = shape["out_c"]
+    weight_in_c = shape["weight_in_c"]
+    kh = shape["kh"]
+    kw = shape["kw"]
+    groups = shape["groups"]
+
+    if batch != 1:
+        return None, "batch>1 unsupported by Mesa clone runner"
+    if shape["in_h"] < kh or shape["in_w"] < kw:
+        return None, "invalid output shape"
+
+    depthwise = groups == in_c == out_c and weight_in_c == 1
+    if groups != 1 and not depthwise:
+        return None, "arbitrary grouped convolution is outside Mesa clone scope"
+
+    input_shape = (1, shape["in_h"], shape["in_w"], in_c)
+    if depthwise:
+        weight_shape = (1, kw, kh, in_c)
+        bias_shape = (in_c,)
+    else:
+        if weight_in_c != in_c:
+            return None, "weight_in_c does not match normal input channels"
+        weight_shape = (out_c, kw, kh, in_c)
+        bias_shape = (out_c,)
+
+    return dict(name=shape["name"], input_shape=input_shape, weight_shape=weight_shape,
+                bias_shape=bias_shape, pad=0, stride=1, depthwise=depthwise), None
+
+
+def run_quantized_case(fd, shape):
+    np.random.seed(42)
+    input_nhwc = np.random.randint(0, 256, shape["input_shape"], dtype=np.uint8)
+    weight_ohwi = np.random.randint(0, 256, shape["weight_shape"], dtype=np.uint8)
+    biases = np.random.randint(-128, 128, shape["bias_shape"], dtype=np.int32)
+
+    result, op = run_mesa_conv(
+        fd, input_nhwc, weight_ohwi, biases,
+        pad_top=shape["pad"], pad_bottom=shape["pad"],
+        pad_left=shape["pad"], pad_right=shape["pad"],
+        stride=shape["stride"], depthwise=shape["depthwise"])
+
+    expected = compute_expected_quantized(
+        input_nhwc, weight_ohwi, biases, 0, 0, 0,
+        pad_top=shape["pad"], pad_bottom=shape["pad"],
+        pad_left=shape["pad"], pad_right=shape["pad"],
+        stride=shape["stride"], depthwise=shape["depthwise"])
+
+    diff = int(np.max(np.abs(result.astype(np.int32) - expected[0].astype(np.int32))))
+    return diff
 
 
 # ---------------------------------------------------------------------------
@@ -1714,40 +1897,66 @@ def shape_matrix_runner(fd):
              bias_shape=(2048,), pad=0, stride=1, depthwise=False),
     ]
 
+    failed = 0
     for s in shapes:
-        np.random.seed(42)
-        in_shape = s["input_shape"]
-        wt_shape = s["weight_shape"]
-        input_nhwc = np.random.randint(0, 256, in_shape, dtype=np.uint8)
-        weight_ohwi = np.random.randint(0, 256, wt_shape, dtype=np.uint8)
-        biases = np.random.randint(-128, 128, s["bias_shape"], dtype=np.int32)
-
         print(f"Running {s['name']} ...", end=" ")
         sys.stdout.flush()
 
         try:
-            result, op = run_mesa_conv(
-                fd, input_nhwc, weight_ohwi, biases,
-                pad_top=s["pad"], pad_bottom=s["pad"],
-                pad_left=s["pad"], pad_right=s["pad"],
-                stride=s["stride"], depthwise=s["depthwise"])
-
-            expected = compute_expected_quantized(
-                input_nhwc, weight_ohwi, biases,
-                0, 0, 0,
-                pad_top=s["pad"], pad_bottom=s["pad"],
-                pad_left=s["pad"], pad_right=s["pad"],
-                stride=s["stride"], depthwise=s["depthwise"])
-
-            diff = np.max(np.abs(result.astype(np.int32) - expected.astype(np.int32)))
+            diff = run_quantized_case(fd, s)
             ok = diff <= 1
             status = "PASS" if ok else f"FAIL (max_diff={diff})"
             print(f" {status}")
+            failed += 0 if ok else 1
         except Exception as e:
             print(f" ERROR: {e}")
+            failed += 1
+    print(f"Built-in matrix: {len(shapes) - failed} PASS, {failed} FAIL")
+
+
+def conv_py_shape_matrix_runner(fd):
+    """Run every conv.py test row that has Mesa-equivalent quantized semantics."""
+    conv_shapes = load_conv_py_shapes()
+    cases = []
+    skipped = []
+    for s in conv_shapes:
+        case, reason = conv_py_shape_to_mesa_case(s)
+        if case is None:
+            skipped.append((s["name"], reason))
+        else:
+            cases.append(case)
+
+    name_width = max(len(s["name"]) for s in conv_shapes) if conv_shapes else 1
+    passed = failed = 0
+    print(f"Running {len(cases)} Mesa-equivalent cases extracted from conv.py ({len(skipped)} skipped) ...")
+    for case in cases:
+        print(f"  {case['name']:<{name_width}s} ...", end=" ")
+        sys.stdout.flush()
+        try:
+            diff = run_quantized_case(fd, case)
+            ok = diff <= 1
+            if ok:
+                passed += 1
+                print("PASS")
+            else:
+                failed += 1
+                print(f"FAIL (max_diff={diff})")
+        except Exception as e:
+            failed += 1
+            print(f"ERROR: {e}")
+
+    if skipped:
+        print("Skipped conv.py rows outside this Mesa-clone contract:")
+        for name, reason in skipped:
+            print(f"  {name:<{name_width}s} SKIP ({reason})")
+
+    print(f"conv.py-derived Mesa matrix: {passed} PASS, {failed} FAIL, {len(skipped)} SKIP")
+    return failed
 
 
 if __name__ == "__main__":
     fd = _open_rocket_device()
     shape_matrix_runner(fd)
+    if "--conv-py-shapes" in sys.argv or "--all" in sys.argv:
+        conv_py_shape_matrix_runner(fd)
     os.close(fd)
