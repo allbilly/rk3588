@@ -1,13 +1,14 @@
-we are working in pur npu registers driver. DO NOT offload work to CPU/GPU unless specified. Make sure to test run any code changes unless specified otherwise.
-
-FOR all mentioned ops_rknn, it source code is at ~/npu/ops_rknn
-
-review info in experimental/* and nvdla/* when face and problem, and ask deepwiki
+we are working in pur npu registers driver. 
+- Do NOT remove comments in code
+- DO NOT offload work to CPU/GPU unless specified. Make sure to test run any code changes unless specified otherwise.
+- FOR all mentioned ops_rknn, it source code is at ~/npu/ops_rknn
+- review info in experimental/* and ref/nvdla/* when face and problem, and ask deepwiki
 
 On this Orange Pi RK3588 machine, the NPU card is present. Do not assume hardware is
 unavailable just because an earlier probe failed; 
 To prove the card userfule, or testing if NPU state is corruptued/polluted
 - `python examples/simple_add.py` is a known quick check that proves the card can be used.
+- or `python examples/kerenl_6_18/simple_add.py` if you are on kerenl 6.18 
 
 Use `deepwiki_ask_question` on these repos:
 - `nvdla/hw` — For C-model behavior (cmod/), register definitions, convolution pipeline details, weight/activation data flow. This is the **canonical hardware reference**. Key files:
