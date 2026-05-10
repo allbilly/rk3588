@@ -1241,6 +1241,10 @@ def emit_regcmd_like_mesa(op, task_num, input_phys_addr, output_phys_addr,
         E(reg.DPU, reg.BS_CFG,
           DPU_BS_CFG_BS_ALU_ALGO(2) | DPU_BS_CFG_BS_ALU_SRC(1) |
           DPU_BS_CFG_BS_RELU_BYPASS(1) | DPU_BS_CFG_BS_MUL_BYPASS(1)),
+        # BS_ALU_CFG BS_MUL_CFG BS_RELUX_CMP_VALUE need explictly set 0 to pass test
+        E(reg.DPU, reg.BS_ALU_CFG, 0),
+        E(reg.DPU, reg.BS_MUL_CFG, 0),
+        E(reg.DPU, reg.BS_RELUX_CMP_VALUE, 0),
         E(reg.DPU, reg.BS_OW_CFG, bs_ow_cfg),
         E(reg.DPU, reg.BS_OW_OP, DPU_BS_OW_OP_OW_OP(0x80 - task.weights_zero_point)),
         E(reg.DPU, reg.WDMA_SIZE_0,
@@ -1266,6 +1270,9 @@ def emit_regcmd_like_mesa(op, task_num, input_phys_addr, output_phys_addr,
         E(reg.RDMA, reg.RDMA_BS_BASE_ADDR, bias_phys_addr & 0xFFFFFFFF),
         *rdma_erdma_regs,
         E(reg.RDMA, reg.RDMA_FEATURE_MODE_CFG, rdma_feat),
+        E(reg.RDMA, reg.RDMA_WEIGHT,
+          DPU_RDMA_RDMA_WEIGHT_E_WEIGHT(1) | DPU_RDMA_RDMA_WEIGHT_N_WEIGHT(1) |
+          DPU_RDMA_RDMA_WEIGHT_B_WEIGHT(1) | DPU_RDMA_RDMA_WEIGHT_M_WEIGHT(1)),
         pc_base_reg,  # placeholder for single-task mode, patched for multi-task mode
         E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, 0),  # placeholder, patched later
         E(reg.VERSION, 0, 0),  # version sentinel
