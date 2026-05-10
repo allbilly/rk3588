@@ -248,9 +248,9 @@ def npu_submit(task_count=1):
 fd = _open_rocket_device()
 task_map, tasks_mem_create = _rocket_mem_allocate(fd, 64*1024)
 regcmd_map, regcmd_mem_create = _rocket_mem_allocate(fd, 512*1024)
-input_map, input_mem_create = _rocket_mem_allocate(fd, 4*1024*1024)
+input_map, input_mem_create = _rocket_mem_allocate(fd, 16*1024*1024)
 weight_map, weight_mem_create = _rocket_mem_allocate(fd, 4*1024*1024)
-output_map, output_mem_create = _rocket_mem_allocate(fd, 4*1024*1024)
+output_map, output_mem_create = _rocket_mem_allocate(fd, 16*1024*1024)
 npu_tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
 npu_regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
 
@@ -285,6 +285,8 @@ def _needs_c96_oc24_pointwise_schedule(in_c, out_c, kh, kw, groups):
 def _pointwise_split_add_chunks(in_c, out_c, in_h, in_w, kh, kw, groups):
     if groups != 1 or kh != 1 or kw != 1:
         return None
+    if (in_h < 4 or in_w < 4) and 64 <= in_c <= 256:
+        return [(0, in_c)]
     if in_c == 144 and out_c == 24 and in_h == 56 and in_w == 56:
         return [(0, 64), (64, 128), (128, 144)]
     if in_c == 144 and out_c == 32 and in_h == 28 and in_w == 28:
@@ -293,8 +295,9 @@ def _pointwise_split_add_chunks(in_c, out_c, in_h, in_w, kh, kw, groups):
         return [(0, 64), (64, 128), (128, 192)]
     if in_c == 256 and out_c == 32 and in_h == 28 and in_w == 28:
         return [(0, 64), (64, 128), (128, 192), (192, 256)]
-    if in_c >= 128 and out_c <= 32:
-        return [(start, min(start + 64, in_c)) for start in range(0, in_c, 64)]
+    if in_c >= 128 and out_c <= 128:
+        chunk_c = 128 if out_c > 32 else 64
+        return [(start, min(start + chunk_c, in_c)) for start in range(0, in_c, chunk_c)]
     return None
 
 def should_use_nhwc_pack(channels, c2):
@@ -364,10 +367,13 @@ def _pack_kh_major(weight, out_c, in_c, kh, kw, c2_out):
     aligned_in_c = c2_out * _ceil_div(in_c, c2_out)
     padded = np.zeros((out_c, aligned_in_c, kh, kw), dtype=np.float16)
     padded[:, :in_c] = weight
-    return np.concatenate([
-        padded[oc:oc + 16].transpose(2, 3, 0, 1).ravel()
-        for oc in range(0, out_c, 16)
-    ])
+    ic_group = 32 if aligned_in_c >= 32 and aligned_in_c % 32 == 0 else c2_out
+    blocks = []
+    for oc in range(0, out_c, 16):
+        block = padded[oc:oc + 16]
+        block_oc = block.shape[0]
+        blocks.append(block.reshape(block_oc, aligned_in_c // ic_group, ic_group, kh, kw).transpose(1, 3, 4, 0, 2).ravel())
+    return np.concatenate(blocks)
 
 def _pack_default(weight, out_c, in_c, kh, kw, c2_out):
     aligned_in_c = c2_out * _ceil_div(in_c, c2_out)
@@ -484,7 +490,7 @@ def _conv_tiles(p, is_spatial, grouped_spatial):
         elif small_channel:
             tile_h = max(1, RK_MAX_CONV_FLAT_STRIDE // p["out_w"]) if p["out_width_stride"] > RK_MAX_CONV_FLAT_STRIDE else p["out_h"]
         elif p["out_h"] > 50:
-            tile_h = 25 if (p["in_c"] >= 128 and p["out_c"] >= 128) else 50
+            tile_h = 25 if (p["in_c"] >= 128 and p["out_c"] >= 128) else (32 if p["out_width_stride"] > RK_MAX_CONV_FLAT_STRIDE else 50)
         elif channel_tiled:
             row_bytes = p["width_stride"] * _align_up(p["in_c"], p["align_c"]) * FP16_BYTES
             tile_h = min(p["out_h"], max(1, (8 * CBUF_BANK_SIZE) // max(1, row_bytes)))
@@ -494,14 +500,14 @@ def _conv_tiles(p, is_spatial, grouped_spatial):
                 or (not small_channel and (p["out_h"] > 50 or channel_tiled)),
                 [(row, min(tile_h, p["out_h"] - row)) for row in range(0, p["out_h"], tile_h)])
 
-    if not grouped_spatial and p["out_h"] > 48:
-        tile_out_h = 48
-        return True, [(row, min(tile_out_h + p["kh"] - 1, p["in_h"] - row)) for row in range(0, p["out_h"], tile_out_h)]
-
-    if p["is_depthwise"] and p["out_c"] > 32:
+    if p["is_depthwise"] and p["out_c"] >= 32:
         if p["out_h"] <= 13:
             return True, [(0, p["in_h"])]
-        tile_out_h = 13
+        tile_out_h = 32 if (p["out_c"] == 32 and p["kh"] == 3 and p["kw"] == 3) else (12 if max(p["kh"], p["kw"]) >= 5 else 13)
+        return True, [(row, min(tile_out_h + p["kh"] - 1, p["in_h"] - row)) for row in range(0, p["out_h"], tile_out_h)]
+
+    if not grouped_spatial and (p["out_h"] > 48 or p["out_c"] >= 48):
+        tile_out_h = 32
         return True, [(row, min(tile_out_h + p["kh"] - 1, p["in_h"] - row)) for row in range(0, p["out_h"], tile_out_h)]
 
     return False, [(0, p["in_h"])]
@@ -557,6 +563,9 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
             ((1 << 3) |                    # DPU_S_POINTER_POINTER_PP_MODE
              (1 << 2) |                    # DPU_S_POINTER_EXECUTER_PP_EN
              (1 << 1))),                   # DPU_S_POINTER_POINTER_PP_EN
+        E(reg.RDMA, reg.RDMA_S_POINTER, 0), # Clear stale DPU-RDMA state after eltwise/add tasks
+        E(reg.RDMA, reg.RDMA_ERDMA_CFG, 0),
+        E(reg.RDMA, reg.RDMA_FEATURE_MODE_CFG, 0),
         E(reg.CNA, reg.CNA_CONV_CON1,
             ((2 << 4) |                    # CNA_CONV_CON1_IN_PRECISION(fp16)
              (2 << 7) |                    # CNA_CONV_CON1_PROC_PRECISION(fp16)
@@ -809,10 +818,12 @@ def submit_fp16_add(a_dma, b_dma, out_dma, out_width_stride, align_out_c, repeat
 
 def submit_pointwise_to_output(input_nchw, weight_nchw, out_c):
     _, in_c, in_h, in_w = input_nchw.shape
-    p = _conv_params(1, in_c, in_h, in_w, out_c, 1, 1, 1)
+    sched_out_c = _align_up(out_c, 16) if (out_c % 16 and (out_c > 32 or (in_h == 1 and in_w == 1))) else out_c
+    p = _conv_params(1, in_c, in_h, in_w, sched_out_c, 1, 1, 1)
     ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_mem_create.size)
-    weight_full = weight_nchw.reshape(out_c, in_c, 1, 1)
-    wt_flat = pack_conv_weights_for_shape(weight_full, out_c, in_c, 1, 1, p["align_c"], 1)
+    weight_full = np.zeros((sched_out_c, in_c, 1, 1), dtype=np.float16)
+    weight_full[:out_c] = weight_nchw.reshape(out_c, in_c, 1, 1)
+    wt_flat = pack_conv_weights_for_shape(weight_full, sched_out_c, in_c, 1, 1, p["align_c"], 1)
     wt_ptr = ctypes.addressof(ctypes.c_char.from_buffer(weight_map))
     ctypes.memmove(wt_ptr, wt_flat.ctypes.data, wt_flat.nbytes)
 
@@ -828,19 +839,38 @@ def submit_pointwise_to_output(input_nchw, weight_nchw, out_c):
         assert input_offset + input_bytes <= input_mem_create.size, "input buffer too small"
         ctypes.memmove(input_ptr + input_offset, input_flat.ctypes.data, input_bytes)
         output_offset = row_start * in_w * 16
-        regs = make_conv2d_regs(
-            1, in_c, tile_in_h, in_w, out_c, 1, 1,
-            input_mem_create.dma_addr + input_offset,
-            weight_mem_create.dma_addr,
-            output_mem_create.dma_addr + output_offset,
-            groups=1,
-            out_width_stride_override=p["out_width_stride"],
-            weight_reuse=bool(task_regs),
-            full_data_bank=True,
-            out_fp16=True)
-        task_regs.append(regs)
+        if sched_out_c >= 48:
+            aligned_in_c = max(32, _align_up(in_c, 32)) if in_c >= 64 else _align_up(in_c, tile_p["align_c"])
+            hw_out_c = _align_up(sched_out_c, 16)
+            for oc_start in range(0, hw_out_c, 16):
+                oc_tile = min(16, hw_out_c - oc_start)
+                weight_offset = oc_start * aligned_in_c * FP16_BYTES
+                surface_offset = (oc_start // 16) * p["out_width_stride"] * 16 * FP16_BYTES
+                regs = make_conv2d_regs(
+                    1, in_c, tile_in_h, in_w, oc_tile, 1, 1,
+                    input_mem_create.dma_addr + input_offset,
+                    weight_mem_create.dma_addr + weight_offset,
+                    output_mem_create.dma_addr + output_offset + surface_offset,
+                    groups=1,
+                    out_width_stride_override=p["out_width_stride"],
+                    full_data_bank=True,
+                    out_fp16=True)
+                regs = _with_cbuf_data_bank(regs, _tile_data_bank(p, tile_in_h))
+                task_regs.append(regs)
+        else:
+            regs = make_conv2d_regs(
+                1, in_c, tile_in_h, in_w, sched_out_c, 1, 1,
+                input_mem_create.dma_addr + input_offset,
+                weight_mem_create.dma_addr,
+                output_mem_create.dma_addr + output_offset,
+                groups=1,
+                out_width_stride_override=p["out_width_stride"],
+                weight_reuse=bool(task_regs),
+                full_data_bank=True,
+                out_fp16=True)
+            task_regs.append(regs)
         input_offset = _align_up(input_offset + input_bytes, 16)
-    submit_conv_tasks(task_regs)
+    submit_conv_tasks(task_regs, repeat=2 if sched_out_c >= 48 else 1)
 
 def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None, out_fp16=False):
     in_h, in_w = input_hw
@@ -859,12 +889,38 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
     np.random.seed(42)
     input_nchw = np.random.uniform(-2, 2, (batch, in_c, in_h, in_w)).astype(np.float16)
     weight_nchw = np.random.uniform(-2, 2, (logical_out_c, weight_in_c, kh, kw)).astype(np.float16)
-    if groups == 1 and kh == 1 and kw == 1 and in_c >= 64:
-        # DO NOT CHEAT CPU OFFLOAD
-        pass
-    if _is_depthwise(in_c, out_c, groups) and (kh != 1 or kw != 1) and in_c >= 32:
-        # DO NOT CHEAT CPU OFFLOAD
-        pass
+    return_input_nchw = input_nchw
+    return_weight_nchw = weight_nchw
+    logical_out_h, logical_out_w = out_h, out_w
+    if is_spatial and (groups == 1 or p["is_depthwise"]) and out_h == 1 and out_w == 1 and in_c >= 64:
+        padded_input = np.zeros((batch, in_c, in_h + 1, in_w + 1), dtype=np.float16)
+        padded_input[:, :, :in_h, :in_w] = input_nchw
+        input_nchw = padded_input
+        in_h, in_w = in_h + 1, in_w + 1
+        p = _conv_params(1, in_c, in_h, in_w, hw_sched_out_c, kh, kw, groups)
+        out_h, out_w = p["out_h"], p["out_w"]
+    if is_spatial and groups == 1 and in_c > 32 and in_c % 32:
+        padded_in_c = _align_up(in_c, 32)
+        padded_input = np.zeros((batch, padded_in_c, in_h, in_w), dtype=np.float16)
+        padded_input[:, :in_c] = input_nchw
+        padded_weight = np.zeros((logical_out_c, padded_in_c, kh, kw), dtype=np.float16)
+        padded_weight[:, :in_c] = weight_nchw
+        input_nchw = padded_input
+        weight_nchw = padded_weight
+        in_c = padded_in_c
+        weight_in_c = padded_in_c
+        p = _conv_params(1, in_c, in_h, in_w, hw_sched_out_c, kh, kw, groups)
+    if not is_spatial and groups == 1 and in_c > 32 and in_c % 32:
+        padded_in_c = _align_up(in_c, 32)
+        padded_input = np.zeros((batch, padded_in_c, in_h, in_w), dtype=np.float16)
+        padded_input[:, :in_c] = input_nchw
+        padded_weight = np.zeros((logical_out_c, padded_in_c, kh, kw), dtype=np.float16)
+        padded_weight[:, :in_c] = weight_nchw
+        input_nchw = padded_input
+        weight_nchw = padded_weight
+        in_c = padded_in_c
+        weight_in_c = padded_in_c
+        p = _conv_params(1, in_c, in_h, in_w, hw_sched_out_c, kh, kw, groups)
 
     out_dtype = np.float16 if out_fp16 else np.float32
     read_dtype = np.float16 if hw_out_fp16 else np.float32
@@ -875,10 +931,13 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
 
     split_add_chunks = _pointwise_split_add_chunks(in_c, out_c, in_h, in_w, kh, kw, groups)
     if split_add_chunks is not None:
-        raw_elements = _ceil_div(p["align_out_c"], UNPACK_C2) * p["out_width_stride"] * UNPACK_C2
+        pad_small_spatial = in_h < 4 or in_w < 4
+        acc_p = _conv_params(1, in_c, max(4, in_h), max(4, in_w), out_c, 1, 1, 1) if pad_small_spatial else p
+        acc_out_h, acc_out_w = acc_p["out_h"], acc_p["out_w"]
+        raw_elements = _ceil_div(acc_p["align_out_c"], UNPACK_C2) * acc_p["out_width_stride"] * UNPACK_C2
         raw_bytes = raw_elements * FP16_BYTES
-        stage_a_offset = 2 * 1024 * 1024
-        stage_b_offset = 2 * 1024 * 1024
+        stage_a_offset = 8 * 1024 * 1024
+        stage_b_offset = 3 * 1024 * 1024
         assert stage_a_offset + raw_bytes <= input_mem_create.size, "input staging buffer too small"
         assert stage_b_offset + raw_bytes <= weight_mem_create.size, "weight staging buffer too small"
         out_ptr = ctypes.addressof(ctypes.c_char.from_buffer(output_map))
@@ -886,25 +945,49 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
         stage_b_ptr = ctypes.addressof(ctypes.c_char.from_buffer(weight_map)) + stage_b_offset
         stage_a_dma = input_mem_create.dma_addr + stage_a_offset
         stage_b_dma = weight_mem_create.dma_addr + stage_b_offset
+        warmup_regs = make_conv2d_regs(
+            1, 1, 4, 4, 6, 1, 1,
+            input_mem_create.dma_addr,
+            weight_mem_create.dma_addr,
+            output_mem_create.dma_addr,
+            groups=1,
+            out_fp16=True)
+        submit_conv_tasks([warmup_regs], repeat=2)
+        partials = []
+        for start_c, end_c in split_add_chunks:
+            chunk_input = input_nchw[:, start_c:end_c]
+            if pad_small_spatial:
+                padded_chunk = np.zeros((batch, end_c - start_c, acc_p["out_h"], acc_p["out_w"]), dtype=np.float16)
+                padded_chunk[:, :, :in_h, :in_w] = chunk_input
+                chunk_input = padded_chunk
+            submit_pointwise_to_output(chunk_input, weight_nchw[:, start_c:end_c], out_c)
+            partials.append(np.frombuffer(output_map, dtype=np.float16, count=raw_elements).copy())
+
+        if len(partials) == 1:
+            out_buf = partials[0]
+            result = _unpack_flat_1x1_output(out_buf, out_c, acc_out_h, acc_out_w, acc_p["out_width_stride"], UNPACK_C2).reshape(batch, out_c, acc_out_h, acc_out_w)
+            if pad_small_spatial:
+                result = result[:, :, :out_h, :out_w]
+            return result.astype(out_dtype), input_nchw, weight_nchw
+
         zero_raw = np.zeros(raw_elements, dtype=np.float16)
         ctypes.memmove(stage_a_ptr, zero_raw.ctypes.data, raw_bytes)
         ctypes.memmove(stage_b_ptr, zero_raw.ctypes.data, raw_bytes)
-        submit_fp16_add(stage_a_dma, stage_b_dma, output_mem_create.dma_addr, p["out_width_stride"], p["align_out_c"], repeat=1)
+        submit_fp16_add(stage_a_dma, stage_b_dma, output_mem_create.dma_addr, acc_p["out_width_stride"], acc_p["align_out_c"], repeat=1)
 
-        first_start, first_end = split_add_chunks[0]
-        submit_pointwise_to_output(input_nchw[:, first_start:first_end], weight_nchw[:, first_start:first_end], out_c)
-        ctypes.memmove(stage_a_ptr, out_ptr, raw_bytes)
-
-        for chunk_idx, (start_c, end_c) in enumerate(split_add_chunks[1:], start=1):
-            submit_pointwise_to_output(input_nchw[:, start_c:end_c], weight_nchw[:, start_c:end_c], out_c)
-            ctypes.memmove(stage_b_ptr, out_ptr, raw_bytes)
-            submit_fp16_add(stage_a_dma, stage_b_dma, output_mem_create.dma_addr, p["out_width_stride"], p["align_out_c"])
-            if chunk_idx + 1 < len(split_add_chunks):
-                ctypes.memmove(stage_a_ptr, out_ptr, raw_bytes)
+        ctypes.memmove(stage_a_ptr, partials[0].ctypes.data, raw_bytes)
+        for chunk_idx, partial in enumerate(partials[1:], start=1):
+            ctypes.memmove(stage_b_ptr, partial.ctypes.data, raw_bytes)
+            submit_fp16_add(stage_a_dma, stage_b_dma, output_mem_create.dma_addr, acc_p["out_width_stride"], acc_p["align_out_c"])
+            if chunk_idx + 1 < len(partials):
+                stage_raw = np.frombuffer(output_map, dtype=np.float16, count=raw_elements).copy()
+                ctypes.memmove(stage_a_ptr, stage_raw.ctypes.data, raw_bytes)
 
         out_buf = read_output(raw_elements)
-        result = _unpack_flat_1x1_output(out_buf, out_c, out_h, out_w, p["out_width_stride"], UNPACK_C2).reshape(batch, out_c, out_h, out_w)
-        return result.astype(out_dtype), input_nchw, weight_nchw
+        result = _unpack_flat_1x1_output(out_buf, out_c, acc_out_h, acc_out_w, acc_p["out_width_stride"], UNPACK_C2).reshape(batch, out_c, acc_out_h, acc_out_w)
+        if pad_small_spatial:
+            result = result[:, :, :out_h, :out_w]
+        return result.astype(out_dtype), return_input_nchw, return_weight_nchw
 
     if _is_depthwise(in_c, out_c, groups):
         weight_full = np.zeros((out_c, in_c, kh, kw), dtype=np.float16)
@@ -935,7 +1018,7 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
             task_regs = []
             input_offset = 0
             output_channel_tile_size = 512 if compact_tail else 16
-            output_channel_tiles = (not is_spatial and hw_sched_out_c >= 48)
+            output_channel_tiles = (not p["is_depthwise"] and not grouped_spatial and hw_sched_out_c >= 48)
             depthwise_channel_tiles = p["is_depthwise"] and out_c >= 32
             if compact_tail:
                 warmup_regs = make_conv2d_regs(
@@ -964,31 +1047,34 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
                     depthwise_block_c = 32
                     for ch_start in range(0, out_c, depthwise_block_c):
                         ch_tile = min(depthwise_block_c, out_c - ch_start)
-                        block_p = _conv_params(1, ch_tile, tile_in_h, in_w, ch_tile, kh, kw, ch_tile)
-                        block_input_flat = _pack_conv_input_fp16(input_tile[ch_start:ch_start + ch_tile], block_p).view(np.uint16)
+                        hw_ch_tile = max(depthwise_block_c, ch_tile)
+                        block_p = _conv_params(1, hw_ch_tile, tile_in_h, in_w, hw_ch_tile, kh, kw, hw_ch_tile)
+                        block_input = np.zeros((hw_ch_tile, tile_in_h, in_w), dtype=np.float16)
+                        block_input[:ch_tile] = input_tile[ch_start:ch_start + ch_tile]
+                        block_input_flat = _pack_conv_input_fp16(block_input, block_p).view(np.uint16)
                         block_input_flat = block_input_flat.tolist()
                         ct_inputs = (ctypes.c_uint16 * len(block_input_flat)).from_buffer(input_map)
                         ct_inputs[:] = block_input_flat
-                        block_weight_full = np.zeros((ch_tile, ch_tile, kh, kw), dtype=np.float16)
+                        block_weight_full = np.zeros((hw_ch_tile, hw_ch_tile, kh, kw), dtype=np.float16)
                         for local_c in range(ch_tile):
                             block_weight_full[local_c, local_c] = weight_nchw[ch_start + local_c, 0]
-                        block_weight_flat = pack_conv_weights_for_shape(block_weight_full, ch_tile, ch_tile, kh, kw, block_p["align_c"], ch_tile)
+                        block_weight_flat = pack_conv_weights_for_shape(block_weight_full, hw_ch_tile, hw_ch_tile, kh, kw, block_p["align_c"], hw_ch_tile)
                         ctypes.memmove(wt_ptr, block_weight_flat.ctypes.data, block_weight_flat.nbytes)
                         ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_mem_create.size)
                         regs = make_conv2d_regs(
-                            1, ch_tile, tile_in_h, in_w, ch_tile, kh, kw,
+                            1, hw_ch_tile, tile_in_h, in_w, hw_ch_tile, kh, kw,
                             input_mem_create.dma_addr,
                             weight_mem_create.dma_addr,
                             output_mem_create.dma_addr,
-                            groups=ch_tile,
+                            groups=hw_ch_tile,
                             out_width_stride_override=p["out_width_stride"],
                             full_data_bank=True,
                             out_fp16=hw_out_fp16)
                         submit_conv_tasks([regs], repeat=2)
-                        out_c1 = _ceil_div(max(16, _align_up(ch_tile, 16)), unpack_c2)
+                        out_c1 = _ceil_div(max(16, _align_up(hw_ch_tile, 16)), unpack_c2)
                         out_buf = read_output(out_c1 * p["out_width_stride"] * unpack_c2)
                         result[n, ch_start:ch_start + ch_tile, row_start:row_start + tile_out_h, :] = _unpack_flat_1x1_output(
-                            out_buf, ch_tile, tile_out_h, out_w, p["out_width_stride"], unpack_c2)
+                            out_buf, hw_ch_tile, tile_out_h, out_w, p["out_width_stride"], unpack_c2)[:ch_tile]
                 elif output_channel_tiles:
                     aligned_in_c = max(32, _align_up(in_c, 32)) if (kh == 1 and kw == 1 and groups == 1 and in_c >= 64) else _align_up(in_c, p["align_c"])
                     for oc_start in range(0, hw_sched_out_c, output_channel_tile_size):
@@ -1061,7 +1147,7 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
             out_c1 = _ceil_div(p["align_out_c"], unpack_c2)
             out_buf = read_output(out_c1 * p["out_width_stride"] * unpack_c2)
             result[n] = _unpack_flat_1x1_output(out_buf, hw_sched_out_c, out_h, out_w, p["out_width_stride"], unpack_c2)
-    return result[:, :logical_out_c], input_nchw, weight_nchw
+    return result[:, :logical_out_c, :logical_out_h, :logical_out_w], return_input_nchw, return_weight_nchw
 
 def compute_expected_nchw(input_nchw, weight_nchw, batch, in_c, in_h, in_w, out_c, kh, kw, groups=1):
     out_h, out_w = in_h - kh + 1, in_w - kw + 1
@@ -1258,98 +1344,99 @@ if __name__ == "__main__":
         dict(name="b1_c128_h28_w28_oc256_wic128_k1x1_g1",  batch=1, in_c=128, in_h=28,  in_w=28,  out_c=256, weight_in_c=128, kh=1, kw=1, groups=1),
         dict(name="b1_c256_h28_w28_oc256_wic256_k1x1_g1",  batch=1, in_c=256, in_h=28,  in_w=28,  out_c=256, weight_in_c=256, kh=1, kw=1, groups=1),
         dict(name="b1_c3_h224_w224_oc32_wic3_k3x3_g1",     batch=1, in_c=3,   in_h=224, in_w=224, out_c=32,  weight_in_c=3,   kh=3, kw=3, groups=1),
+        
+        dict(name="b1_c96_h112_w112_oc96_wic1_k3x3_g96_s1_pvalid", batch=1, in_c=96, in_h=112, in_w=112, out_c=96, weight_in_c=1, kh=3, kw=3, groups=96, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c144_h56_w56_oc144_wic1_k3x3_g144_s1_pvalid", batch=1, in_c=144, in_h=56, in_w=56, out_c=144, weight_in_c=1, kh=3, kw=3, groups=144, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid", batch=1, in_c=192, in_h=28, in_w=28, out_c=96, weight_in_c=192, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c32_h14_w14_oc64_wic32_k3x3_g1_s1_pvalid", batch=1, in_c=32, in_h=14, in_w=14, out_c=64, weight_in_c=32, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c528_h14_w14_oc256_wic528_k1x1_g1_s1_pvalid", batch=1, in_c=528, in_h=14, in_w=14, out_c=256, weight_in_c=528, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c528_h14_w14_oc160_wic528_k1x1_g1_s1_pvalid", batch=1, in_c=528, in_h=14, in_w=14, out_c=160, weight_in_c=528, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c160_h14_w14_oc320_wic160_k3x3_g1_s1_pvalid", batch=1, in_c=160, in_h=14, in_w=14, out_c=320, weight_in_c=160, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c528_h14_w14_oc32_wic528_k1x1_g1_s1_pvalid", batch=1, in_c=528, in_h=14, in_w=14, out_c=32, weight_in_c=528, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c32_h14_w14_oc128_wic32_k3x3_g1_s1_pvalid", batch=1, in_c=32, in_h=14, in_w=14, out_c=128, weight_in_c=32, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c528_h14_w14_oc128_wic528_k1x1_g1_s1_pvalid", batch=1, in_c=528, in_h=14, in_w=14, out_c=128, weight_in_c=528, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid", batch=1, in_c=160, in_h=7, in_w=7, out_c=320, weight_in_c=160, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c32_h7_w7_oc128_wic32_k3x3_g1_s1_pvalid", batch=1, in_c=32, in_h=7, in_w=7, out_c=128, weight_in_c=32, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid", batch=1, in_c=192, in_h=7, in_w=7, out_c=384, weight_in_c=192, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c832_h7_w7_oc48_wic832_k1x1_g1_s1_pvalid", batch=1, in_c=832, in_h=7, in_w=7, out_c=48, weight_in_c=832, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c32_h150_w150_oc32_wic1_k3x3_g32_s1_pvalid", batch=1, in_c=32, in_h=150, in_w=150, out_c=32, weight_in_c=1, kh=3, kw=3, groups=32, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c32_h150_w150_oc16_wic32_k1x1_g1_s1_pvalid", batch=1, in_c=32, in_h=150, in_w=150, out_c=16, weight_in_c=32, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c16_h150_w150_oc96_wic16_k1x1_g1_s1_pvalid", batch=1, in_c=16, in_h=150, in_w=150, out_c=96, weight_in_c=16, kh=1, kw=1, groups=1, known_reason="buffer size error"),
+        dict(name="b1_c96_h150_w150_oc96_wic1_k3x3_g96_s1_pvalid", batch=1, in_c=96, in_h=150, in_w=150, out_c=96, weight_in_c=1, kh=3, kw=3, groups=96, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c96_h75_w75_oc24_wic96_k1x1_g1_s1_pvalid", batch=1, in_c=96, in_h=75, in_w=75, out_c=24, weight_in_c=96, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c144_h75_w75_oc144_wic1_k3x3_g144_s1_pvalid", batch=1, in_c=144, in_h=75, in_w=75, out_c=144, weight_in_c=1, kh=3, kw=3, groups=144, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c144_h75_w75_oc24_wic144_k1x1_g1_s1_pvalid", batch=1, in_c=144, in_h=75, in_w=75, out_c=24, weight_in_c=144, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c144_h38_w38_oc32_wic144_k1x1_g1_s1_pvalid", batch=1, in_c=144, in_h=38, in_w=38, out_c=32, weight_in_c=144, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c192_h38_w38_oc192_wic1_k3x3_g192_s1_pvalid", batch=1, in_c=192, in_h=38, in_w=38, out_c=192, weight_in_c=1, kh=3, kw=3, groups=192, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c192_h38_w38_oc32_wic192_k1x1_g1_s1_pvalid", batch=1, in_c=192, in_h=38, in_w=38, out_c=32, weight_in_c=192, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c384_h19_w19_oc384_wic1_k3x3_g384_s1_pvalid", batch=1, in_c=384, in_h=19, in_w=19, out_c=384, weight_in_c=1, kh=3, kw=3, groups=384, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c384_h19_w19_oc64_wic384_k1x1_g1_s1_pvalid", batch=1, in_c=384, in_h=19, in_w=19, out_c=64, weight_in_c=384, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c384_h19_w19_oc96_wic384_k1x1_g1_s1_pvalid", batch=1, in_c=384, in_h=19, in_w=19, out_c=96, weight_in_c=384, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c576_h19_w19_oc576_wic1_k3x3_g576_s1_pvalid", batch=1, in_c=576, in_h=19, in_w=19, out_c=576, weight_in_c=1, kh=3, kw=3, groups=576, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c576_h19_w19_oc96_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=19, in_w=19, out_c=96, weight_in_c=576, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c576_h19_w19_oc12_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=19, in_w=19, out_c=12, weight_in_c=576, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c576_h19_w19_oc273_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=19, in_w=19, out_c=273, weight_in_c=576, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c960_h10_w10_oc960_wic1_k3x3_g960_s1_pvalid", batch=1, in_c=960, in_h=10, in_w=10, out_c=960, weight_in_c=1, kh=3, kw=3, groups=960, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c1280_h10_w10_oc24_wic1280_k1x1_g1_s1_pvalid", batch=1, in_c=1280, in_h=10, in_w=10, out_c=24, weight_in_c=1280, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c1280_h10_w10_oc546_wic1280_k1x1_g1_s1_pvalid", batch=1, in_c=1280, in_h=10, in_w=10, out_c=546, weight_in_c=1280, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c256_h10_w10_oc512_wic256_k3x3_g1_s1_pvalid", batch=1, in_c=256, in_h=10, in_w=10, out_c=512, weight_in_c=256, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c128_h5_w5_oc256_wic128_k3x3_g1_s1_pvalid", batch=1, in_c=128, in_h=5, in_w=5, out_c=256, weight_in_c=128, kh=3, kw=3, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=3, in_w=3, out_c=24, weight_in_c=256, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c256_h3_w3_oc546_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=3, in_w=3, out_c=546, weight_in_c=256, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=3, in_w=3, out_c=128, weight_in_c=256, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid", batch=1, in_c=128, in_h=3, in_w=3, out_c=256, weight_in_c=128, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=2, in_w=2, out_c=24, weight_in_c=256, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c256_h2_w2_oc546_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=2, in_w=2, out_c=546, weight_in_c=256, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=2, in_w=2, out_c=64, weight_in_c=256, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c128_h1_w1_oc24_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=1, in_w=1, out_c=24, weight_in_c=128, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c3_h320_w320_oc32_wic3_k3x3_g1_s1_pvalid", batch=1, in_c=3, in_h=320, in_w=320, out_c=32, weight_in_c=3, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c32_h160_w160_oc8_wic32_k1x1_g1_s1_pvalid", batch=1, in_c=32, in_h=160, in_w=160, out_c=8, weight_in_c=32, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c8_h160_w160_oc16_wic8_k3x3_g1_s1_pvalid", batch=1, in_c=8, in_h=160, in_w=160, out_c=16, weight_in_c=8, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c16_h160_w160_oc128_wic16_k3x3_g1_s1_pvalid", batch=1, in_c=16, in_h=160, in_w=160, out_c=128, weight_in_c=16, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c128_h80_w80_oc16_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=80, in_w=80, out_c=16, weight_in_c=128, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid", batch=1, in_c=16, in_h=80, in_w=80, out_c=64, weight_in_c=16, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c64_h80_w80_oc16_wic64_k1x1_g1_s1_pvalid", batch=1, in_c=64, in_h=80, in_w=80, out_c=16, weight_in_c=64, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid", batch=1, in_c=16, in_h=80, in_w=80, out_c=128, weight_in_c=16, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid", batch=1, in_c=16, in_h=80, in_w=80, out_c=128, weight_in_c=16, kh=5, kw=5, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c128_h40_w40_oc40_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=40, in_w=40, out_c=40, weight_in_c=128, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c40_h40_w40_oc160_wic40_k3x3_g1_s1_pvalid", batch=1, in_c=40, in_h=40, in_w=40, out_c=160, weight_in_c=40, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c160_h40_w40_oc40_wic160_k1x1_g1_s1_pvalid", batch=1, in_c=160, in_h=40, in_w=40, out_c=40, weight_in_c=160, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid", batch=1, in_c=40, in_h=40, in_w=40, out_c=320, weight_in_c=40, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c320_h40_w40_oc320_wic1_k3x3_g320_s1_pvalid", batch=1, in_c=320, in_h=40, in_w=40, out_c=320, weight_in_c=1, kh=3, kw=3, groups=320, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c320_h20_w20_oc72_wic320_k1x1_g1_s1_pvalid", batch=1, in_c=320, in_h=20, in_w=20, out_c=72, weight_in_c=320, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c72_h20_w20_oc576_wic72_k1x1_g1_s1_pvalid", batch=1, in_c=72, in_h=20, in_w=20, out_c=576, weight_in_c=72, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c576_h20_w20_oc576_wic1_k3x3_g576_s1_pvalid", batch=1, in_c=576, in_h=20, in_w=20, out_c=576, weight_in_c=1, kh=3, kw=3, groups=576, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c576_h20_w20_oc72_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=20, in_w=20, out_c=72, weight_in_c=576, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c72_h20_w20_oc288_wic72_k3x3_g1_s1_pvalid", batch=1, in_c=72, in_h=20, in_w=20, out_c=288, weight_in_c=72, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c288_h20_w20_oc72_wic288_k1x1_g1_s1_pvalid", batch=1, in_c=288, in_h=20, in_w=20, out_c=72, weight_in_c=288, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c576_h20_w20_oc576_wic1_k5x5_g576_s1_pvalid", batch=1, in_c=576, in_h=20, in_w=20, out_c=576, weight_in_c=1, kh=5, kw=5, groups=576, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c576_h20_w20_oc96_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=20, in_w=20, out_c=96, weight_in_c=576, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c768_h20_w20_oc768_wic1_k5x5_g768_s1_pvalid", batch=1, in_c=768, in_h=20, in_w=20, out_c=768, weight_in_c=1, kh=5, kw=5, groups=768, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c768_h20_w20_oc96_wic768_k1x1_g1_s1_pvalid", batch=1, in_c=768, in_h=20, in_w=20, out_c=96, weight_in_c=768, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c768_h20_w20_oc768_wic1_k3x3_g768_s1_pvalid", batch=1, in_c=768, in_h=20, in_w=20, out_c=768, weight_in_c=1, kh=3, kw=3, groups=768, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c768_h10_w10_oc120_wic768_k1x1_g1_s1_pvalid", batch=1, in_c=768, in_h=10, in_w=10, out_c=120, weight_in_c=768, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c960_h10_w10_oc120_wic960_k1x1_g1_s1_pvalid", batch=1, in_c=960, in_h=10, in_w=10, out_c=120, weight_in_c=960, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c480_h10_w10_oc480_wic1_k5x5_g480_s1_pvalid", batch=1, in_c=480, in_h=10, in_w=10, out_c=480, weight_in_c=1, kh=5, kw=5, groups=480, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c480_h10_w10_oc120_wic480_k1x1_g1_s1_pvalid", batch=1, in_c=480, in_h=10, in_w=10, out_c=120, weight_in_c=480, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c960_h10_w10_oc960_wic1_k5x5_g960_s1_pvalid", batch=1, in_c=960, in_h=10, in_w=10, out_c=960, weight_in_c=1, kh=5, kw=5, groups=960, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c256_h10_w10_oc256_wic1_k3x3_g256_s1_pvalid", batch=1, in_c=256, in_h=10, in_w=10, out_c=256, weight_in_c=1, kh=3, kw=3, groups=256, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=3, in_w=3, out_c=256, weight_in_c=128, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c128_h3_w3_oc128_wic1_k3x3_g128_s1_pvalid", batch=1, in_c=128, in_h=3, in_w=3, out_c=128, weight_in_c=1, kh=3, kw=3, groups=128, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=2, in_w=2, out_c=256, weight_in_c=128, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid", batch=1, in_c=64, in_h=1, in_w=1, out_c=128, weight_in_c=64, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c96_h20_w20_oc96_wic1_k3x3_g96_s1_pvalid", batch=1, in_c=96, in_h=20, in_w=20, out_c=96, weight_in_c=1, kh=3, kw=3, groups=96, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c384_h10_w10_oc384_wic1_k3x3_g384_s1_pvalid", batch=1, in_c=384, in_h=10, in_w=10, out_c=384, weight_in_c=1, kh=3, kw=3, groups=384, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c512_h5_w5_oc512_wic1_k3x3_g512_s1_pvalid", batch=1, in_c=512, in_h=5, in_w=5, out_c=512, weight_in_c=1, kh=3, kw=3, groups=512, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c256_h3_w3_oc256_wic1_k3x3_g256_s1_pvalid", batch=1, in_c=256, in_h=3, in_w=3, out_c=256, weight_in_c=1, kh=3, kw=3, groups=256, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c96_h20_w20_oc12_wic96_k1x1_g1_s1_pvalid", batch=1, in_c=96, in_h=20, in_w=20, out_c=12, weight_in_c=96, kh=1, kw=1, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
+        dict(name="b1_c96_h20_w20_oc273_wic96_k1x1_g1_s1_pvalid", batch=1, in_c=96, in_h=20, in_w=20, out_c=273, weight_in_c=96, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
+        dict(name="b1_c384_h10_w10_oc546_wic384_k1x1_g1_s1_pvalid", batch=1, in_c=384, in_h=10, in_w=10, out_c=546, weight_in_c=384, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
     ]
     shapes_sweep = [dict(name=f"conv2d_1x3_{n}x{n}_k1", batch=1, in_c=3, in_h=n, in_w=n, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1) for n in range(2, 400, 2)]
     # shapes += shapes_sweep
     # -- Known-issue / reference shapes (non-blocking, report-only) --
     # These shapes pass in real Mesa TFLite but fail in conv.py for known reasons.
     known_issue_shapes = [
-        dict(name="known_b1_c96_h112_w112_oc96_wic1_k3x3_g96_s1_pvalid", batch=1, in_c=96, in_h=112, in_w=112, out_c=96, weight_in_c=1, kh=3, kw=3, groups=96, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c144_h56_w56_oc144_wic1_k3x3_g144_s1_pvalid", batch=1, in_c=144, in_h=56, in_w=56, out_c=144, weight_in_c=1, kh=3, kw=3, groups=144, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid", batch=1, in_c=192, in_h=28, in_w=28, out_c=96, weight_in_c=192, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c32_h14_w14_oc64_wic32_k3x3_g1_s1_pvalid", batch=1, in_c=32, in_h=14, in_w=14, out_c=64, weight_in_c=32, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c528_h14_w14_oc256_wic528_k1x1_g1_s1_pvalid", batch=1, in_c=528, in_h=14, in_w=14, out_c=256, weight_in_c=528, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c528_h14_w14_oc160_wic528_k1x1_g1_s1_pvalid", batch=1, in_c=528, in_h=14, in_w=14, out_c=160, weight_in_c=528, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c160_h14_w14_oc320_wic160_k3x3_g1_s1_pvalid", batch=1, in_c=160, in_h=14, in_w=14, out_c=320, weight_in_c=160, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c528_h14_w14_oc32_wic528_k1x1_g1_s1_pvalid", batch=1, in_c=528, in_h=14, in_w=14, out_c=32, weight_in_c=528, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c32_h14_w14_oc128_wic32_k3x3_g1_s1_pvalid", batch=1, in_c=32, in_h=14, in_w=14, out_c=128, weight_in_c=32, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c528_h14_w14_oc128_wic528_k1x1_g1_s1_pvalid", batch=1, in_c=528, in_h=14, in_w=14, out_c=128, weight_in_c=528, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid", batch=1, in_c=160, in_h=7, in_w=7, out_c=320, weight_in_c=160, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c32_h7_w7_oc128_wic32_k3x3_g1_s1_pvalid", batch=1, in_c=32, in_h=7, in_w=7, out_c=128, weight_in_c=32, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid", batch=1, in_c=192, in_h=7, in_w=7, out_c=384, weight_in_c=192, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c832_h7_w7_oc48_wic832_k1x1_g1_s1_pvalid", batch=1, in_c=832, in_h=7, in_w=7, out_c=48, weight_in_c=832, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c32_h150_w150_oc32_wic1_k3x3_g32_s1_pvalid", batch=1, in_c=32, in_h=150, in_w=150, out_c=32, weight_in_c=1, kh=3, kw=3, groups=32, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c32_h150_w150_oc16_wic32_k1x1_g1_s1_pvalid", batch=1, in_c=32, in_h=150, in_w=150, out_c=16, weight_in_c=32, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c16_h150_w150_oc96_wic16_k1x1_g1_s1_pvalid", batch=1, in_c=16, in_h=150, in_w=150, out_c=96, weight_in_c=16, kh=1, kw=1, groups=1, known_reason="buffer size error"),
-        dict(name="known_b1_c96_h150_w150_oc96_wic1_k3x3_g96_s1_pvalid", batch=1, in_c=96, in_h=150, in_w=150, out_c=96, weight_in_c=1, kh=3, kw=3, groups=96, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c96_h75_w75_oc24_wic96_k1x1_g1_s1_pvalid", batch=1, in_c=96, in_h=75, in_w=75, out_c=24, weight_in_c=96, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c144_h75_w75_oc144_wic1_k3x3_g144_s1_pvalid", batch=1, in_c=144, in_h=75, in_w=75, out_c=144, weight_in_c=1, kh=3, kw=3, groups=144, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c144_h75_w75_oc24_wic144_k1x1_g1_s1_pvalid", batch=1, in_c=144, in_h=75, in_w=75, out_c=24, weight_in_c=144, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c144_h38_w38_oc32_wic144_k1x1_g1_s1_pvalid", batch=1, in_c=144, in_h=38, in_w=38, out_c=32, weight_in_c=144, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c192_h38_w38_oc192_wic1_k3x3_g192_s1_pvalid", batch=1, in_c=192, in_h=38, in_w=38, out_c=192, weight_in_c=1, kh=3, kw=3, groups=192, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c192_h38_w38_oc32_wic192_k1x1_g1_s1_pvalid", batch=1, in_c=192, in_h=38, in_w=38, out_c=32, weight_in_c=192, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c384_h19_w19_oc384_wic1_k3x3_g384_s1_pvalid", batch=1, in_c=384, in_h=19, in_w=19, out_c=384, weight_in_c=1, kh=3, kw=3, groups=384, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c384_h19_w19_oc64_wic384_k1x1_g1_s1_pvalid", batch=1, in_c=384, in_h=19, in_w=19, out_c=64, weight_in_c=384, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c384_h19_w19_oc96_wic384_k1x1_g1_s1_pvalid", batch=1, in_c=384, in_h=19, in_w=19, out_c=96, weight_in_c=384, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c576_h19_w19_oc576_wic1_k3x3_g576_s1_pvalid", batch=1, in_c=576, in_h=19, in_w=19, out_c=576, weight_in_c=1, kh=3, kw=3, groups=576, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c576_h19_w19_oc96_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=19, in_w=19, out_c=96, weight_in_c=576, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c576_h19_w19_oc12_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=19, in_w=19, out_c=12, weight_in_c=576, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c576_h19_w19_oc273_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=19, in_w=19, out_c=273, weight_in_c=576, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c960_h10_w10_oc960_wic1_k3x3_g960_s1_pvalid", batch=1, in_c=960, in_h=10, in_w=10, out_c=960, weight_in_c=1, kh=3, kw=3, groups=960, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c1280_h10_w10_oc24_wic1280_k1x1_g1_s1_pvalid", batch=1, in_c=1280, in_h=10, in_w=10, out_c=24, weight_in_c=1280, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c1280_h10_w10_oc546_wic1280_k1x1_g1_s1_pvalid", batch=1, in_c=1280, in_h=10, in_w=10, out_c=546, weight_in_c=1280, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c256_h10_w10_oc512_wic256_k3x3_g1_s1_pvalid", batch=1, in_c=256, in_h=10, in_w=10, out_c=512, weight_in_c=256, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c128_h5_w5_oc256_wic128_k3x3_g1_s1_pvalid", batch=1, in_c=128, in_h=5, in_w=5, out_c=256, weight_in_c=128, kh=3, kw=3, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=3, in_w=3, out_c=24, weight_in_c=256, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c256_h3_w3_oc546_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=3, in_w=3, out_c=546, weight_in_c=256, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=3, in_w=3, out_c=128, weight_in_c=256, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid", batch=1, in_c=128, in_h=3, in_w=3, out_c=256, weight_in_c=128, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=2, in_w=2, out_c=24, weight_in_c=256, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c256_h2_w2_oc546_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=2, in_w=2, out_c=546, weight_in_c=256, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=2, in_w=2, out_c=64, weight_in_c=256, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c128_h1_w1_oc24_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=1, in_w=1, out_c=24, weight_in_c=128, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c3_h320_w320_oc32_wic3_k3x3_g1_s1_pvalid", batch=1, in_c=3, in_h=320, in_w=320, out_c=32, weight_in_c=3, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c32_h160_w160_oc8_wic32_k1x1_g1_s1_pvalid", batch=1, in_c=32, in_h=160, in_w=160, out_c=8, weight_in_c=32, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c8_h160_w160_oc16_wic8_k3x3_g1_s1_pvalid", batch=1, in_c=8, in_h=160, in_w=160, out_c=16, weight_in_c=8, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c16_h160_w160_oc128_wic16_k3x3_g1_s1_pvalid", batch=1, in_c=16, in_h=160, in_w=160, out_c=128, weight_in_c=16, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c128_h80_w80_oc16_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=80, in_w=80, out_c=16, weight_in_c=128, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid", batch=1, in_c=16, in_h=80, in_w=80, out_c=64, weight_in_c=16, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c64_h80_w80_oc16_wic64_k1x1_g1_s1_pvalid", batch=1, in_c=64, in_h=80, in_w=80, out_c=16, weight_in_c=64, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid", batch=1, in_c=16, in_h=80, in_w=80, out_c=128, weight_in_c=16, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid", batch=1, in_c=16, in_h=80, in_w=80, out_c=128, weight_in_c=16, kh=5, kw=5, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c128_h40_w40_oc40_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=40, in_w=40, out_c=40, weight_in_c=128, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c40_h40_w40_oc160_wic40_k3x3_g1_s1_pvalid", batch=1, in_c=40, in_h=40, in_w=40, out_c=160, weight_in_c=40, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c160_h40_w40_oc40_wic160_k1x1_g1_s1_pvalid", batch=1, in_c=160, in_h=40, in_w=40, out_c=40, weight_in_c=160, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid", batch=1, in_c=40, in_h=40, in_w=40, out_c=320, weight_in_c=40, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c320_h40_w40_oc320_wic1_k3x3_g320_s1_pvalid", batch=1, in_c=320, in_h=40, in_w=40, out_c=320, weight_in_c=1, kh=3, kw=3, groups=320, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c320_h20_w20_oc72_wic320_k1x1_g1_s1_pvalid", batch=1, in_c=320, in_h=20, in_w=20, out_c=72, weight_in_c=320, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c72_h20_w20_oc576_wic72_k1x1_g1_s1_pvalid", batch=1, in_c=72, in_h=20, in_w=20, out_c=576, weight_in_c=72, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c576_h20_w20_oc576_wic1_k3x3_g576_s1_pvalid", batch=1, in_c=576, in_h=20, in_w=20, out_c=576, weight_in_c=1, kh=3, kw=3, groups=576, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c576_h20_w20_oc72_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=20, in_w=20, out_c=72, weight_in_c=576, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c72_h20_w20_oc288_wic72_k3x3_g1_s1_pvalid", batch=1, in_c=72, in_h=20, in_w=20, out_c=288, weight_in_c=72, kh=3, kw=3, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c288_h20_w20_oc72_wic288_k1x1_g1_s1_pvalid", batch=1, in_c=288, in_h=20, in_w=20, out_c=72, weight_in_c=288, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c576_h20_w20_oc576_wic1_k5x5_g576_s1_pvalid", batch=1, in_c=576, in_h=20, in_w=20, out_c=576, weight_in_c=1, kh=5, kw=5, groups=576, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c576_h20_w20_oc96_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=20, in_w=20, out_c=96, weight_in_c=576, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c768_h20_w20_oc768_wic1_k5x5_g768_s1_pvalid", batch=1, in_c=768, in_h=20, in_w=20, out_c=768, weight_in_c=1, kh=5, kw=5, groups=768, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c768_h20_w20_oc96_wic768_k1x1_g1_s1_pvalid", batch=1, in_c=768, in_h=20, in_w=20, out_c=96, weight_in_c=768, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c768_h20_w20_oc768_wic1_k3x3_g768_s1_pvalid", batch=1, in_c=768, in_h=20, in_w=20, out_c=768, weight_in_c=1, kh=3, kw=3, groups=768, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c768_h10_w10_oc120_wic768_k1x1_g1_s1_pvalid", batch=1, in_c=768, in_h=10, in_w=10, out_c=120, weight_in_c=768, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c960_h10_w10_oc120_wic960_k1x1_g1_s1_pvalid", batch=1, in_c=960, in_h=10, in_w=10, out_c=120, weight_in_c=960, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c480_h10_w10_oc480_wic1_k5x5_g480_s1_pvalid", batch=1, in_c=480, in_h=10, in_w=10, out_c=480, weight_in_c=1, kh=5, kw=5, groups=480, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c480_h10_w10_oc120_wic480_k1x1_g1_s1_pvalid", batch=1, in_c=480, in_h=10, in_w=10, out_c=120, weight_in_c=480, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c960_h10_w10_oc960_wic1_k5x5_g960_s1_pvalid", batch=1, in_c=960, in_h=10, in_w=10, out_c=960, weight_in_c=1, kh=5, kw=5, groups=960, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c256_h10_w10_oc256_wic1_k3x3_g256_s1_pvalid", batch=1, in_c=256, in_h=10, in_w=10, out_c=256, weight_in_c=1, kh=3, kw=3, groups=256, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=3, in_w=3, out_c=256, weight_in_c=128, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c128_h3_w3_oc128_wic1_k3x3_g128_s1_pvalid", batch=1, in_c=128, in_h=3, in_w=3, out_c=128, weight_in_c=1, kh=3, kw=3, groups=128, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=2, in_w=2, out_c=256, weight_in_c=128, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid", batch=1, in_c=64, in_h=1, in_w=1, out_c=128, weight_in_c=64, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c96_h20_w20_oc96_wic1_k3x3_g96_s1_pvalid", batch=1, in_c=96, in_h=20, in_w=20, out_c=96, weight_in_c=1, kh=3, kw=3, groups=96, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c384_h10_w10_oc384_wic1_k3x3_g384_s1_pvalid", batch=1, in_c=384, in_h=10, in_w=10, out_c=384, weight_in_c=1, kh=3, kw=3, groups=384, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c512_h5_w5_oc512_wic1_k3x3_g512_s1_pvalid", batch=1, in_c=512, in_h=5, in_w=5, out_c=512, weight_in_c=1, kh=3, kw=3, groups=512, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c256_h3_w3_oc256_wic1_k3x3_g256_s1_pvalid", batch=1, in_c=256, in_h=3, in_w=3, out_c=256, weight_in_c=1, kh=3, kw=3, groups=256, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c96_h20_w20_oc12_wic96_k1x1_g1_s1_pvalid", batch=1, in_c=96, in_h=20, in_w=20, out_c=12, weight_in_c=96, kh=1, kw=1, groups=1, known_reason="mesa_semantics (spatial/depthwise with large channels)"),
-        dict(name="known_b1_c96_h20_w20_oc273_wic96_k1x1_g1_s1_pvalid", batch=1, in_c=96, in_h=20, in_w=20, out_c=273, weight_in_c=96, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
-        dict(name="known_b1_c384_h10_w10_oc546_wic384_k1x1_g1_s1_pvalid", batch=1, in_c=384, in_h=10, in_w=10, out_c=546, weight_in_c=384, kh=1, kw=1, groups=1, known_reason="ic>>oc pointwise numerical precision"),
     ]
     shapes += known_issue_shapes  # documentation only; not runnable
 
