@@ -3,6 +3,7 @@
 # RK3588 
 
 This repo run ops on RK3588 NPU (NVDLA based) with pure python and NPU register programming. No RKNN, no compiler, nothing.
+And this repo just focus on NPU usage, for other usage checkout (collabora's Rockchip upstream enablement efforts)[https://gitlab.collabora.com/hardware-enablement/rockchip-3588/notes-for-rockchip-3588/-/blob/main/mainline-status.md]
 
 Thanks to prior effort by [mtx512](https://github.com/mtx512/rk3588-npu), [Tomeu Vizoso](https://gitlab.freedesktop.org/mesa/mesa/-/tree/main/src/gallium/drivers/rocket), [liej6799](https://github.com/liej6799/rk3588)
 
@@ -53,18 +54,17 @@ python examples/gemm.py
 python examples/conv.py
 python examples/conv_gemm.py    # matmul is just 1x1 conv, so lets fuse into one file
 
+python experimental/pool.py
 python experimental/gemm_int8.py
 python experimental/gemm_int16.py
-python experimental/conv.py
-python experimental/pool.py
 ```
 
 🐧 Mainline Armbian Ubuntu with ROCKET driver preinstalled,
 ```bash
-python experimental/mainline6_18/elementwise.py
-python experimental/mainline6_18/gemm.py
-python experimental/mainline6_18/conv.py
-python experimental/mainline6_18/pool.py
+python examples/kernel6_18/conv.py
+python experimental/kernel6_18/elementwise.py
+python experimental/kernel6_18/gemm.py
+python experimental/kernel6_18/pool.py
 ```
 
 ⚙️ 
@@ -89,11 +89,13 @@ TEFLON_DEBUG=verbose ETNA_MESA_DEBUG=ml_msgs python3.10 src/gallium/frontends/te
 
 ## 2. PC chaining 
 
-Some example like elementwise.py above just contain one op per submit, simple but overhead will be large for many ops.
-Program counter chaining is needed to run multiple ops in one submit.
+simple_add.py above just contain one op per submit, simple but overhead will be large for many ops.
+Program counter chaining is needed to run multiple ops in one submit. Its already implemented in some of the examples.
 
 ```bash
-python experimental/pool_pcchain.py
+python examples/gemm.py
+python examples/conv.py
+python examples/pool.py
 ```
 
 What if the mamtul size is too large

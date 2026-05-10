@@ -4,109 +4,46 @@ import ctypes
 import numpy as np
 import argparse
 
-
 class reg:
-    PC = 0x0100
-    PC_REG = 0x0100
+    # --- Stream/Target IDs (shifted into bits 48-63) ---
+    PC = 0x0100     # PC (Program Control / operation enable)
+    PC_REG = 0x0100 # PC chain registers
     VERSION = 0x0040
-    PPU = 0x4000
-    PPU_RDMA = 0x8000
-    REG_PC_OPERATION_ENABLE = 0x0008
-    REG_PC_BASE_ADDRESS = 0x0010
-    REG_PC_REGISTER_AMOUNTS = 0x0014
-    REG_PPU_S_POINTER = 0x6004
-    REG_PPU_DATA_CUBE_IN_WIDTH = 0x600c
-    REG_PPU_DATA_CUBE_IN_HEIGHT = 0x6010
-    REG_PPU_DATA_CUBE_IN_CHANNEL = 0x6014
-    REG_PPU_DATA_CUBE_OUT_WIDTH = 0x6018
-    REG_PPU_DATA_CUBE_OUT_HEIGHT = 0x601c
-    REG_PPU_DATA_CUBE_OUT_CHANNEL = 0x6020
-    REG_PPU_OPERATION_MODE_CFG = 0x6024
-    REG_PPU_POOLING_KERNEL_CFG = 0x6034
-    REG_PPU_RECIP_KERNEL_WIDTH = 0x6038
-    REG_PPU_RECIP_KERNEL_HEIGHT = 0x603c
-    REG_PPU_DST_BASE_ADDR = 0x6070
-    REG_PPU_DST_SURF_STRIDE = 0x607c
-    REG_PPU_DATA_FORMAT = 0x6084
-    REG_PPU_MISC_CTRL = 0x60dc
-    REG_PPU_RDMA_RDMA_S_POINTER = 0x7004
-    REG_PPU_RDMA_RDMA_CUBE_IN_WIDTH = 0x700c
-    REG_PPU_RDMA_RDMA_CUBE_IN_HEIGHT = 0x7010
-    REG_PPU_RDMA_RDMA_CUBE_IN_CHANNEL = 0x7014
-    REG_PPU_RDMA_RDMA_SRC_BASE_ADDR = 0x701c
-    REG_PPU_RDMA_RDMA_SRC_LINE_STRIDE = 0x7024
-    REG_PPU_RDMA_RDMA_SRC_SURF_STRIDE = 0x7028
-    REG_PPU_RDMA_RDMA_DATA_FORMAT = 0x7030
-    REG_PPU_RDMA_RDMA_OPERATION_ENABLE = 0x7038
-    PPU_S_POINTER_POINTER_PP_MODE__SHIFT = 3
-    PPU_S_POINTER_POINTER_PP_MODE__MASK = 0x8
-    PPU_S_POINTER_EXECUTER_PP_EN__SHIFT = 2
-    PPU_S_POINTER_EXECUTER_PP_EN__MASK = 0x4
-    PPU_S_POINTER_POINTER_PP_EN__SHIFT = 1
-    PPU_S_POINTER_POINTER_PP_EN__MASK = 0x2
-    PPU_RDMA_RDMA_S_POINTER_POINTER_PP_MODE__SHIFT = 3
-    PPU_RDMA_RDMA_S_POINTER_POINTER_PP_MODE__MASK = 0x8
-    PPU_RDMA_RDMA_S_POINTER_EXECUTER_PP_EN__SHIFT = 2
-    PPU_RDMA_RDMA_S_POINTER_EXECUTER_PP_EN__MASK = 0x4
-    PPU_RDMA_RDMA_S_POINTER_POINTER_PP_EN__SHIFT = 1
-    PPU_RDMA_RDMA_S_POINTER_POINTER_PP_EN__MASK = 0x2
-    PPU_DATA_CUBE_IN_WIDTH_CUBE_IN_WIDTH__SHIFT = 0
-    PPU_DATA_CUBE_IN_WIDTH_CUBE_IN_WIDTH__MASK = 0x1fff
-    PPU_DATA_CUBE_IN_HEIGHT_CUBE_IN_HEIGHT__SHIFT = 0
-    PPU_DATA_CUBE_IN_HEIGHT_CUBE_IN_HEIGHT__MASK = 0x1fff
-    PPU_DATA_CUBE_IN_CHANNEL_CUBE_IN_CHANNEL__SHIFT = 0
-    PPU_DATA_CUBE_IN_CHANNEL_CUBE_IN_CHANNEL__MASK = 0x1fff
-    PPU_DATA_CUBE_OUT_WIDTH_CUBE_OUT_WIDTH__SHIFT = 0
-    PPU_DATA_CUBE_OUT_WIDTH_CUBE_OUT_WIDTH__MASK = 0x1fff
-    PPU_DATA_CUBE_OUT_HEIGHT_CUBE_OUT_HEIGHT__SHIFT = 0
-    PPU_DATA_CUBE_OUT_HEIGHT_CUBE_OUT_HEIGHT__MASK = 0x1fff
-    PPU_DATA_CUBE_OUT_CHANNEL_CUBE_OUT_CHANNEL__SHIFT = 0
-    PPU_DATA_CUBE_OUT_CHANNEL_CUBE_OUT_CHANNEL__MASK = 0x1fff
-    PPU_OPERATION_MODE_CFG_FLYING_MODE__SHIFT = 4
-    PPU_OPERATION_MODE_CFG_FLYING_MODE__MASK = 0x10
-    PPU_OPERATION_MODE_CFG_POOLING_METHOD__SHIFT = 0
-    PPU_OPERATION_MODE_CFG_POOLING_METHOD__MASK = 0x3
-    PPU_POOLING_KERNEL_CFG_KERNEL_STRIDE_HEIGHT__SHIFT = 20
-    PPU_POOLING_KERNEL_CFG_KERNEL_STRIDE_HEIGHT__MASK = 0x00f00000
-    PPU_POOLING_KERNEL_CFG_KERNEL_STRIDE_WIDTH__SHIFT = 16
-    PPU_POOLING_KERNEL_CFG_KERNEL_STRIDE_WIDTH__MASK = 0x000f0000
-    PPU_POOLING_KERNEL_CFG_KERNEL_HEIGHT__SHIFT = 8
-    PPU_POOLING_KERNEL_CFG_KERNEL_HEIGHT__MASK = 0x00000f00
-    PPU_POOLING_KERNEL_CFG_KERNEL_WIDTH__SHIFT = 0
-    PPU_POOLING_KERNEL_CFG_KERNEL_WIDTH__MASK = 0x0000000f
-    PPU_RECIP_KERNEL_WIDTH_RECIP_KERNEL_WIDTH__SHIFT = 0
-    PPU_RECIP_KERNEL_WIDTH_RECIP_KERNEL_WIDTH__MASK = 0x0001ffff
-    PPU_RECIP_KERNEL_HEIGHT_RECIP_KERNEL_HEIGHT__SHIFT = 0
-    PPU_RECIP_KERNEL_HEIGHT_RECIP_KERNEL_HEIGHT__MASK = 0x0001ffff
-    PPU_DST_BASE_ADDR_DST_BASE_ADDR__SHIFT = 4
-    PPU_DST_BASE_ADDR_DST_BASE_ADDR__MASK = 0xfffffff0
-    PPU_DST_SURF_STRIDE_DST_SURF_STRIDE__SHIFT = 0
-    PPU_DST_SURF_STRIDE_DST_SURF_STRIDE__MASK = 0x0001ffff
-    PPU_DATA_FORMAT_INDEX_ADD__SHIFT = 16
-    PPU_DATA_FORMAT_INDEX_ADD__MASK = 0x1fff0000
-    PPU_DATA_FORMAT_PROC_PRECISION__SHIFT = 0
-    PPU_DATA_FORMAT_PROC_PRECISION__MASK = 0x00000003
-    PPU_MISC_CTRL_BURST_LEN__SHIFT = 0
-    PPU_MISC_CTRL_BURST_LEN__MASK = 0x0000000f
-    PPU_RDMA_RDMA_CUBE_IN_WIDTH_CUBE_IN_WIDTH__SHIFT = 0
-    PPU_RDMA_RDMA_CUBE_IN_WIDTH_CUBE_IN_WIDTH__MASK = 0x1fff
-    PPU_RDMA_RDMA_CUBE_IN_HEIGHT_CUBE_IN_HEIGHT__SHIFT = 0
-    PPU_RDMA_RDMA_CUBE_IN_HEIGHT_CUBE_IN_HEIGHT__MASK = 0x1fff
-    PPU_RDMA_RDMA_CUBE_IN_CHANNEL_CUBE_IN_CHANNEL__SHIFT = 0
-    PPU_RDMA_RDMA_CUBE_IN_CHANNEL_CUBE_IN_CHANNEL__MASK = 0x1fff
-    PPU_RDMA_RDMA_SRC_BASE_ADDR_SRC_BASE_ADDR__SHIFT = 0
-    PPU_RDMA_RDMA_SRC_BASE_ADDR_SRC_BASE_ADDR__MASK = 0xffffffff
-    PPU_RDMA_RDMA_SRC_LINE_STRIDE_SRC_LINE_STRIDE__SHIFT = 0
-    PPU_RDMA_RDMA_SRC_LINE_STRIDE_SRC_LINE_STRIDE__MASK = 0xffffffff
-    PPU_RDMA_RDMA_SRC_SURF_STRIDE_SRC_SURF_STRIDE__SHIFT = 0
-    PPU_RDMA_RDMA_SRC_SURF_STRIDE_SRC_SURF_STRIDE__MASK = 0xffffffff
-    PPU_RDMA_RDMA_DATA_FORMAT_IN_PRECISION__SHIFT = 0
-    PPU_RDMA_RDMA_DATA_FORMAT_IN_PRECISION__MASK = 0x3
-    PPU_RDMA_RDMA_OPERATION_ENABLE_OP_EN__SHIFT = 0
-    PPU_RDMA_RDMA_OPERATION_ENABLE_OP_EN__MASK = 0x1
-    PC_OPERATION_ENABLE_RESERVED_0__SHIFT = 1
-    PC_OPERATION_ENABLE_RESERVED_0__MASK = 0xfffffffe
+    PPU = 0x4000    # PPU (Pooling Processing Unit)
+    PPU_RDMA = 0x8000 # PPU RDMA (Read DMA for pooling)
 
+    # --- PC (0x0000) ---
+    REG_PC_OPERATION_ENABLE    = 0x0008   # PC operation enable
+    REG_PC_BASE_ADDRESS        = 0x0010   # next regcmd DMA address for PC chain
+    REG_PC_REGISTER_AMOUNTS    = 0x0014   # next regcmd fetch amount for PC chain
+
+    # --- PPU (0x6000) ---
+    REG_PPU_S_POINTER            = 0x6004   # PPU S pointer config (pp/exec)
+    REG_PPU_DATA_CUBE_IN_WIDTH   = 0x600c   # PPU input data cube width
+    REG_PPU_DATA_CUBE_IN_HEIGHT  = 0x6010   # PPU input data cube height
+    REG_PPU_DATA_CUBE_IN_CHANNEL = 0x6014   # PPU input data cube channel
+    REG_PPU_DATA_CUBE_OUT_WIDTH  = 0x6018   # PPU output data cube width
+    REG_PPU_DATA_CUBE_OUT_HEIGHT = 0x601c   # PPU output data cube height
+    REG_PPU_DATA_CUBE_OUT_CHANNEL= 0x6020   # PPU output data cube channel
+    REG_PPU_OPERATION_MODE_CFG   = 0x6024   # PPU operation mode config (pool method, flying)
+    REG_PPU_POOLING_KERNEL_CFG   = 0x6034   # PPU pooling kernel config (size/stride)
+    REG_PPU_RECIP_KERNEL_WIDTH   = 0x6038   # PPU reciprocal kernel width (avg pool)
+    REG_PPU_RECIP_KERNEL_HEIGHT  = 0x603c   # PPU reciprocal kernel height (avg pool)
+    REG_PPU_DST_BASE_ADDR        = 0x6070   # PPU destination base address
+    REG_PPU_DST_SURF_STRIDE      = 0x607c   # PPU destination surface stride
+    REG_PPU_DATA_FORMAT          = 0x6084   # PPU data format config
+    REG_PPU_MISC_CTRL            = 0x60dc   # PPU misc control (burst length)
+
+    # --- PPU RDMA (0x7000) ---
+    REG_PPU_RDMA_RDMA_S_POINTER          = 0x7004   # PPU RDMA S pointer config
+    REG_PPU_RDMA_RDMA_CUBE_IN_WIDTH      = 0x700c   # PPU RDMA input cube width
+    REG_PPU_RDMA_RDMA_CUBE_IN_HEIGHT     = 0x7010   # PPU RDMA input cube height
+    REG_PPU_RDMA_RDMA_CUBE_IN_CHANNEL    = 0x7014   # PPU RDMA input cube channel
+    REG_PPU_RDMA_RDMA_SRC_BASE_ADDR      = 0x701c   # PPU RDMA source base address
+    REG_PPU_RDMA_RDMA_SRC_LINE_STRIDE    = 0x7024   # PPU RDMA source line stride
+    REG_PPU_RDMA_RDMA_SRC_SURF_STRIDE    = 0x7028   # PPU RDMA source surface stride
+    REG_PPU_RDMA_RDMA_DATA_FORMAT        = 0x7030   # PPU RDMA data format config
+    REG_PPU_RDMA_RDMA_OPERATION_ENABLE   = 0x7038   # PPU RDMA operation enable
 
 RKNPU_MEM_KERNEL_MAPPING = 8
 RKNPU_MEM_NON_CACHEABLE = 0
@@ -124,7 +61,6 @@ OUTPUT_BUF_SIZE = 4 * 1024 * 1024
 
 fd = os.open(f"/dev/dri/card1", os.O_RDWR)
 
-
 class rknpu_mem_create(ctypes.Structure):
     _fields_ = [
         ("handle", ctypes.c_uint32),
@@ -135,14 +71,12 @@ class rknpu_mem_create(ctypes.Structure):
         ("sram_size", ctypes.c_uint64),
     ]
 
-
 class rknpu_mem_map(ctypes.Structure):
     _fields_ = [
         ("handle", ctypes.c_uint32),
         ("reserved", ctypes.c_uint32),
         ("offset", ctypes.c_uint64),
     ]
-
 
 class rknpu_mem_destroy(ctypes.Structure):
     _fields_ = [
@@ -151,10 +85,8 @@ class rknpu_mem_destroy(ctypes.Structure):
         ("obj_addr", ctypes.c_uint64),
     ]
 
-
 class rknpu_subcore_task(ctypes.Structure):
     _fields_ = [("task_start", ctypes.c_uint32), ("task_number", ctypes.c_uint32)]
-
 
 class rknpu_submit(ctypes.Structure):
     _fields_ = [
@@ -178,7 +110,6 @@ class rknpu_submit(ctypes.Structure):
 class rknpu_action(ctypes.Structure):
     _fields_ = [("flags", ctypes.c_uint32), ("value", ctypes.c_uint32)]
 
-
 class struct_rknpu_task(ctypes.Structure):
     _fields_ = [
         ("flags", ctypes.c_uint32),
@@ -192,7 +123,6 @@ class struct_rknpu_task(ctypes.Structure):
         ("regcmd_addr", ctypes.c_uint64),
     ]
 
-
 def _IOWR(type_, nr, size):
     return (3 << 30) | (ord(type_) << 8) | (nr << 0) | (size << 16)
 
@@ -202,7 +132,6 @@ DRM_IOCTL_RKNPU_MEM_MAP = _IOWR("d", 0x43, ctypes.sizeof(rknpu_mem_map))
 DRM_IOCTL_RKNPU_MEM_DESTROY = _IOWR("d", 0x44, ctypes.sizeof(rknpu_mem_destroy))
 DRM_IOCTL_RKNPU_SUBMIT = _IOWR("d", 0x41, ctypes.sizeof(rknpu_submit))
 DRM_IOCTL_RKNPU_ACTION = _IOWR("d", 0x40, ctypes.sizeof(rknpu_action))
-
 
 def mem_allocate(fd, size, flags=0):
     mem_create = rknpu_mem_create(
@@ -217,11 +146,9 @@ def mem_allocate(fd, size, flags=0):
     print(f"Memory mapped at offset={mem_map.offset:#x}")
     return buf, mem_create
 
-
 def mem_destroy(fd, mem_create):
     return ioctl(fd, DRM_IOCTL_RKNPU_MEM_DESTROY,
                               rknpu_mem_destroy(handle=mem_create.handle, obj_addr=mem_create.obj_addr))
-
 
 def submit(fd, task_obj_addr, task_count=1):
     submit_struct = rknpu_submit(
@@ -246,19 +173,16 @@ def submit(fd, task_obj_addr, task_count=1):
     submit_struct.subcore_task[4] = rknpu_subcore_task(task_start=0, task_number=0)
     return ioctl(fd, DRM_IOCTL_RKNPU_SUBMIT, submit_struct)
 
-
 def reset_npu(fd):
     action = rknpu_action(flags=RKNPU_ACT_RESET, value=0)
     ret = ioctl(fd, DRM_IOCTL_RKNPU_ACTION, action)
     print(f"reset_npu ret={ret}")
     return ret
 
-
 task_map, task_mc = mem_allocate(fd, TASK_BUF_SIZE, RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
 regcmd_map, regcmd_mc = mem_allocate(fd, REGCMD_BUF_SIZE, RKNPU_MEM_NON_CACHEABLE)
 input_map, input_mc = mem_allocate(fd, INPUT_BUF_SIZE, RKNPU_MEM_NON_CACHEABLE)
 output_map, output_mc = mem_allocate(fd, OUTPUT_BUF_SIZE, RKNPU_MEM_NON_CACHEABLE)
-
 
 POOL_OPS = ("min", "max", "avg", "globalmin", "globalmax", "globalavg")
 POOL_ENABLE_MASK = 0x60
@@ -266,21 +190,12 @@ POOL_INT_MASK = 0xc00
 POOL_TASK_OP_IDX = 1
 POOL_PC_ENABLE = 48
 POOL_CHANNELS = 8
-def mask_reg(val, shift, mask):
-    return (int(val) << shift) & mask
-
-
 def emit(target, addr, value):
     if target == reg.PC and addr == reg.REG_PC_OPERATION_ENABLE: target = 0x80
     return (((target + 1) & 0xffff) << 48) | ((int(value) & 0xffffffff) << 16) | (addr & 0xffff)
 
-
 def pc_amount(reg_count):
     return (int(reg_count) + 1) // 2 + 1
-
-
-def field(name, value):
-    return mask_reg(value, getattr(reg, f"{name}__SHIFT"), getattr(reg, f"{name}__MASK"))
 
 
 def pack_f16_strided(buf, vals, stride_fp16=8):
@@ -289,15 +204,12 @@ def pack_f16_strided(buf, vals, stride_fp16=8):
     for i, value in enumerate(arr):
         dst[i * stride_fp16] = int(value)
 
-
 def read_f16_strided(buf, n, stride_fp16=8):
     raw = np.frombuffer(buf, dtype=np.float16, count=n * stride_fp16)
     return raw[::stride_fp16].copy()
 
-
 def align_up(value, align):
     return ((int(value) + align - 1) // align) * align
-
 
 def pool2d_reference(x, op):
     if op.startswith("global"):
@@ -319,30 +231,10 @@ def pool2d_reference(x, op):
                 out[y, x0] = np.mean(window.astype(np.float32), axis=(0, 1)).astype(np.float16)
     return out
 
-
 def pool_input(op, in_h, in_w):
     seed = 0x504f4f4c ^ (POOL_OPS.index(op) << 16) ^ (in_h << 4) ^ in_w
     rng = np.random.default_rng(seed)
     return rng.uniform(-8.0, 8.0, (in_h, in_w, POOL_CHANNELS)).astype(np.float16)
-
-
-def ppu_pointer():
-    return (field("PPU_S_POINTER_POINTER_PP_MODE", 1) |
-                    field("PPU_S_POINTER_EXECUTER_PP_EN", 1) |
-                    field("PPU_S_POINTER_POINTER_PP_EN", 1))
-
-
-def ppu_rdma_pointer():
-    return (field("PPU_RDMA_RDMA_S_POINTER_POINTER_PP_MODE", 1) |
-                    field("PPU_RDMA_RDMA_S_POINTER_EXECUTER_PP_EN", 1) |
-                    field("PPU_RDMA_RDMA_S_POINTER_POINTER_PP_EN", 1))
-
-
-def kernel_cfg(stride_h=0, stride_w=0, kernel_h=1, kernel_w=1):
-    return (field("PPU_POOLING_KERNEL_CFG_KERNEL_STRIDE_HEIGHT", stride_h) |
-                    field("PPU_POOLING_KERNEL_CFG_KERNEL_STRIDE_WIDTH", stride_w) |
-                    field("PPU_POOLING_KERNEL_CFG_KERNEL_HEIGHT", kernel_h) |
-                    field("PPU_POOLING_KERNEL_CFG_KERNEL_WIDTH", kernel_w))
 
 
 def pooling_regs(op, input_dma=0x11110000, output_dma=0x22220000, in_h=4, in_w=4):
@@ -368,85 +260,85 @@ def pooling_regs(op, input_dma=0x11110000, output_dma=0x22220000, in_h=4, in_w=4
     s_h = in_h_field if direct_global else 0
     s_w = in_w_field if direct_global else 0
 
-    regs = [
-        emit(reg.PPU, reg.REG_PPU_S_POINTER, ppu_pointer()),
-        emit(reg.PPU_RDMA, reg.REG_PPU_RDMA_RDMA_S_POINTER, ppu_rdma_pointer()),
-        emit(reg.PPU, reg.REG_PPU_DATA_CUBE_IN_WIDTH, field("PPU_DATA_CUBE_IN_WIDTH_CUBE_IN_WIDTH", in_w_field)),
-        emit(reg.PPU, reg.REG_PPU_DATA_CUBE_IN_HEIGHT, field("PPU_DATA_CUBE_IN_HEIGHT_CUBE_IN_HEIGHT", in_h_field)),
-        emit(reg.PPU, reg.REG_PPU_DATA_CUBE_IN_CHANNEL, field("PPU_DATA_CUBE_IN_CHANNEL_CUBE_IN_CHANNEL", channel_field)),
-    ]
-    regs += [
-        emit(reg.PPU, reg.REG_PPU_DATA_CUBE_OUT_WIDTH, field("PPU_DATA_CUBE_OUT_WIDTH_CUBE_OUT_WIDTH", out_w_field)),
-        emit(reg.PPU, reg.REG_PPU_DATA_CUBE_OUT_HEIGHT, field("PPU_DATA_CUBE_OUT_HEIGHT_CUBE_OUT_HEIGHT", out_h_field)),
-    ]
-    regs += [
-        emit(reg.PPU, reg.REG_PPU_DATA_CUBE_OUT_CHANNEL, field("PPU_DATA_CUBE_OUT_CHANNEL_CUBE_OUT_CHANNEL", channel_field)),
+    npu_regs = [
+        emit(reg.PPU, reg.REG_PPU_S_POINTER,
+             (1 << 3) |                           # PPU_S_POINTER_POINTER_PP_MODE
+             (1 << 2) |                           # PPU_S_POINTER_EXECUTER_PP_EN
+             (1 << 1)),                           # PPU_S_POINTER_POINTER_PP_EN
+        emit(reg.PPU_RDMA, reg.REG_PPU_RDMA_RDMA_S_POINTER,
+             (1 << 3) |                           # PPU_RDMA_S_POINTER_POINTER_PP_MODE
+             (1 << 2) |                           # PPU_RDMA_S_POINTER_EXECUTER_PP_EN
+             (1 << 1)),                           # PPU_RDMA_S_POINTER_POINTER_PP_EN
+        emit(reg.PPU, reg.REG_PPU_DATA_CUBE_IN_WIDTH, in_w_field),  # input width minus 1
+        emit(reg.PPU, reg.REG_PPU_DATA_CUBE_IN_HEIGHT, in_h_field),  # input height minus 1
+        emit(reg.PPU, reg.REG_PPU_DATA_CUBE_IN_CHANNEL, channel_field),  # input channels minus 1
+        emit(reg.PPU, reg.REG_PPU_DATA_CUBE_OUT_WIDTH, out_w_field),  # output width minus 1
+        emit(reg.PPU, reg.REG_PPU_DATA_CUBE_OUT_HEIGHT, out_h_field),  # output height minus 1
+        emit(reg.PPU, reg.REG_PPU_DATA_CUBE_OUT_CHANNEL, channel_field),  # output channels minus 1
         emit(reg.PPU, reg.REG_PPU_OPERATION_MODE_CFG,
-                  field("PPU_OPERATION_MODE_CFG_FLYING_MODE", 1) |
-                  field("PPU_OPERATION_MODE_CFG_POOLING_METHOD", int(max_pool))),
-        emit(reg.PPU, reg.REG_PPU_POOLING_KERNEL_CFG, kernel_cfg(s_h, s_w, k_h, k_w)),
-    ]
-    if not max_pool:
-        regs += [
-            emit(reg.PPU, reg.REG_PPU_RECIP_KERNEL_WIDTH,
-                      field("PPU_RECIP_KERNEL_WIDTH_RECIP_KERNEL_WIDTH", 30720)),
-            emit(reg.PPU, reg.REG_PPU_RECIP_KERNEL_HEIGHT,
-                      field("PPU_RECIP_KERNEL_HEIGHT_RECIP_KERNEL_HEIGHT", 30720)),
-        ]
-
-    regs += [
-        emit(reg.PPU, reg.REG_PPU_DST_BASE_ADDR, field("PPU_DST_BASE_ADDR_DST_BASE_ADDR", output_dma // 16)),
-        emit(reg.PPU, reg.REG_PPU_DST_SURF_STRIDE, field("PPU_DST_SURF_STRIDE_DST_SURF_STRIDE", dst_surf_stride)),
+             (1 << 4) |                           # flying mode
+             int(max_pool)),                      # pooling method
+        emit(reg.PPU, reg.REG_PPU_POOLING_KERNEL_CFG,
+             (s_h << 20) |                        # kernel stride height
+             (s_w << 16) |                        # kernel stride width
+             (k_h << 8) |                         # kernel height
+             k_w),                                # kernel width
+        emit(reg.PPU, reg.REG_PPU_DST_BASE_ADDR,
+             (output_dma // 16) << 4),            # output base address
+        emit(reg.PPU, reg.REG_PPU_DST_SURF_STRIDE, dst_surf_stride),  # output surface stride
         emit(reg.PPU, reg.REG_PPU_DATA_FORMAT,
-                  field("PPU_DATA_FORMAT_INDEX_ADD", index_add) |
-                  field("PPU_DATA_FORMAT_PROC_PRECISION", 2)),
-        emit(reg.PPU, reg.REG_PPU_MISC_CTRL, field("PPU_MISC_CTRL_BURST_LEN", 3)),
+             (index_add << 16) |                  # index_add
+             2),                                  # fp16
+        emit(reg.PPU, reg.REG_PPU_MISC_CTRL,
+             3),                                  # burst length
         emit(reg.PPU_RDMA, reg.REG_PPU_RDMA_RDMA_CUBE_IN_WIDTH,
-                  field("PPU_RDMA_RDMA_CUBE_IN_WIDTH_CUBE_IN_WIDTH", in_w_field)),
+             in_w_field),                         # RDMA input width minus 1
         emit(reg.PPU_RDMA, reg.REG_PPU_RDMA_RDMA_CUBE_IN_HEIGHT,
-                  field("PPU_RDMA_RDMA_CUBE_IN_HEIGHT_CUBE_IN_HEIGHT", in_h_field)),
+             in_h_field),                         # RDMA input height minus 1
         emit(reg.PPU_RDMA, reg.REG_PPU_RDMA_RDMA_CUBE_IN_CHANNEL,
-                  field("PPU_RDMA_RDMA_CUBE_IN_CHANNEL_CUBE_IN_CHANNEL", channel_field)),
+             channel_field),                      # RDMA input channels minus 1
         emit(reg.PPU_RDMA, reg.REG_PPU_RDMA_RDMA_SRC_BASE_ADDR,
-                  field("PPU_RDMA_RDMA_SRC_BASE_ADDR_SRC_BASE_ADDR", input_dma)),
+             input_dma),                          # RDMA source base address
         emit(reg.PPU_RDMA, reg.REG_PPU_RDMA_RDMA_SRC_LINE_STRIDE,
-                  field("PPU_RDMA_RDMA_SRC_LINE_STRIDE_SRC_LINE_STRIDE", width_stride)),
+             width_stride),                       # RDMA line stride
         emit(reg.PPU_RDMA, reg.REG_PPU_RDMA_RDMA_SRC_SURF_STRIDE,
-                  field("PPU_RDMA_RDMA_SRC_SURF_STRIDE_SRC_SURF_STRIDE", src_surf_stride)),
+             src_surf_stride),                    # RDMA surface stride
         emit(reg.PPU_RDMA, reg.REG_PPU_RDMA_RDMA_DATA_FORMAT,
-                  field("PPU_RDMA_RDMA_DATA_FORMAT_IN_PRECISION", 2)),
+             2),                                  # RDMA fp16
         emit(reg.PPU_RDMA, reg.REG_PPU_RDMA_RDMA_OPERATION_ENABLE,
-                  field("PPU_RDMA_RDMA_OPERATION_ENABLE_OP_EN", 1)),
-        emit(reg.PC, reg.REG_PC_OPERATION_ENABLE,
-                  field("PC_OPERATION_ENABLE_RESERVED_0", POOL_PC_ENABLE)),
+             1),                                  # RDMA enable
+        emit(reg.PPU, reg.REG_PPU_RECIP_KERNEL_WIDTH,
+             0 if max_pool else 30720),           # avg only
+        emit(reg.PPU, reg.REG_PPU_RECIP_KERNEL_HEIGHT,
+             0 if max_pool else 30720),           # avg only
     ]
-    return regs
+    return npu_regs
 
 
-def chain_tail(regcmd_dma, next_offset, next_regs_len):
-    enable = emit(reg.PC, reg.REG_PC_OPERATION_ENABLE,
-                  field("PC_OPERATION_ENABLE_RESERVED_0", POOL_PC_ENABLE))
-    if next_offset is None:
+def write_regs_to_npu_task(task_regs):
+    def enable_npu_units_and_set_next_pc_addr(next_offset, next_task_regs_len):
+        enable_npu_units = emit(reg.PC, reg.REG_PC_OPERATION_ENABLE,
+                                POOL_PC_ENABLE << 1)             # PC_OPERATION_ENABLE_RESERVED_0
+
+        if next_offset is None:
+            return [
+                emit(reg.PC_REG, reg.REG_PC_BASE_ADDRESS, 0),    # PC_BASE_ADDRESS = 0 (end chain)
+                emit(reg.PC_REG, reg.REG_PC_REGISTER_AMOUNTS, 0), # PC_REGISTER_AMOUNTS = 0 (end chain)
+                emit(reg.VERSION, 0, 0),                         # VERSION (OP_40 equivalent)
+                enable_npu_units,
+            ]
+        next_addr = regcmd_mc.dma_addr + next_offset * ctypes.sizeof(ctypes.c_uint64)
         return [
-            emit(reg.PC_REG, reg.REG_PC_BASE_ADDRESS, 0),
-            emit(reg.PC_REG, reg.REG_PC_REGISTER_AMOUNTS, 0),
+            emit(reg.PC_REG, reg.REG_PC_BASE_ADDRESS, next_addr & 0xfffffff0),
+            emit(reg.PC_REG, reg.REG_PC_REGISTER_AMOUNTS, pc_amount(next_task_regs_len)),
             emit(reg.VERSION, 0, 0),
-            enable,
+            enable_npu_units,
         ]
-    next_addr = regcmd_dma + next_offset * ctypes.sizeof(ctypes.c_uint64)
-    return [
-        emit(reg.PC_REG, reg.REG_PC_BASE_ADDRESS, next_addr & 0xfffffff0),
-        emit(reg.PC_REG, reg.REG_PC_REGISTER_AMOUNTS, pc_amount(next_regs_len)),
-        emit(reg.VERSION, 0, 0),
-        enable,
-    ]
 
-
-def write_regs_to_tasks(task_map, regcmd_map, task_mc, regcmd_mc, task_regs):
     ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), 0, task_map.size())
     ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), 0, regcmd_map.size())
-    tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
-    regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
+    npu_tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
+    npu_regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
 
     offsets = []
     offset = 0
@@ -460,23 +352,23 @@ def write_regs_to_tasks(task_map, regcmd_map, task_mc, regcmd_mc, task_regs):
 
     for idx, regs in enumerate(task_regs):
         base = offsets[idx]
-        body = regs[:-1]
-        for i, value in enumerate(body):
-            regcmd[base + i] = value
+        for i, value in enumerate(regs):
+            npu_regcmd[base + i] = value
         next_offset = offsets[idx + 1] if idx + 1 < len(task_regs) else None
-        next_regs_len = len(task_regs[idx + 1]) - 1 if idx + 1 < len(task_regs) else 0
-        for i, value in enumerate(chain_tail(regcmd_mc.dma_addr, next_offset, next_regs_len)):
-            regcmd[base + len(body) + i] = value
+        next_task_regs_len = len(task_regs[idx + 1]) if idx + 1 < len(task_regs) else 0
+        tails = enable_npu_units_and_set_next_pc_addr(next_offset, next_task_regs_len)
+        for i, value in enumerate(tails):
+            npu_regcmd[base + len(regs) + i] = value
 
-        tasks[idx].flags = 0
-        tasks[idx].op_idx = POOL_TASK_OP_IDX
-        tasks[idx].enable_mask = POOL_ENABLE_MASK
-        tasks[idx].int_mask = POOL_INT_MASK
-        tasks[idx].int_clear = 0x1ffff
-        tasks[idx].int_status = 0
-        tasks[idx].regcfg_amount = len(body)
-        tasks[idx].regcfg_offset = 0
-        tasks[idx].regcmd_addr = regcmd_mc.dma_addr + base * ctypes.sizeof(ctypes.c_uint64)
+        npu_tasks[idx].flags = 0
+        npu_tasks[idx].op_idx = POOL_TASK_OP_IDX
+        npu_tasks[idx].enable_mask = POOL_ENABLE_MASK
+        npu_tasks[idx].int_mask = POOL_INT_MASK
+        npu_tasks[idx].int_clear = 0x1ffff
+        npu_tasks[idx].int_status = 0
+        npu_tasks[idx].regcfg_amount = len(regs)
+        npu_tasks[idx].regcfg_offset = 0
+        npu_tasks[idx].regcmd_addr = regcmd_mc.dma_addr + base * ctypes.sizeof(ctypes.c_uint64)
 
 
 def output_shape(op, in_h, in_w):
@@ -546,7 +438,7 @@ def run_pool(op, in_h=4, in_w=4, reset=True):
         input_dma = input_mc.dma_addr + out_start * in_w * POOL_CHANNELS * FP16_BYTES
         output_dma = output_mc.dma_addr if op.startswith("global") else output_mc.dma_addr + out_start * (in_w - 1) * POOL_CHANNELS * FP16_BYTES
         task_regs.append(pooling_regs(op, input_dma, output_dma, tile_h, in_w))
-    write_regs_to_tasks(task_map, regcmd_map, task_mc, regcmd_mc, task_regs)
+    write_regs_to_npu_task(task_regs)
 
     ret = submit(fd, task_mc.obj_addr, len(task_regs))
     got = read_pool_output(output_map, op, expected.shape, in_h, in_w)
