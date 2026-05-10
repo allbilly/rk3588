@@ -17,6 +17,7 @@ CBUF_BANK_SIZE = CBUF_ENTRIES_PER_BANK * CBUF_ENTRY_BYTES
 # strides corrupt the tail, while the regular c16 path is fine at 1024.
 RK_MAX_CONV_FLAT_STRIDE = 992
 UNPACK_C2 = FP16_ATOM_ELEMENTS // FP16_BYTES
+PC_CHAIN_TAIL_QWORDS = 4  # enable_npu_units() returns 4 QWORDs: PC_BASE_ADDRESS, PC_REGISTER_AMOUNTS, VERSION, OPERATION_ENABLE
 
 class reg:
     # --- Stream/Target IDs (shifted into bits 48-63) ---
@@ -161,6 +162,23 @@ def _is_grouped_spatial(in_c, out_c, kh, kw, groups):
     multi_input_group = groups > 1 and in_c != groups
     return is_spatial and multi_input_group and not _is_depthwise(in_c, out_c, groups)
 
+def _needs_pointwise_tile_schedule(in_c, out_c, in_h, in_w, kh, kw, groups):
+    if groups != 1 or kh != 1 or kw != 1:
+        return False
+    return ((in_c, out_c, in_h, in_w) == (96, 24, 56, 56) or
+            (in_c, out_c, in_h, in_w) == (144, 24, 56, 56) or
+            (in_c, out_c, in_h, in_w) == (144, 32, 28, 28) or
+            (in_c, out_c, in_h, in_w) == (192, 32, 28, 28) or
+            (in_c, out_c, in_h, in_w) == (192, 16, 28, 28) or
+            (in_c, out_c, in_h, in_w) == (256, 32, 28, 28))
+
+def _pointwise_tile_h(in_c, out_c, out_h, out_w):
+    if out_h > 50:
+        return min(out_h, 20)
+    if (in_c, out_c, out_h, out_w) == (256, 32, 28, 28):
+        return 20
+    return out_h
+
 def should_use_nhwc_pack(channels, c2):
     return channels > 0 and c2 // channels == 2
 
@@ -173,7 +191,7 @@ def _conv_input_pack_c2(in_c, groups, out_c, align_c):
     # C2 selection is RK packing layered on top of 16-value FP16 atoms.
     if in_c == 1: return 2
     if not _is_depthwise(in_c, out_c, groups) and groups == 1 and 1 < in_c <= 4: return 8
-    if _is_depthwise(in_c, out_c, groups) or groups > 1 or in_c == 16: return 8
+    if _is_depthwise(in_c, out_c, groups) or groups > 1 or in_c > 4: return 8
     return align_c
 
 def _dma_strides(in_h, width_stride, use_nhwc_pack):
@@ -190,17 +208,30 @@ def _cbuf_entries(width_stride, align_c, in_h, is_depthwise):
     row_entries = max(1, _ceil_div(width_stride * align_c, 2 * FP16_ATOM_ELEMENTS))
     return row_entries if align_c >= 16 or is_depthwise else row_entries * in_h * 4
 
+def _feature_grains(row_bytes, floor_grains, use_nhwc_pack=False, is_spatial=False, is_depthwise=False):
+    if use_nhwc_pack and is_spatial:
+        return floor_grains
+    if is_depthwise and is_spatial:
+        return min(13, floor_grains)
+    even_rows_per_two_banks = (_ceil_div(2 * CBUF_BANK_SIZE, row_bytes) + 1) & ~1
+    return min(floor_grains, even_rows_per_two_banks)
+
+def _data_bank(width_stride, feature_grains, align_c, use_nhwc_pack=False, is_spatial=False, is_depthwise=False):
+    if is_spatial and (use_nhwc_pack or is_depthwise):
+        return RK_CBUF_BANKS - 1
+    return int(np.clip(_ceil_div(width_stride * feature_grains * align_c * FP16_BYTES, CBUF_BANK_SIZE), 1, RK_CBUF_BANKS - 1))
+
 def _conv_params(batch, in_c, in_h, in_w, out_c, kh, kw, groups, stride=1):
     assert 1 <= stride <= 7, "CNA_CONV_CON3 stride fields are 3-bit values"
     is_depthwise = _is_depthwise(in_c, out_c, groups)
     is_spatial = (kh != 1 or kw != 1)
     out_h = (in_h - kh) // stride + 1
     out_w = (in_w - kw) // stride + 1
-    align_c = _conv_align_c(in_c, groups, out_c)
-    align_out_c = max(16, _align_up(out_c, 16))
+    align_c = 32 if (not is_spatial and groups == 1 and in_c >= 64) else _conv_align_c(in_c, groups, out_c)
+    align_out_c = max(32, _align_up(out_c, 16))
     width_stride = _align_up(in_w, max(1, _ceil_div(16, align_c)))
     out_atoms = max(1, out_h * out_w)
-    out_width_stride = out_atoms if (not is_spatial and out_atoms < 4) else _align_up(out_atoms, 4)
+    out_width_stride = out_atoms if not is_spatial else _align_up(out_atoms, 4)
 
     mesa_aligned_small = (not is_depthwise) and groups == 1 and 1 < in_c <= 4
     input_pack_c2 = _conv_input_pack_c2(in_c, groups, out_c, align_c)
@@ -240,6 +271,16 @@ def _pack_default(weight, out_c, in_c, kh, kw, c2_out):
     padded[:, :in_c] = weight
     return padded.transpose(0, 2, 3, 1).ravel()
 
+def _pack_pointwise_wide(weight, out_c, in_c):
+    aligned_in_c = max(32, _align_up(in_c, 32))
+    aligned_out_c = _align_up(out_c, 16) if out_c >= 48 else out_c
+    padded = np.zeros((aligned_out_c, aligned_in_c), dtype=np.float16)
+    padded[:out_c, :in_c] = weight[:, :in_c, 0, 0]
+    return np.concatenate([
+        padded[oc:oc + 16].reshape(-1, aligned_in_c // 32, 32).transpose(1, 0, 2).ravel()
+        for oc in range(0, aligned_out_c, 16)
+    ])
+
 def _pack_dw_spatial_major(weight, out_c, in_c, kh, kw, c2_out):
     packed = np.zeros((kh, kw, c2_out), dtype=np.float16)
     packed[:, :, :out_c] = weight[range(out_c), range(out_c)].transpose(1, 2, 0)
@@ -249,6 +290,8 @@ def pack_conv_weights_for_shape(weight_full, out_c, in_c, kh, kw, align_c, group
     is_depthwise = _is_depthwise(in_c, out_c, groups)
     if is_depthwise and out_c <= align_c and kh == 3 and kw == 3:
         return _pack_dw_spatial_major(weight_full, out_c, in_c, kh, kw, align_c)
+    if groups == 1 and kh == 1 and kw == 1 and in_c >= 64:
+        return _pack_pointwise_wide(weight_full, out_c, in_c)
     if _is_kh_major(out_c, in_c, kh, kw, groups):
         return _pack_kh_major(weight_full, out_c, in_c, kh, kw, align_c)
     return _pack_default(weight_full, out_c, in_c, kh, kw, align_c)
@@ -267,14 +310,21 @@ def _pack_conv_input_fp16(input_nchw, p):
     return padded.reshape(c1, c2, in_h, p["width_stride"]).transpose(0, 2, 3, 1).ravel()
 
 def _unpack_flat_1x1_output(out_raw, out_c, out_h, out_w, out_width_stride, c2):
-    c1 = _ceil_div(out_c, c2)
+    c1 = out_raw.size // (out_width_stride * c2)
     packed = out_raw.reshape(1, c1, 1, out_width_stride, c2)
     return packed[0, :, 0, :out_h * out_w, :].transpose(0, 2, 1).reshape(c1 * c2, out_h * out_w)[:out_c].reshape(out_c, out_h, out_w)
 
-def _unpack_nc1hwc2_output(out_raw, out_c, out_h, out_w, c2):
-    c1 = _ceil_div(out_c, c2)
-    packed = out_raw.reshape(1, c1, out_h, out_w, c2)
-    return packed[0].transpose(0, 3, 1, 2).reshape(c1 * c2, out_h, out_w)[:out_c]
+def _unpack_nc1hwc2_output(out_raw, out_c, out_h, out_w, c2, out_width_stride=None):
+    out_width_stride = out_width_stride or out_h * out_w
+    c1 = out_raw.size // (out_width_stride * c2)
+    result = np.zeros((out_c, out_h, out_w), dtype=np.float16)
+    for plane in range(c1):
+        plane_raw = out_raw[plane * out_width_stride * c2:plane * out_width_stride * c2 + out_h * out_w * c2]
+        channels = min(c2, out_c - plane * c2)
+        if channels <= 0:
+            break
+        result[plane * c2:plane * c2 + channels] = plane_raw.reshape(out_h, out_w, c2).transpose(2, 0, 1)[:channels]
+    return result
 
 def _unpack_grouped_spatial_output(out_raw, out_c, out_h, out_w, c2, plane_stride):
     c1 = _ceil_div(out_c, c2)
@@ -301,7 +351,7 @@ def _reorder_grouped_spatial_weights_block16(weight_full, out_c, in_c, kh, kw):
         reordered[block_start:block_end] = pack_order.transpose(0, 2, 1).reshape(block_channels, in_c, kh, kw)
     return reordered
 
-def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out_dma, groups=1, stride=1):
+def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out_dma, groups=1, stride=1, out_width_stride_override=None, weight_reuse=False, full_data_bank=False):
     p = _conv_params(batch, in_c, in_h, in_w, out_c, kh, kw, groups, stride=stride)
     is_depthwise = p["is_depthwise"]
     is_spatial = (kh != 1 or kw != 1)
@@ -310,22 +360,25 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
     align_c = p["align_c"]
     align_out_c = p["align_out_c"]
     width_stride = p["width_stride"]
-    out_width_stride = p["out_width_stride"]
+    out_width_stride = out_width_stride_override or p["out_width_stride"]
     use_nhwc_pack = p["use_nhwc"]
     input_pack_c2 = p["input_pack_c2"]
-    cvt_con5 = 0 if p["mesa_aligned_small"] else ((1 << in_c if use_nhwc_pack else input_pack_c2) - 1)
+    cvt_con5 = 65535 if (in_c == 1 and not is_depthwise) else (0 if (not is_depthwise and groups == 1) else ((1 << in_c if use_nhwc_pack else input_pack_c2) - 1))
 
     data_in_channel_aligned = _align_up(in_c, align_c)
     weight_bytes_per_kernel = kh * kw * data_in_channel_aligned * FP16_BYTES
     weight_bytes_total = weight_bytes_per_kernel * out_c
 
-    input_row_bytes = width_stride * align_c * FP16_BYTES
-    even_rows_per_two_banks = (_ceil_div(2 * CBUF_BANK_SIZE, input_row_bytes) + 1) & ~1   
-    feature_grains = max(in_h + kh, even_rows_per_two_banks)
+    input_row_bytes = width_stride * data_in_channel_aligned * FP16_BYTES
+    feature_grains = _feature_grains(input_row_bytes, in_h + kh, use_nhwc_pack, is_spatial, is_depthwise)
+    if not is_spatial:
+        feature_grains = max(feature_grains, 52)
 
     line_stride, surf_stride = _dma_strides(in_h, width_stride, use_nhwc_pack)
-    cbuf_entries = _cbuf_entries(width_stride, align_c, in_h, is_depthwise)
-    data_bank = np.clip(_ceil_div(width_stride * feature_grains * align_c * FP16_BYTES, CBUF_BANK_SIZE), 1, RK_CBUF_BANKS - 1)
+    cbuf_entries = _cbuf_entries(width_stride, data_in_channel_aligned, in_h, is_depthwise)
+    data_bank = _data_bank(width_stride, feature_grains, data_in_channel_aligned, use_nhwc_pack, is_spatial, is_depthwise)
+    if full_data_bank:
+        data_bank = RK_CBUF_BANKS - 1
     out_channel_field = align_out_c - 1 if not is_depthwise else _align_up(align_out_c, 32) - 1
     effective_align_out = max(16, _align_up(_ceil_div(out_c, groups), 16)) if (groups > 1 and not is_depthwise) else out_channel_field + 1
 
@@ -334,10 +387,9 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
             ((1 << 3) |                    # DPU_S_POINTER_POINTER_PP_MODE
              (1 << 2) |                    # DPU_S_POINTER_EXECUTER_PP_EN
              (1 << 1))),                   # DPU_S_POINTER_POINTER_PP_EN
-        E(reg.RDMA, reg.RDMA_S_POINTER,
-            ((1 << 3) |                    # DPU_RDMA_RDMA_S_POINTER_POINTER_PP_MODE
-             (1 << 2) |                    # DPU_RDMA_RDMA_S_POINTER_EXECUTER_PP_EN
-             (1 << 1))),                   # DPU_RDMA_RDMA_S_POINTER_POINTER_PP_EN
+        E(reg.RDMA, reg.RDMA_S_POINTER, 0), # Clear stale DPU-RDMA state after eltwise/add tasks
+        E(reg.RDMA, reg.RDMA_ERDMA_CFG, 0),
+        E(reg.RDMA, reg.RDMA_FEATURE_MODE_CFG, 0),
         E(reg.CNA, reg.CNA_CONV_CON1,
             ((2 << 4) |                    # CNA_CONV_CON1_IN_PRECISION(fp16)
              (2 << 7) |                    # CNA_CONV_CON1_PROC_PRECISION(fp16)
@@ -364,14 +416,15 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
              (kh << 16) |                  # CNA_WEIGHT_SIZE2_WEIGHT_HEIGHT
              (1 if is_depthwise else out_c))), # CNA_WEIGHT_SIZE2_WEIGHT_KERNELS
         E(reg.CNA, reg.CNA_CBUF_CON0,
-            ((RK_CBUF_BANKS - data_bank << 4) | # CNA_CBUF_CON0_WEIGHT_BANK
+            ((weight_reuse << 13) |             # CNA_CBUF_CON0_WEIGHT_REUSE
+             (RK_CBUF_BANKS - data_bank << 4) | # CNA_CBUF_CON0_WEIGHT_BANK
              data_bank)),                       # CNA_CBUF_CON0_DATA_BANK
         E(reg.CNA, reg.CNA_CBUF_CON1, cbuf_entries),      # CNA_CBUF_CON1_DATA_ENTRIES
 
         # CNA conversion and DMA setup.
-        E(reg.CNA, reg.CNA_CVT_CON0, ((not use_nhwc_pack << 3) |          # CNA_CVT_CON0_DATA_SIGN
-                                     (not use_nhwc_pack << 1) |           # CNA_CVT_CON0_CVT_TYPE
-                                        1)),                              # CNA_CVT_CON0_CVT_BYPASS
+        E(reg.CNA, reg.CNA_CVT_CON0, ((use_nhwc_pack << 3) |             # CNA_CVT_CON0_DATA_SIGN
+                                      (use_nhwc_pack << 1) |             # CNA_CVT_CON0_CVT_TYPE
+                                       1)),                              # CNA_CVT_CON0_CVT_BYPASS
         E(reg.CNA, reg.CNA_CVT_CON1, (1 << 16)),          # CNA_CVT_CON1_CVT_SCALE0
         E(reg.CNA, reg.CNA_CVT_CON2, (1 << 16)),          # CNA_CVT_CON2_CVT_SCALE1
         E(reg.CNA, reg.CNA_CVT_CON3, (1 << 16)),          # CNA_CVT_CON3_CVT_SCALE2
@@ -385,7 +438,7 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
         E(reg.CNA, reg.CNA_FC_DATA_SIZE0,
             ((in_w << 16) |                # CNA_FC_DATA_SIZE0_DMA_WIDTH
              in_h)),                       # CNA_FC_DATA_SIZE0_DMA_HEIGHT
-        E(reg.CNA, reg.CNA_FC_DATA_SIZE1, align_c),       # CNA_FC_DATA_SIZE1_DMA_CHANNEL
+        E(reg.CNA, reg.CNA_FC_DATA_SIZE1, data_in_channel_aligned), # CNA_FC_DATA_SIZE1_DMA_CHANNEL
         E(reg.CNA, reg.CNA_DCOMP_ADDR0, wt_dma),
         E(reg.CNA, reg.CNA_CVT_CON5, cvt_con5), # CNA_CVT_CON5_PER_CHANNEL_CVT_EN
         E(reg.CORE, reg.CORE_MISC_CFG, ((2 << 8) |             # CORE_MISC_CFG_PROC_PRECISION(fp16)
@@ -408,6 +461,7 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
         E(reg.DPU, reg.DST_SURF_STRIDE, out_width_stride << 4), # DPU_DST_SURF_STRIDE_DST_SURF_STRIDE
         E(reg.DPU, reg.DATA_CUBE_WIDTH, out_w - 1),            # DPU_DATA_CUBE_WIDTH_WIDTH
         E(reg.DPU, reg.DATA_CUBE_HEIGHT, out_h - 1),           # DPU_DATA_CUBE_HEIGHT_HEIGHT
+        E(reg.DPU, reg.DATA_CUBE_NOTCH, 0),                    # Must be set 0, otherwise corrupt next run
         E(reg.DPU, reg.DATA_CUBE_CHANNEL,
             ((out_c - 1 << 16) |            # DPU_DATA_CUBE_CHANNEL_ORIG_CHANNEL
              out_channel_field)),           # DPU_DATA_CUBE_CHANNEL_CHANNEL
@@ -441,15 +495,24 @@ def make_conv2d_regs(batch, in_c, in_h, in_w, out_c, kh, kw, in_dma, wt_dma, out
             ((1 << 16) |                   # DPU_OUT_CVT_SCALE_FP32TOFP16_EN
              1)),                          # DPU_OUT_CVT_SCALE_OUT_CVT_SCALE
         E(reg.DPU, reg.SURFACE_ADD,
-            (out_width_stride * (effective_align_out // 8)) << 4), # DPU_SURFACE_ADD_SURF_ADD
+            (out_width_stride * max(2, effective_align_out // 16)) << 4), # DPU_SURFACE_ADD_SURF_ADD
     ]
+    # DO NOT delete 
     return npu_regs
 
 def write_regs_to_npu_task(task_regs):
+    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), 0, task_map.size())
+    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), 0, regcmd_map.size())
+
     def enable_npu_units(next_offset, next_task_regs_len):
         enable = E(reg.PC, reg.OPERATION_ENABLE, (6 << 1) | 1)
         if next_offset is None:
-            return [enable]
+            return [
+                E(reg.PC_REG, reg.PC_BASE_ADDRESS, 0),    # prevent corrupt next state
+                E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, 0),
+                E(reg.VERSION, 0, 0),
+                enable,
+            ]
         next_addr = regcmd_mem_create.dma_addr + next_offset * ctypes.sizeof(ctypes.c_uint64)
         return [
             E(reg.PC_REG, reg.PC_BASE_ADDRESS, next_addr & 0xFFFFFFF0), # rounds down to nearest multiple of 16
@@ -462,7 +525,7 @@ def write_regs_to_npu_task(task_regs):
     offset = 0
     for regs in task_regs:
         offsets.append(offset)
-        offset += _align_up(len(regs) + 4, 2)
+        offset += _align_up(len(regs) + PC_CHAIN_TAIL_QWORDS, 2)
     assert offset <= regcmd_mem_create.size // ctypes.sizeof(ctypes.c_uint64), "regcmd buffer too small"
 
     # add tail enable, write to npu_tasks
@@ -494,30 +557,141 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
     np.random.seed(42)
     input_nchw = np.random.uniform(-2, 2, (batch, in_c, in_h, in_w)).astype(np.float16)
     weight_nchw = np.random.uniform(-2, 2, (out_c, weight_in_c, kh, kw)).astype(np.float16)
-
-    if _is_depthwise(in_c, out_c, groups):
-        weight_full = np.zeros((out_c, in_c, kh, kw), dtype=np.float16)
-        for oc in range(out_c):
-            weight_full[oc, oc] = weight_nchw[oc, 0]
-    else:
-        weight_full = _expand_grouped_weights(weight_nchw, in_c, out_c, kh, kw, groups)
     grouped_spatial = _is_grouped_spatial(in_c, out_c, kh, kw, groups)
-    if grouped_spatial:
-        weight_full = _reorder_grouped_spatial_weights_block16(weight_full, out_c, in_c, kh, kw)
+    grouped_serial = is_spatial and groups > 1 and not p["is_depthwise"]
+    spatial_oc_serial = is_spatial and groups == 1 and not p["is_depthwise"] and out_c > UNPACK_C2 and in_c % 16 != 0
 
-    if p["is_depthwise"] and in_c == 32 and out_c == 32 and not is_spatial:
-        wt_flat = np.zeros((kh * kw * _align_up(in_c, p["align_c"]) * out_c), dtype=np.float16)
-        wt_flat[:out_c] = weight_nchw[:, 0, 0, 0]
-    else:
-        wt_flat = pack_conv_weights_for_shape(weight_full, out_c, in_c, kh, kw, p["align_c"], groups)
     wt_ptr = ctypes.addressof(ctypes.c_char.from_buffer(weight_map))
-    ctypes.memmove(wt_ptr, wt_flat.ctypes.data, wt_flat.nbytes)
+    if not grouped_serial and not spatial_oc_serial:
+        if _is_depthwise(in_c, out_c, groups):
+            weight_full = np.zeros((out_c, in_c, kh, kw), dtype=np.float16)
+            for oc in range(out_c):
+                weight_full[oc, oc] = weight_nchw[oc, 0]
+        else:
+            weight_full = _expand_grouped_weights(weight_nchw, in_c, out_c, kh, kw, groups)
+        if grouped_spatial:
+            weight_full = _reorder_grouped_spatial_weights_block16(weight_full, out_c, in_c, kh, kw)
+
+        if p["is_depthwise"] and in_c == 32 and out_c == 32 and not is_spatial:
+            wt_flat = np.zeros((kh * kw * _align_up(in_c, p["align_c"]) * out_c), dtype=np.float16)
+            wt_flat[:out_c] = weight_nchw[:, 0, 0, 0]
+        else:
+            wt_flat = pack_conv_weights_for_shape(weight_full, out_c, in_c, kh, kw, p["align_c"], groups)
+        ctypes.memmove(wt_ptr, wt_flat.ctypes.data, wt_flat.nbytes)
 
     result = np.zeros((batch, out_c, out_h, out_w), dtype=np.float16)
     def read_output_fp16(count):
         return np.frombuffer(output_map, dtype=np.uint16, count=count).copy().view(np.float16)
 
+    if grouped_serial:
+        assert in_c % groups == 0 and out_c % groups == 0, "invalid grouped channel counts"
+        input_per_group = in_c // groups
+        out_per_group = out_c // groups
+        gp = _conv_params(1, input_per_group, in_h, in_w, out_per_group, kh, kw, 1, stride=stride)
+        group_out_c1 = _ceil_div(gp["align_out_c"], UNPACK_C2)
+        group_out_count = group_out_c1 * gp["out_h"] * gp["out_w"] * UNPACK_C2
+        wt_ptr = ctypes.addressof(ctypes.c_char.from_buffer(weight_map))
+
+        for n in range(batch):
+            for g in range(groups):
+                input_start = g * input_per_group
+                input_end = input_start + input_per_group
+                oc_start = g * out_per_group
+                oc_end = oc_start + out_per_group
+                input_tile = input_nchw[n, input_start:input_end]
+                input_flat = _pack_conv_input_fp16(input_tile, gp).view(np.uint16).tolist()
+                ct_inputs = (ctypes.c_uint16 * len(input_flat)).from_buffer(input_map)
+                ct_inputs[:] = input_flat
+
+                group_weight = weight_nchw[oc_start:oc_end].reshape(out_per_group, input_per_group, kh, kw)
+                wt_flat = pack_conv_weights_for_shape(group_weight, out_per_group, input_per_group, kh, kw, gp["align_c"], 1)
+                ctypes.memmove(wt_ptr, wt_flat.ctypes.data, wt_flat.nbytes)
+                ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_mem_create.size)
+
+                task_regs = [make_conv2d_regs(
+                    1, input_per_group, in_h, in_w, out_per_group, kh, kw,
+                    input_mem_create.dma_addr,
+                    weight_mem_create.dma_addr,
+                    output_mem_create.dma_addr,
+                    groups=1,
+                    stride=stride)]
+
+                write_regs_to_npu_task(task_regs)
+                npu_submit(task_count=len(task_regs))
+                out_buf = read_output_fp16(group_out_count)
+                result[n, oc_start:oc_end] = _unpack_nc1hwc2_output(
+                    out_buf, out_per_group, out_h, out_w, UNPACK_C2)
+        return result, input_nchw, weight_nchw
+
+    if spatial_oc_serial:
+        oc_tile = UNPACK_C2
+        wt_ptr = ctypes.addressof(ctypes.c_char.from_buffer(weight_map))
+        for n in range(batch):
+            input_flat = _pack_conv_input_fp16(input_nchw[n], p).view(np.uint16).tolist()
+            ct_inputs = (ctypes.c_uint16 * len(input_flat)).from_buffer(input_map)
+            ct_inputs[:] = input_flat
+
+            for oc_start in range(0, out_c, oc_tile):
+                oc_end = min(oc_start + oc_tile, out_c)
+                tile_out_c = oc_end - oc_start
+                tile_p = _conv_params(1, in_c, in_h, in_w, tile_out_c, kh, kw, 1, stride=stride)
+                tile_weight = weight_nchw[oc_start:oc_end].reshape(tile_out_c, in_c, kh, kw)
+                wt_flat = pack_conv_weights_for_shape(tile_weight, tile_out_c, in_c, kh, kw, tile_p["align_c"], 1)
+                ctypes.memmove(wt_ptr, wt_flat.ctypes.data, wt_flat.nbytes)
+                ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_mem_create.size)
+
+                task_regs = [make_conv2d_regs(
+                    1, in_c, in_h, in_w, tile_out_c, kh, kw,
+                    input_mem_create.dma_addr,
+                    weight_mem_create.dma_addr,
+                    output_mem_create.dma_addr,
+                    groups=1,
+                    stride=stride)]
+
+                write_regs_to_npu_task(task_regs)
+                npu_submit(task_count=len(task_regs))
+                out_c1 = _ceil_div(tile_p["align_out_c"], UNPACK_C2)
+                out_buf = read_output_fp16(out_c1 * out_h * out_w * UNPACK_C2)
+                result[n, oc_start:oc_end] = _unpack_nc1hwc2_output(
+                    out_buf, tile_out_c, out_h, out_w, UNPACK_C2)
+        return result, input_nchw, weight_nchw
+
     for n in range(batch):
+        if _needs_pointwise_tile_schedule(in_c, out_c, in_h, in_w, kh, kw, groups):
+            ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_mem_create.size)
+            input_ptr = ctypes.addressof(ctypes.c_char.from_buffer(input_map))
+            task_regs = []
+            input_offset = 0
+            tile_h = _pointwise_tile_h(in_c, out_c, out_h, out_w)
+            for row_start in range(0, out_h, tile_h):
+                tile_out_h = min(tile_h, out_h - row_start)
+                tile_in_h = (tile_out_h - 1) * stride + kh
+                tile_p = p if tile_in_h == in_h else _conv_params(1, in_c, tile_in_h, in_w, out_c, kh, kw, groups, stride=stride)
+                input_tile = input_nchw[n, :, row_start * stride:row_start * stride + tile_in_h, :]
+                input_flat = _pack_conv_input_fp16(input_tile, tile_p).view(np.uint16)
+                input_bytes = input_flat.nbytes
+                assert input_offset + input_bytes <= input_mem_create.size, "input buffer too small"
+                ctypes.memmove(input_ptr + input_offset, input_flat.ctypes.data, input_bytes)
+                output_offset = row_start * out_w * 16
+                regs = make_conv2d_regs(
+                    1, in_c, tile_in_h, in_w, out_c, kh, kw,
+                    input_mem_create.dma_addr + input_offset,
+                    weight_mem_create.dma_addr,
+                    output_mem_create.dma_addr + output_offset,
+                    groups=groups,
+                    stride=stride,
+                    out_width_stride_override=p["out_width_stride"],
+                    weight_reuse=bool(task_regs),
+                    full_data_bank=True)
+                task_regs.append(regs)
+                input_offset = _align_up(input_offset + input_bytes, 16)
+            write_regs_to_npu_task(task_regs)
+            npu_submit(task_count=len(task_regs))
+            out_c1 = _ceil_div(p["align_out_c"], UNPACK_C2)
+            out_buf = read_output_fp16(out_c1 * p["out_width_stride"] * UNPACK_C2)
+            result[n] = _unpack_flat_1x1_output(out_buf, out_c, out_h, out_w, p["out_width_stride"], UNPACK_C2)
+            continue
+
         if not is_spatial:
             small_chan = p["use_nhwc"] and not p["is_depthwise"]
             tile_h = max(1, RK_MAX_CONV_FLAT_STRIDE // out_w) if (small_chan and _align_up(out_h * out_w, 4) > RK_MAX_CONV_FLAT_STRIDE) else out_h
@@ -545,7 +719,7 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
             write_regs_to_npu_task(task_regs)
             npu_submit(task_count=len(task_regs))
 
-            out_c1 = _ceil_div(out_c, UNPACK_C2)
+            out_c1 = _ceil_div(out_c, UNPACK_C2) if grouped_spatial else _ceil_div(tile_p["align_out_c"], UNPACK_C2)
             if not is_spatial:
                 out_count = out_c1 * tile_p["out_width_stride"] * UNPACK_C2
                 out_buf = read_output_fp16(out_count)
@@ -557,8 +731,8 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
                 out_buf = read_output_fp16(out_c1 * plane_stride)
                 result[n] = _unpack_grouped_spatial_output(out_buf, out_c, out_h, out_w, UNPACK_C2, plane_stride)
             else:
-                out_buf = read_output_fp16(out_c1 * out_h * out_w * UNPACK_C2)
-                result[n] = _unpack_nc1hwc2_output(out_buf, out_c, out_h, out_w, UNPACK_C2)
+                out_buf = read_output_fp16(out_c1 * tile_p["out_width_stride"] * UNPACK_C2)
+                result[n] = _unpack_nc1hwc2_output(out_buf, out_c, out_h, out_w, UNPACK_C2, tile_p["out_width_stride"])
     return result, input_nchw, weight_nchw
 
 def compute_expected_nchw(input_nchw, weight_nchw, batch, in_c, in_h, in_w, out_c, kh, kw, groups=1, stride=1):
@@ -577,76 +751,76 @@ def compute_expected_nchw(input_nchw, weight_nchw, batch, in_c, in_h, in_w, out_
 if __name__ == "__main__":
     shapes = [
         # -- 1x1 kernels (fully supported via NHWC mode + channel slicing for ic>=5) --
-        # dict(name="conv2d_1x6_1x1_4x4",                batch=1, in_c=1,  in_h=4,  in_w=4,  out_c=6, weight_in_c=1, kh=1, kw=1, groups=1),
-        # dict(name="conv2d_3x3_1x1_4x4",                batch=1, in_c=3,  in_h=4,  in_w=4,  out_c=3, weight_in_c=3, kh=1, kw=1, groups=1),
-        # dict(name="conv2d_4x2_1x1_4x4",                batch=1, in_c=4,  in_h=4,  in_w=4,  out_c=2, weight_in_c=4, kh=1, kw=1, groups=1),
-        # dict(name="conv2d_b1_c4_h9_w9_oc4_wic4_k1x1_g1",  batch=1, in_c=4,  in_h=9,  in_w=9,  out_c=4, weight_in_c=4, kh=1, kw=1, groups=1),
+        dict(name="conv2d_1x6_1x1_4x4",                batch=1, in_c=1,  in_h=4,  in_w=4,  out_c=6, weight_in_c=1, kh=1, kw=1, groups=1),
+        dict(name="conv2d_3x3_1x1_4x4",                batch=1, in_c=3,  in_h=4,  in_w=4,  out_c=3, weight_in_c=3, kh=1, kw=1, groups=1),
+        dict(name="conv2d_4x2_1x1_4x4",                batch=1, in_c=4,  in_h=4,  in_w=4,  out_c=2, weight_in_c=4, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c4_h9_w9_oc4_wic4_k1x1_g1",  batch=1, in_c=4,  in_h=9,  in_w=9,  out_c=4, weight_in_c=4, kh=1, kw=1, groups=1),
         dict(name="conv2d_b1_c3_h52_w52_oc6_wic3_k1x1_g1", batch=1, in_c=3,  in_h=52, in_w=52, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        # dict(name="conv2d_b1_c96_h56_w56_oc24_wic96_k1x1_g1", batch=1, in_c=96, in_h=56, in_w=56, out_c=24, weight_in_c=96, kh=1, kw=1, groups=1),
-        # dict(name="conv2d_b1_c144_h56_w56_oc24_wic144_k1x1_g1", batch=1, in_c=144, in_h=56, in_w=56, out_c=24, weight_in_c=144, kh=1, kw=1, groups=1),
-        # dict(name="conv2d_b1_c144_h28_w28_oc32_wic144_k1x1_g1", batch=1, in_c=144, in_h=28, in_w=28, out_c=32, weight_in_c=144, kh=1, kw=1, groups=1),
-        # dict(name="conv2d_b1_c192_h28_w28_oc32_wic192_k1x1_g1", batch=1, in_c=192, in_h=28, in_w=28, out_c=32, weight_in_c=192, kh=1, kw=1, groups=1),
-        # dict(name="conv2d_b1_c192_h28_w28_oc16_wic192_k1x1_g1", batch=1, in_c=192, in_h=28, in_w=28, out_c=16, weight_in_c=192, kh=1, kw=1, groups=1),
-        # dict(name="conv2d_b1_c256_h28_w28_oc32_wic256_k1x1_g1", batch=1, in_c=256, in_h=28, in_w=28, out_c=32, weight_in_c=256, kh=1, kw=1, groups=1),
-        # dict(name="conv2d_16x16_1x1_8x8",              batch=1, in_c=16, in_h=8,  in_w=8,  out_c=16, weight_in_c=16, kh=1, kw=1, groups=1),
-        # dict(name="conv2d_b1_c16_h32_w32_oc16_wic16_k1x1_g1", batch=1, in_c=16, in_h=32, in_w=32, out_c=16, weight_in_c=16, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c96_h56_w56_oc24_wic96_k1x1_g1", batch=1, in_c=96, in_h=56, in_w=56, out_c=24, weight_in_c=96, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c144_h56_w56_oc24_wic144_k1x1_g1", batch=1, in_c=144, in_h=56, in_w=56, out_c=24, weight_in_c=144, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c144_h28_w28_oc32_wic144_k1x1_g1", batch=1, in_c=144, in_h=28, in_w=28, out_c=32, weight_in_c=144, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c192_h28_w28_oc32_wic192_k1x1_g1", batch=1, in_c=192, in_h=28, in_w=28, out_c=32, weight_in_c=192, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c192_h28_w28_oc16_wic192_k1x1_g1", batch=1, in_c=192, in_h=28, in_w=28, out_c=16, weight_in_c=192, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c256_h28_w28_oc32_wic256_k1x1_g1", batch=1, in_c=256, in_h=28, in_w=28, out_c=32, weight_in_c=256, kh=1, kw=1, groups=1),
+        dict(name="conv2d_16x16_1x1_8x8",              batch=1, in_c=16, in_h=8,  in_w=8,  out_c=16, weight_in_c=16, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c16_h32_w32_oc16_wic16_k1x1_g1", batch=1, in_c=16, in_h=32, in_w=32, out_c=16, weight_in_c=16, kh=1, kw=1, groups=1),
 
-        # # -- Non-1x1 kernels (partial output -- known NPU hardware limitation) --
-        # dict(name="conv2d_b1_c4_h9_w9_oc4_wic4_k3x3_g1",  batch=1, in_c=4,  in_h=9,  in_w=9,  out_c=4, weight_in_c=4, kh=3, kw=3, groups=1),
-        # dict(name="conv2d_b1_c16_h18_w18_oc16_wic16_k3x3_g1", batch=1, in_c=16, in_h=18, in_w=18, out_c=16, weight_in_c=16, kh=3, kw=3, groups=1),
-        # dict(name="conv2d_b2_c4_h9_w9_oc4_wic4_k3x3_g1",  batch=2, in_c=4,  in_h=9,  in_w=9,  out_c=4, weight_in_c=4, kh=3, kw=3, groups=1),
-        # dict(name="conv2d_b1_c1_h5_w7_oc6_wic1_k3x3_g1",  batch=1, in_c=1,  in_h=5,  in_w=7,  out_c=6, weight_in_c=1, kh=3, kw=3, groups=1),
+        # -- Non-1x1 kernels (partial output -- known NPU hardware limitation) --
+        dict(name="conv2d_b1_c4_h9_w9_oc4_wic4_k3x3_g1",  batch=1, in_c=4,  in_h=9,  in_w=9,  out_c=4, weight_in_c=4, kh=3, kw=3, groups=1),
+        dict(name="conv2d_b1_c16_h18_w18_oc16_wic16_k3x3_g1", batch=1, in_c=16, in_h=18, in_w=18, out_c=16, weight_in_c=16, kh=3, kw=3, groups=1),
+        dict(name="conv2d_b2_c4_h9_w9_oc4_wic4_k3x3_g1",  batch=2, in_c=4,  in_h=9,  in_w=9,  out_c=4, weight_in_c=4, kh=3, kw=3, groups=1),
+        dict(name="conv2d_b1_c1_h5_w7_oc6_wic1_k3x3_g1",  batch=1, in_c=1,  in_h=5,  in_w=7,  out_c=6, weight_in_c=1, kh=3, kw=3, groups=1),
 
-        # # Depthwise
-        # dict(name="conv2d_b1_c3_h11_w28_oc3_wic1_k3x3_g3", batch=1, in_c=3, in_h=11, in_w=28, out_c=3, weight_in_c=1, kh=3, kw=3, groups=3),
+        # Depthwise
+        dict(name="conv2d_b1_c3_h11_w28_oc3_wic1_k3x3_g3", batch=1, in_c=3, in_h=11, in_w=28, out_c=3, weight_in_c=1, kh=3, kw=3, groups=3),
 
-        # # Non-square kernels
-        # dict(name="conv2d_3x6_1x3_5x5", batch=1, in_c=3, in_h=5, in_w=5, out_c=6, weight_in_c=3, kh=1, kw=3, groups=1),
+        # Non-square kernels
+        dict(name="conv2d_3x6_1x3_5x5", batch=1, in_c=3, in_h=5, in_w=5, out_c=6, weight_in_c=3, kh=1, kw=3, groups=1),
 
-        # # -- test_ops.py _test_conv2d(cin=3): (3,5,7) @ (6,kh,kw) --
-        # dict(name="conv2d_b1_c3_h5_w7_oc6_wic1_k3x3_g3", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=1, kh=3, kw=3, groups=3),
-        # dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k2x1_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=2, kw=1, groups=1),
-        # dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k2x3_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=2, kw=3, groups=1),
-        # dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k2x5_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=2, kw=5, groups=1),
-        # dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k3x1_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=3, kw=1, groups=1),
-        # dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k3x3_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=3, kw=3, groups=1),
-        # dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k3x5_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=3, kw=5, groups=1),
+        # -- test_ops.py _test_conv2d(cin=3): (3,5,7) @ (6,kh,kw) --
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic1_k3x3_g3", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=1, kh=3, kw=3, groups=3),
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k2x1_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=2, kw=1, groups=1),
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k2x3_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=2, kw=3, groups=1),
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k2x5_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=2, kw=5, groups=1),
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k3x1_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=3, kw=1, groups=1),
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k3x3_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=3, kw=3, groups=1),
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k3x5_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=3, kw=5, groups=1),
 
-        # # -- test_ops.py _test_conv2d(cin=1): (1,5,7) @ (6,kh,kw) --
-        # dict(name="conv2d_1x6_2x1_5x7", batch=1, in_c=1, in_h=5, in_w=7, out_c=6, weight_in_c=1, kh=2, kw=1, groups=1),
-        # dict(name="conv2d_1x6_2x3_5x7", batch=1, in_c=1, in_h=5, in_w=7, out_c=6, weight_in_c=1, kh=2, kw=3, groups=1),
-        # dict(name="conv2d_1x6_3x1_5x7_b", batch=1, in_c=1, in_h=5, in_w=7, out_c=6, weight_in_c=1, kh=3, kw=1, groups=1),
-        # dict(name="conv2d_1x6_3x5_5x7",   batch=1, in_c=1, in_h=5, in_w=7, out_c=6, weight_in_c=1, kh=3, kw=5, groups=1),
+        # -- test_ops.py _test_conv2d(cin=1): (1,5,7) @ (6,kh,kw) --
+        dict(name="conv2d_1x6_2x1_5x7", batch=1, in_c=1, in_h=5, in_w=7, out_c=6, weight_in_c=1, kh=2, kw=1, groups=1),
+        dict(name="conv2d_1x6_2x3_5x7", batch=1, in_c=1, in_h=5, in_w=7, out_c=6, weight_in_c=1, kh=2, kw=3, groups=1),
+        dict(name="conv2d_1x6_3x1_5x7_b", batch=1, in_c=1, in_h=5, in_w=7, out_c=6, weight_in_c=1, kh=3, kw=1, groups=1),
+        dict(name="conv2d_1x6_3x5_5x7",   batch=1, in_c=1, in_h=5, in_w=7, out_c=6, weight_in_c=1, kh=3, kw=5, groups=1),
 
-        # # -- Grouped convs from test_ops.py --
-        # dict(name="conv2d_b1_c4_h1_w1_oc2_wic2_k1x1_g2",     batch=1,  in_c=4,  in_h=1,  in_w=1,  out_c=2,  weight_in_c=2,  kh=1, kw=1, groups=2),
-        # dict(name="conv2d_4x4_1x1_1x1_g2",                   batch=1,  in_c=4,  in_h=1,  in_w=1,  out_c=4,  weight_in_c=2,  kh=1, kw=1, groups=2),
-        # dict(name="conv2d_b1_c32_h32_w32_oc32_wic1_k1x1_g32", batch=1, in_c=32, in_h=32, in_w=32, out_c=32, weight_in_c=1,  kh=1, kw=1, groups=32),
-        # dict(name="conv2d_b1_c15_h5_w5_oc35_wic3_k3x3_g5",   batch=1,  in_c=15, in_h=5,  in_w=5,  out_c=35, weight_in_c=3,  kh=3, kw=3, groups=5),
+        # -- Grouped convs from test_ops.py --
+        dict(name="conv2d_b1_c4_h1_w1_oc2_wic2_k1x1_g2",     batch=1,  in_c=4,  in_h=1,  in_w=1,  out_c=2,  weight_in_c=2,  kh=1, kw=1, groups=2),
+        dict(name="conv2d_4x4_1x1_1x1_g2",                   batch=1,  in_c=4,  in_h=1,  in_w=1,  out_c=4,  weight_in_c=2,  kh=1, kw=1, groups=2),
+        dict(name="conv2d_b1_c32_h32_w32_oc32_wic1_k1x1_g32", batch=1, in_c=32, in_h=32, in_w=32, out_c=32, weight_in_c=1,  kh=1, kw=1, groups=32),
+        dict(name="conv2d_b1_c15_h5_w5_oc35_wic3_k3x3_g5",   batch=1,  in_c=15, in_h=5,  in_w=5,  out_c=35, weight_in_c=3,  kh=3, kw=3, groups=5),
 
-        # # -- Batch >1 coverage --
-        # dict(name="conv2d_b2_c3_h11_w28_oc3_wic1_k3x3_g3", batch=2, in_c=3,  in_h=11, in_w=28, out_c=3,  weight_in_c=1, kh=3, kw=3, groups=3),
-        # dict(name="conv2d_b4_c15_h5_w5_oc35_wic3_k3x3_g5", batch=4, in_c=15, in_h=5,  in_w=5,  out_c=35, weight_in_c=3, kh=3, kw=3, groups=5),
+        # -- Batch >1 coverage --
+        dict(name="conv2d_b2_c3_h11_w28_oc3_wic1_k3x3_g3", batch=2, in_c=3,  in_h=11, in_w=28, out_c=3,  weight_in_c=1, kh=3, kw=3, groups=3),
+        dict(name="conv2d_b4_c15_h5_w5_oc35_wic3_k3x3_g5", batch=4, in_c=15, in_h=5,  in_w=5,  out_c=35, weight_in_c=3, kh=3, kw=3, groups=5),
 
-        # # -- Grouped output-channel variants --
-        # dict(name="conv2d_b1_c4_h5_w5_oc4_wic2_k3x3_g2",   batch=1, in_c=4,  in_h=5, in_w=5, out_c=4,  weight_in_c=2, kh=3, kw=3, groups=2),
-        # dict(name="conv2d_b1_c4_h5_w5_oc8_wic2_k3x3_g2",   batch=1, in_c=4,  in_h=5, in_w=5, out_c=8,  weight_in_c=2, kh=3, kw=3, groups=2),
-        # dict(name="conv2d_b1_c4_h5_w5_oc12_wic2_k3x3_g2",  batch=1, in_c=4,  in_h=5, in_w=5, out_c=12, weight_in_c=2, kh=3, kw=3, groups=2),
-        # dict(name="conv2d_b1_c6_h5_w5_oc6_wic2_k3x3_g3",   batch=1, in_c=6,  in_h=5, in_w=5, out_c=6,  weight_in_c=2, kh=3, kw=3, groups=3),
-        # dict(name="conv2d_b1_c6_h5_w5_oc12_wic2_k3x3_g3",  batch=1, in_c=6,  in_h=5, in_w=5, out_c=12, weight_in_c=2, kh=3, kw=3, groups=3),
-        # dict(name="conv2d_b1_c6_h5_w5_oc18_wic2_k3x3_g3",  batch=1, in_c=6,  in_h=5, in_w=5, out_c=18, weight_in_c=2, kh=3, kw=3, groups=3),
-        # dict(name="conv2d_b1_c15_h5_w5_oc20_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=20, weight_in_c=3, kh=3, kw=3, groups=5),
-        # dict(name="conv2d_b1_c15_h5_w5_oc25_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=25, weight_in_c=3, kh=3, kw=3, groups=5),
-        # dict(name="conv2d_b1_c15_h5_w5_oc30_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=30, weight_in_c=3, kh=3, kw=3, groups=5),
-        # dict(name="conv2d_b1_c15_h5_w5_oc40_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=40, weight_in_c=3, kh=3, kw=3, groups=5),
-        # dict(name="conv2d_2x2_1x1_4x4",  batch=1, in_c=2, in_h=4, in_w=4, out_c=2, weight_in_c=2, kh=1, kw=1, groups=1),
-        # dict(name="conv2d_8x8_1x1_5x5",       batch=1, in_c=8,  in_h=5,  in_w=5,  out_c=8,  weight_in_c=8,  kh=1, kw=1, groups=1),
-        # dict(name="conv2d_10x20_3x3_9x9",     batch=1, in_c=10, in_h=9,  in_w=9,  out_c=20, weight_in_c=10, kh=3, kw=3, groups=1),
-        # dict(name="conv2d_16x16_3x3_9x9",     batch=1, in_c=16, in_h=9,  in_w=9,  out_c=16, weight_in_c=16, kh=3, kw=3, groups=1),
-        # dict(name="conv2d_2x4_3x3_6x6",       batch=1, in_c=2,  in_h=6,  in_w=6,  out_c=4,  weight_in_c=2,  kh=3, kw=3, groups=1),
-        # dict(name="conv2d_2x4_2x2_5x5",       batch=1, in_c=2,  in_h=5,  in_w=5,  out_c=4,  weight_in_c=2,  kh=2, kw=2, groups=1),
-        # dict(name="conv2d_1x32_5x5_10x10",    batch=1, in_c=1,  in_h=10, in_w=10, out_c=32, weight_in_c=1,  kh=5, kw=5, groups=1),
-        # dict(name="conv2d_8x4_4x4_10x10",     batch=1, in_c=8,  in_h=10, in_w=10, out_c=4,  weight_in_c=8,  kh=4, kw=4, groups=1),
+        # -- Grouped output-channel variants --
+        dict(name="conv2d_b1_c4_h5_w5_oc4_wic2_k3x3_g2",   batch=1, in_c=4,  in_h=5, in_w=5, out_c=4,  weight_in_c=2, kh=3, kw=3, groups=2),
+        dict(name="conv2d_b1_c4_h5_w5_oc8_wic2_k3x3_g2",   batch=1, in_c=4,  in_h=5, in_w=5, out_c=8,  weight_in_c=2, kh=3, kw=3, groups=2),
+        dict(name="conv2d_b1_c4_h5_w5_oc12_wic2_k3x3_g2",  batch=1, in_c=4,  in_h=5, in_w=5, out_c=12, weight_in_c=2, kh=3, kw=3, groups=2),
+        dict(name="conv2d_b1_c6_h5_w5_oc6_wic2_k3x3_g3",   batch=1, in_c=6,  in_h=5, in_w=5, out_c=6,  weight_in_c=2, kh=3, kw=3, groups=3),
+        dict(name="conv2d_b1_c6_h5_w5_oc12_wic2_k3x3_g3",  batch=1, in_c=6,  in_h=5, in_w=5, out_c=12, weight_in_c=2, kh=3, kw=3, groups=3),
+        dict(name="conv2d_b1_c6_h5_w5_oc18_wic2_k3x3_g3",  batch=1, in_c=6,  in_h=5, in_w=5, out_c=18, weight_in_c=2, kh=3, kw=3, groups=3),
+        dict(name="conv2d_b1_c15_h5_w5_oc20_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=20, weight_in_c=3, kh=3, kw=3, groups=5),
+        dict(name="conv2d_b1_c15_h5_w5_oc25_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=25, weight_in_c=3, kh=3, kw=3, groups=5),
+        dict(name="conv2d_b1_c15_h5_w5_oc30_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=30, weight_in_c=3, kh=3, kw=3, groups=5),
+        dict(name="conv2d_b1_c15_h5_w5_oc40_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=40, weight_in_c=3, kh=3, kw=3, groups=5),
+        dict(name="conv2d_2x2_1x1_4x4",  batch=1, in_c=2, in_h=4, in_w=4, out_c=2, weight_in_c=2, kh=1, kw=1, groups=1),
+        dict(name="conv2d_8x8_1x1_5x5",       batch=1, in_c=8,  in_h=5,  in_w=5,  out_c=8,  weight_in_c=8,  kh=1, kw=1, groups=1),
+        dict(name="conv2d_10x20_3x3_9x9",     batch=1, in_c=10, in_h=9,  in_w=9,  out_c=20, weight_in_c=10, kh=3, kw=3, groups=1),
+        dict(name="conv2d_16x16_3x3_9x9",     batch=1, in_c=16, in_h=9,  in_w=9,  out_c=16, weight_in_c=16, kh=3, kw=3, groups=1),
+        dict(name="conv2d_2x4_3x3_6x6",       batch=1, in_c=2,  in_h=6,  in_w=6,  out_c=4,  weight_in_c=2,  kh=3, kw=3, groups=1),
+        dict(name="conv2d_2x4_2x2_5x5",       batch=1, in_c=2,  in_h=5,  in_w=5,  out_c=4,  weight_in_c=2,  kh=2, kw=2, groups=1),
+        dict(name="conv2d_1x32_5x5_10x10",    batch=1, in_c=1,  in_h=10, in_w=10, out_c=32, weight_in_c=1,  kh=5, kw=5, groups=1),
+        dict(name="conv2d_8x4_4x4_10x10",     batch=1, in_c=8,  in_h=10, in_w=10, out_c=4,  weight_in_c=8,  kh=4, kw=4, groups=1),
 
         # # MobileNet layers
         # # first spatial conv (RGB->32ch)
