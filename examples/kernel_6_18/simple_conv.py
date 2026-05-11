@@ -334,6 +334,24 @@ def calc_raw_output_size(output_width, output_height, output_channels):
     oc1 = _ceil_div(output_channels, FEATURE_ATOMIC_SIZE) * 2
     return output_width * output_height * oc1 * FEATURE_ATOMIC_SIZE
 
+def calc_entries_per_slice(input_width, input_channels):
+    atomics_per_entry = CBUF_ENTRY_SIZE // FEATURE_ATOMIC_SIZE
+    total_c_atomics = _ceil_div(input_channels * BPE, FEATURE_ATOMIC_SIZE)
+    last_c_atomics = total_c_atomics % atomics_per_entry
+    int_c_entries = (total_c_atomics // atomics_per_entry) * input_width
+    if last_c_atomics == 3:
+        frac_c_entries = input_width
+    else:
+        frac_c_entries = _ceil_div(last_c_atomics * input_width, atomics_per_entry)
+    return int_c_entries + frac_c_entries
+
+def calc_input_banks(input_width, input_height, input_channels):
+    return _ceil_div(calc_entries_per_slice(input_width, input_channels) * input_height, CBUF_ENTRIES_PER_BANK)
+
+def calc_weights_banks(weights_width, weights_height, input_channels, output_channels):
+    bytes_ = weights_width * weights_height * input_channels * BPE * output_channels
+    return _ceil_div(_ceil_div(bytes_, CBUF_ENTRY_SIZE), CBUF_ENTRIES_PER_BANK) + 1
+
 def pack_input(input_nhwc):
     raw = np.zeros(calc_input_size(input_width, input_height, input_channels), dtype=np.uint8)
     if input_channels == 1:
@@ -415,8 +433,13 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
         input_surface_stride = 112
     
     weights_kernels = _align(output_channels_real, 2)
-    input_banks = 1
+    input_banks_required = calc_input_banks(input_width_real, input_height, input_channels_real)
+    weights_banks_required = calc_weights_banks(weights_width, weights_height, input_channels_real, output_channels_real)
+    input_banks = input_banks_required
     weight_banks = CBUF_BANKS - input_banks
+    if input_banks_required + weights_banks_required > CBUF_BANKS:
+        input_banks = 7
+        weight_banks = CBUF_BANKS - input_banks
     atomic_count = output_width * output_height
     surfaces_per_row = output_width * output_height * 2
 
@@ -596,9 +619,9 @@ if __name__ == "__main__":
         try:
             use_shape(shape)
         except ValueError as e:
-            skipped += 1
-            print(f"SKIP ({e})")
-            continue
+            failed += 1
+            print(f"FAIL ({e})")
+            raise
 
         np.random.seed(42)
         input_nhwc = np.random.randint(0, 256, (1, input_height, input_width, input_channels), dtype=np.uint8)
