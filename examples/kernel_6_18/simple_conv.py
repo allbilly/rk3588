@@ -1,4 +1,5 @@
 from fcntl import ioctl
+import ast
 import glob
 import os, mmap, sys, time, struct
 import ctypes
@@ -18,14 +19,63 @@ INPUT_SCALE = 1.0 / 255.0
 WEIGHT_SCALE = 1.0 / 255.0
 OUTPUT_SCALE = 1.0 / 255.0
 
-IN_W = 4
-IN_H = 4
-IN_C = 1
-OUT_C = 6
-KH = 1
-KW = 1
-OUT_W = 4
-OUT_H = 4
+input_width = 0
+input_height = 0
+input_channels = 0
+output_channels = 0
+weights_height = 0
+weights_width = 0
+output_width = 0
+output_height = 0
+ADDITION_INPUT = False
+ADD_TENSOR = -1
+
+def load_conv_legacy_shapes():
+    def literal_dict_call(node):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name) or node.func.id != "dict":
+            return None
+        if node.args:
+            return None
+        out = {}
+        for kw in node.keywords:
+            if kw.arg is None:
+                return None
+            out[kw.arg] = ast.literal_eval(kw.value)
+        return out
+
+    conv_path = os.path.join(os.path.dirname(__file__), "conv_legacy.py")
+    with open(conv_path, "r", encoding="utf-8") as f:
+        tree = ast.parse(f.read(), filename=conv_path)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+            if "shapes" in names and isinstance(node.value, ast.List):
+                shapes = []
+                for elt in node.value.elts:
+                    shape = literal_dict_call(elt)
+                    if shape is not None:
+                        shapes.append(shape)
+                return shapes
+    raise RuntimeError("Could not find literal shapes list in conv_legacy.py")
+
+def use_shape(shape):
+    global input_width, input_height, input_channels, output_channels, weights_height, weights_width, output_width, output_height, ADDITION_INPUT, ADD_TENSOR
+    if shape["batch"] != 1 or shape["groups"] != 1 or shape["weight_in_c"] != shape["in_c"]:
+        raise ValueError(f"unsupported simple_conv shape: {shape['name']}")
+    if shape["kh"] != 1 or shape["kw"] != 1:
+        raise ValueError(f"unsupported simple_conv shape: {shape['name']}")
+
+    input_width = shape["in_w"]
+    input_height = shape["in_h"]
+    input_channels = shape["in_c"]
+    output_channels = shape["out_c"]
+    weights_height = shape["kh"]
+    weights_width = shape["kw"]
+    output_width = input_width - weights_width + 1
+    output_height = input_height - weights_height + 1
+    ADDITION_INPUT = shape.get("addition_input", False)
+    ADD_TENSOR = shape.get("add_tensor", -1)
 
 class reg:
     # --- Stream/Target IDs (shifted into bits 48-63) ---
@@ -245,10 +295,10 @@ def rocket_submit(fd, vendor_tasks, task_count=1, in_bos=(), out_bos=()):
 
 task_map, tasks_mem_create = mem_allocate(fd, size=1024)
 regcmd_map, regcmd_mem_create = mem_allocate(fd, size=4096)
-input_map, input_mem_create = mem_allocate(fd, size=4096)
-weight_map, weight_mem_create = mem_allocate(fd, size=4096)
-bias_map, bias_mem_create = mem_allocate(fd, size=4096)
-output_map, output_mem_create = mem_allocate(fd, size=4096)
+input_map, input_mem_create = mem_allocate(fd, size=4194304)
+weight_map, weight_mem_create = mem_allocate(fd, size=4194304)
+bias_map, bias_mem_create = mem_allocate(fd, size=4194304)
+output_map, output_mem_create = mem_allocate(fd, size=4194304)
 
 tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
 regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
@@ -285,30 +335,44 @@ def calc_raw_output_size(output_width, output_height, output_channels):
     return output_width * output_height * oc1 * FEATURE_ATOMIC_SIZE
 
 def pack_input(input_nhwc):
-    raw = np.zeros(calc_input_size(IN_W, IN_H, IN_C), dtype=np.uint8)
+    raw = np.zeros(calc_input_size(input_width, input_height, input_channels), dtype=np.uint8)
+    if input_channels == 1:
+        n = 0
+        for x in range(input_width):
+            for y in range(max(input_height, FEATURE_ATOMIC_SIZE)):
+                raw[n] = input_nhwc[0, y, x, 0] if y < input_height else INPUT_ZERO_POINT
+                n += 1
+        return raw
+
     n = 0
-    for x in range(IN_W):
-        for y in range(max(IN_H, FEATURE_ATOMIC_SIZE)):
-            raw[n] = input_nhwc[0, y, x, 0] if y < IN_H else INPUT_ZERO_POINT
-            n += 1
+    for u in range(_ceil_div(input_channels, FEATURE_ATOMIC_SIZE)):
+        for x in range(input_width):
+            for y in range(input_height):
+                for c in range(FEATURE_ATOMIC_SIZE):
+                    ic = c + u * FEATURE_ATOMIC_SIZE
+                    if ic < input_channels:
+                        raw[n] = (int(input_nhwc[0, y, x, ic]) - 0x80) & 0xFF
+                    else:
+                        raw[n] = (INPUT_ZERO_POINT - 0x80) & 0xFF
+                    n += 1
     return raw
 
 def pack_weights(weight_ohwi):
-    ic = max(IN_C, FEATURE_ATOMIC_SIZE)
-    oc = _align(OUT_C, 2)
-    out = np.zeros(calc_weight_size(KW, KH, IN_C, OUT_C), dtype=np.uint8)
+    ic = max(input_channels, FEATURE_ATOMIC_SIZE)
+    oc = _align(output_channels, 2)
+    out = np.zeros(calc_weight_size(weights_width, weights_height, input_channels, output_channels), dtype=np.uint8)
     n = 0
     for oo in range(_ceil_div(oc, WEIGHT_ATOMIC_SIZE)):
         for ii in range(_ceil_div(ic, WEIGHT_ATOMIC_SIZE)):
-            for x in range(KW):
-                for y in range(KH):
+            for x in range(weights_width):
+                for y in range(weights_height):
                     for oi in range(min(oc - oo * WEIGHT_ATOMIC_SIZE, WEIGHT_ATOMIC_SIZE)):
                         for ij in range(min(ic, WEIGHT_ATOMIC_SIZE)):
                             oc_idx = oo * WEIGHT_ATOMIC_SIZE + oi
                             ic_idx = ii * WEIGHT_ATOMIC_SIZE + ij
-                            if oc_idx >= OUT_C:
+                            if oc_idx >= output_channels:
                                 out[n] = 0
-                            elif ic_idx >= IN_C:
+                            elif ic_idx >= input_channels:
                                 out[n] = (WEIGHT_ZERO_POINT - 0x80) & 0xFF
                             else:
                                 out[n] = (int(weight_ohwi[oc_idx, x, y, ic_idx]) - 0x80) & 0xFF
@@ -316,29 +380,60 @@ def pack_weights(weight_ohwi):
     return out
 
 def pack_biases(biases, weight_ohwi):
-    packed = np.zeros(OUT_C, dtype=np.int32)
-    for oc in range(OUT_C):
-        correction = (int(weight_ohwi[oc, 0, 0, 0]) - WEIGHT_ZERO_POINT) * (INPUT_ZERO_POINT - 0x80)
+    packed = np.zeros(output_channels, dtype=np.int32)
+    for oc in range(output_channels):
+        correction = 0
+        for ic in range(input_channels):
+            correction += (int(weight_ohwi[oc, 0, 0, ic]) - WEIGHT_ZERO_POINT) * (INPUT_ZERO_POINT - 0x80)
         packed[oc] = int(biases[oc]) - correction
     return packed
 
 def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
-    input_width = max(IN_W, FEATURE_ATOMIC_SIZE)
-    input_channels = _align(max(IN_C, FEATURE_ATOMIC_SIZE), FEATURE_ATOMIC_SIZE)
-    output_channels = _align(max(OUT_C, 32), 32)
-    input_line_stride = max(calc_line_stride(IN_W) // FEATURE_ATOMIC_SIZE, FEATURE_ATOMIC_SIZE)
-    input_surface_stride = input_line_stride * (IN_H - 1)
-    output_surface_stride = calc_line_stride(OUT_W) * OUT_H // FEATURE_ATOMIC_SIZE
-    input_data_entries = input_width * IN_H
-    weights_kernels = _align(OUT_C, 2)
+    input_width_real = globals()["input_width"]
+    input_channels_real = globals()["input_channels"]
+    output_channels_real = globals()["output_channels"]
+    depthwise = False
+    
+    input_channels = _align(max(input_channels_real, FEATURE_ATOMIC_SIZE), FEATURE_ATOMIC_SIZE)
+    output_channels = _align(max(output_channels_real, 32), 32)
+    output_surface_stride = calc_line_stride(output_width) * output_height // FEATURE_ATOMIC_SIZE
+    
+    input_width = input_width_real
+    input_line_stride = calc_line_stride(input_width) // 4
+    input_surface_stride = int(input_line_stride * (input_height / 4 - 1))
+    if input_channels_real == 1 and (output_channels_real > 1 or ADDITION_INPUT or ADD_TENSOR != -1):
+        input_width = max(input_width_real, FEATURE_ATOMIC_SIZE)
+        input_line_stride = max(calc_line_stride(input_width_real) // FEATURE_ATOMIC_SIZE, FEATURE_ATOMIC_SIZE)
+        input_surface_stride = input_line_stride * (input_height - 1)
+        if input_channels == 32 and op.input_width == 80:
+            input_line_stride *= 4
+            input_surface_stride = int(input_line_stride * (input_height / 4 - 1))
+        else:
+            input_surface_stride = int(input_line_stride * (input_height - 1))
+    if input_width == 8 and (ADDITION_INPUT or ADD_TENSOR != -1):
+        input_line_stride //= 2
+        input_surface_stride = 112
+    
+    weights_kernels = _align(output_channels_real, 2)
     input_banks = 1
     weight_banks = CBUF_BANKS - input_banks
-    atomic_count = OUT_W * OUT_H
-    surfaces_per_row = OUT_W * OUT_H * 2
+    atomic_count = output_width * output_height
+    surfaces_per_row = output_width * output_height * 2
 
-    trunc = 14
-    cna_cvt_con0 = ((trunc << 22) | (trunc << 16) | (trunc << 10) | (trunc << 4))
-    cna_cvt_scale_offset = (16384 << 16) | 65408
+    scale = 1
+    coff = 0
+    if input_channels_real == 1:
+        scale = 32388 if ADDITION_INPUT or ADD_TENSOR != -1 else 16384
+        coff = 65408
+        trunc = 15 if ADDITION_INPUT or ADD_TENSOR != -1 else 14
+
+    if input_channels_real == 1:
+        input_data_entries = input_width * input_height
+    elif input_width == 40 and input_channels_real == 40:
+        input_data_entries = 40
+    else:
+        input_data_entries = _ceil_div(
+            input_width * 2 * _ceil_div(input_channels_real, FEATURE_ATOMIC_SIZE), 8)
 
     conv_scale = (INPUT_SCALE * WEIGHT_SCALE) / OUTPUT_SCALE
     scale_bits = fui(conv_scale)
@@ -353,35 +448,39 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
         E(reg.TARGET_RDMA, reg.RDMA_S_POINTER,
           (1 << 3) | (1 << 2) | (1 << 1)),                              # RDMA PP mode/enable
         E(reg.TARGET_CNA, reg.CNA_CONV_CON1,
-          (1 << 30) | (1 << 29) | (8 << 12)),                           # nonalign DMA, group line off, ARGB_IN=8
+          (((1 << 30) | (1 << 29) | (8 << 12)) if input_channels_real == 1 else 0) |
+          (3 if depthwise else 0)),                                     # CNA_CONV_CON1
         E(reg.TARGET_CNA, reg.CNA_CONV_CON2, (50 + 1 + 1) << 4),        # FEATURE_GRAINS
         E(reg.TARGET_CNA, reg.CNA_CONV_CON3, (1 << 3) | 1),             # stride Y/X
-        E(reg.TARGET_CNA, reg.CNA_DATA_SIZE0, (input_width << 16) | IN_H),
-        E(reg.TARGET_CNA, reg.CNA_DATA_SIZE1, ((IN_C - 1) << 16) | input_channels),
-        E(reg.TARGET_CNA, reg.CNA_DATA_SIZE2, OUT_W),
+        E(reg.TARGET_CNA, reg.CNA_DATA_SIZE0, (input_width << 16) | input_height),
+        E(reg.TARGET_CNA, reg.CNA_DATA_SIZE1, ((input_channels_real - 1) << 16) | input_channels),
+        E(reg.TARGET_CNA, reg.CNA_DATA_SIZE2, output_width),
         E(reg.TARGET_CNA, reg.CNA_DATA_SIZE3, atomic_count),
-        E(reg.TARGET_CNA, reg.CNA_WEIGHT_SIZE0, KW * KH * input_channels * weights_kernels),
-        E(reg.TARGET_CNA, reg.CNA_WEIGHT_SIZE1, KW * KH * input_channels),
-        E(reg.TARGET_CNA, reg.CNA_WEIGHT_SIZE2, (KW << 24) | (KH << 16) | weights_kernels),
+        E(reg.TARGET_CNA, reg.CNA_WEIGHT_SIZE0, weights_width * weights_height * input_channels * weights_kernels),
+        E(reg.TARGET_CNA, reg.CNA_WEIGHT_SIZE1, weights_width * weights_height * input_channels),
+        E(reg.TARGET_CNA, reg.CNA_WEIGHT_SIZE2, (weights_width << 24) | (weights_height << 16) | weights_kernels),
         E(reg.TARGET_CNA, reg.CNA_CBUF_CON0, (weight_banks << 4) | input_banks),
         E(reg.TARGET_CNA, reg.CNA_CBUF_CON1, input_data_entries),
-        E(reg.TARGET_CNA, reg.CNA_CVT_CON0, cna_cvt_con0),
-        E(reg.TARGET_CNA, reg.CNA_CVT_CON1, cna_cvt_scale_offset),
-        E(reg.TARGET_CNA, reg.CNA_CVT_CON2, cna_cvt_scale_offset),
-        E(reg.TARGET_CNA, reg.CNA_CVT_CON3, cna_cvt_scale_offset),
-        E(reg.TARGET_CNA, reg.CNA_CVT_CON4, cna_cvt_scale_offset),
+        E(reg.TARGET_CNA, reg.CNA_CVT_CON0, 
+            (1 << 3) | (1 << 1) | 1 
+            if not input_channels_real == 1 else 
+            ((trunc << 22) | (trunc << 16) | (trunc << 10) | (trunc << 4))),
+        E(reg.TARGET_CNA, reg.CNA_CVT_CON1, (scale << 16) | coff),
+        E(reg.TARGET_CNA, reg.CNA_CVT_CON2, (scale << 16) | coff),
+        E(reg.TARGET_CNA, reg.CNA_CVT_CON3, (scale << 16) | coff),
+        E(reg.TARGET_CNA, reg.CNA_CVT_CON4, (scale << 16) | coff),
         E(reg.TARGET_CNA, reg.CNA_PAD_CON0, 0),
         E(reg.TARGET_CNA, reg.CNA_FEATURE_DATA_ADDR, input_dma & 0xFFFFFFFF),
         E(reg.TARGET_CNA, reg.CNA_DMA_CON0, (15 << 16) | 15),
         E(reg.TARGET_CNA, reg.CNA_DMA_CON1, input_line_stride),
         E(reg.TARGET_CNA, reg.CNA_DMA_CON2, input_surface_stride),
-        E(reg.TARGET_CNA, reg.CNA_FC_DATA_SIZE0, (IN_W << 16) | IN_H),
+        E(reg.TARGET_CNA, reg.CNA_FC_DATA_SIZE0, (input_width_real << 16) | input_height),
         E(reg.TARGET_CNA, reg.CNA_FC_DATA_SIZE1, input_channels),
         E(reg.TARGET_CNA, reg.CNA_DCOMP_ADDR0, weight_dma & 0xFFFFFFFF),
-        E(reg.TARGET_CNA, reg.CNA_CVT_CON5, 0xffff),
+        E(reg.TARGET_CNA, reg.CNA_CVT_CON5, 0xffff if input_channels_real == 1 else 0),
         E(reg.TARGET_CNA, reg.CNA_PAD_CON1, INPUT_ZERO_POINT - 0x80),
         E(reg.TARGET_CORE, reg.CORE_MISC_CFG, 1),                       # QD_EN
-        E(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_0, ((OUT_H - 1) << 16) | (OUT_W - 1)),
+        E(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_0, ((output_height - 1) << 16) | (output_width - 1)),
         E(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_1, output_channels - 1),
         E(reg.TARGET_CORE, reg.CORE_CLIP_TRUNCATE, 0),
         E(reg.TARGET_CORE, reg.CORE_RESERVED_3030, 0),
@@ -389,10 +488,10 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
         E(reg.TARGET_DPU, reg.DATA_FORMAT, 0),
         E(reg.TARGET_DPU, reg.DST_BASE_ADDR, output_dma & 0xFFFFFFFF),
         E(reg.TARGET_DPU, reg.DST_SURF_STRIDE, output_surface_stride << 4),
-        E(reg.TARGET_DPU, reg.DATA_CUBE_WIDTH, OUT_W - 1),
-        E(reg.TARGET_DPU, reg.DATA_CUBE_HEIGHT, OUT_H - 1),
+        E(reg.TARGET_DPU, reg.DATA_CUBE_WIDTH, output_width - 1),
+        E(reg.TARGET_DPU, reg.DATA_CUBE_HEIGHT, output_height - 1),
         E(reg.TARGET_DPU, reg.DATA_CUBE_NOTCH, 0),
-        E(reg.TARGET_DPU, reg.DATA_CUBE_CHANNEL, ((OUT_C - 1) << 16) | (output_channels - 1)),
+        E(reg.TARGET_DPU, reg.DATA_CUBE_CHANNEL, ((output_channels_real - 1) << 16) | (output_channels - 1)),
         E(reg.TARGET_DPU, reg.BS_CFG, (2 << 16) | (1 << 8) | (1 << 6) | (1 << 4)),
         E(reg.TARGET_DPU, reg.BS_ALU_CFG, 0),
         E(reg.TARGET_DPU, reg.BS_MUL_CFG, 0),
@@ -400,7 +499,7 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
         E(reg.TARGET_DPU, reg.BS_OW_CFG, (1 << 8) | (1 << 5) | (1 << 2)),
         E(reg.TARGET_DPU, reg.BS_OW_OP, 0x80 - WEIGHT_ZERO_POINT),
         E(reg.TARGET_DPU, reg.WDMA_SIZE_0, output_channels - 1),
-        E(reg.TARGET_DPU, reg.WDMA_SIZE_1, ((OUT_H - 1) << 16) | (OUT_W - 1)),
+        E(reg.TARGET_DPU, reg.WDMA_SIZE_1, ((output_height - 1) << 16) | (output_width - 1)),
         E(reg.TARGET_DPU, reg.BN_CFG, (1 << 6) | (1 << 4) | (1 << 1) | 1),
         E(reg.TARGET_DPU, reg.EW_CFG, (1 << 9) | (1 << 8) | (1 << 7) | (1 << 1) | 1),
         E(reg.TARGET_DPU, reg.EW_CVT_SCALE_VALUE, 1),
@@ -408,8 +507,8 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
         E(reg.TARGET_DPU, reg.OUT_CVT_SCALE, out_scale),
         E(reg.TARGET_DPU, reg.OUT_CVT_SHIFT, shift - 1),
         E(reg.TARGET_DPU, reg.SURFACE_ADD, surfaces_per_row << 4),
-        E(reg.TARGET_RDMA, reg.RDMA_DATA_CUBE_WIDTH, OUT_W - 1),
-        E(reg.TARGET_RDMA, reg.RDMA_DATA_CUBE_HEIGHT, OUT_H - 1),
+        E(reg.TARGET_RDMA, reg.RDMA_DATA_CUBE_WIDTH, output_width - 1),
+        E(reg.TARGET_RDMA, reg.RDMA_DATA_CUBE_HEIGHT, output_height - 1),
         E(reg.TARGET_RDMA, reg.RDMA_DATA_CUBE_CHANNEL, output_channels - 1),
         E(reg.TARGET_RDMA, reg.RDMA_BRDMA_CFG, 1 << 1),
         E(reg.TARGET_RDMA, reg.RDMA_BS_BASE_ADDR, bias_dma & 0xFFFFFFFF),
@@ -436,25 +535,27 @@ def write_buffers(input_nhwc, weight_ohwi, biases):
     ctypes.memmove(ctypes.addressof(ctypes.c_char.from_buffer(bias_map)), packed_bias.ctypes.data, packed_bias.nbytes)
 
 def read_output():
-    raw = np.frombuffer(output_map, dtype=np.uint8, count=calc_raw_output_size(OUT_W, OUT_H, OUT_C)).copy()
-    raw = raw.reshape(-1, OUT_W, OUT_H, FEATURE_ATOMIC_SIZE)
-    out = np.zeros((1, OUT_H, OUT_W, OUT_C), dtype=np.uint8)
-    for oc in range(OUT_C):
+    raw = np.frombuffer(output_map, dtype=np.uint8, count=calc_raw_output_size(output_width, output_height, output_channels)).copy()
+    raw = raw.reshape(-1, output_width, output_height, FEATURE_ATOMIC_SIZE)
+    out = np.zeros((1, output_height, output_width, output_channels), dtype=np.uint8)
+    for oc in range(output_channels):
         c = oc % FEATURE_ATOMIC_SIZE
         g = oc // FEATURE_ATOMIC_SIZE
-        for y in range(OUT_H):
-            for x in range(OUT_W):
+        for y in range(output_height):
+            for x in range(output_width):
                 out[0, y, x, oc] = (int(raw[g, x, y, c]) + 0x80) & 0xFF
     return out
 
 def expected_output(input_nhwc, weight_ohwi, biases):
-    expected = np.zeros((1, OUT_H, OUT_W, OUT_C), dtype=np.int64)
-    for oc in range(OUT_C):
-        expected[0, :, :, oc] = input_nhwc[0, :, :, 0].astype(np.int64) * int(weight_ohwi[oc, 0, 0, 0]) + int(biases[oc])
+    expected = np.zeros((1, output_height, output_width, output_channels), dtype=np.int64)
+    for oc in range(output_channels):
+        expected[0, :, :, oc] = int(biases[oc])
+        for ic in range(input_channels):
+            expected[0, :, :, oc] += input_nhwc[0, :, :, ic].astype(np.int64) * int(weight_ohwi[oc, 0, 0, ic])
     conv_scale = (INPUT_SCALE * WEIGHT_SCALE) / OUTPUT_SCALE
     return np.clip(np.round(expected.astype(np.float64) * conv_scale + OUTPUT_ZERO_POINT), 0, 255).astype(np.uint8)
 
-def run_conv2d_1x6_1x1_4x4(input_nhwc, weight_ohwi, biases):
+def run_conv2d_shape(input_nhwc, weight_ohwi, biases):
     npu_regs = build_conv_regs(input_mem_create.dma_addr, weight_mem_create.dma_addr, bias_mem_create.dma_addr, output_mem_create.dma_addr)
     ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), 0, task_map.size())
     ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), 0, regcmd_map.size())
@@ -484,15 +585,34 @@ def run_conv2d_1x6_1x1_4x4(input_nhwc, weight_ohwi, biases):
     return read_output()
 
 if __name__ == "__main__":
-    np.random.seed(42)
-    input_nhwc = np.random.randint(0, 256, (1, IN_H, IN_W, IN_C), dtype=np.uint8)
-    weight_ohwi = np.random.randint(0, 256, (OUT_C, KW, KH, IN_C), dtype=np.uint8)
-    biases = np.random.randint(-128, 128, (OUT_C,), dtype=np.int32)
+    shapes = load_conv_legacy_shapes()
+    name_width = max(len(shape["name"]) for shape in shapes) if shapes else 1
+    passed = failed = skipped = 0
 
-    result = run_conv2d_1x6_1x1_4x4(input_nhwc, weight_ohwi, biases)
-    expected = expected_output(input_nhwc, weight_ohwi, biases)
-    diff = int(np.max(np.abs(result.astype(np.int32) - expected.astype(np.int32))))
-    ok = diff <= 1
-    print(f"conv2d_1x6_1x1_4x4 NPU={result.ravel().tolist()} expected={expected.ravel().tolist()} {'PASS' if ok else 'FAIL'} (max_diff={diff})")
+    print(f"Running {len(shapes)} shapes extracted from conv_legacy.py ...")
+    for shape in shapes:
+        print(f"  {shape['name']:<{name_width}s} ...", end=" ")
+        sys.stdout.flush()
+        try:
+            use_shape(shape)
+        except ValueError as e:
+            skipped += 1
+            print(f"SKIP ({e})")
+            continue
+
+        np.random.seed(42)
+        input_nhwc = np.random.randint(0, 256, (1, input_height, input_width, input_channels), dtype=np.uint8)
+        weight_ohwi = np.random.randint(0, 256, (output_channels, weights_width, weights_height, input_channels), dtype=np.uint8)
+        biases = np.random.randint(-128, 128, (output_channels,), dtype=np.int32)
+
+        result = run_conv2d_shape(input_nhwc, weight_ohwi, biases)
+        expected = expected_output(input_nhwc, weight_ohwi, biases)
+        diff = int(np.max(np.abs(result.astype(np.int32) - expected.astype(np.int32))))
+        ok = diff <= 1
+        passed += 1 if ok else 0
+        failed += 0 if ok else 1
+        print(f"{'PASS' if ok else 'FAIL'} (max_diff={diff})")
+
+    print(f"conv_legacy-derived simple_conv matrix: {passed} PASS, {failed} FAIL, {skipped} SKIP")
     os.close(fd)
-    sys.exit(0 if ok else 1)
+    sys.exit(0 if failed == 0 else 1)
