@@ -1,0 +1,498 @@
+from fcntl import ioctl
+import glob
+import os, mmap, sys, time, struct
+import ctypes
+import numpy as np
+
+FEATURE_ATOMIC_SIZE = 16
+WEIGHT_ATOMIC_SIZE = 32
+CBUF_ENTRY_SIZE = 128
+CBUF_ENTRIES_PER_BANK = 256
+CBUF_BANKS = 12
+BPE = 1
+
+INPUT_ZERO_POINT = 0
+WEIGHT_ZERO_POINT = 0
+OUTPUT_ZERO_POINT = 0
+INPUT_SCALE = 1.0 / 255.0
+WEIGHT_SCALE = 1.0 / 255.0
+OUTPUT_SCALE = 1.0 / 255.0
+
+IN_W = 4
+IN_H = 4
+IN_C = 1
+OUT_C = 6
+KH = 1
+KW = 1
+OUT_W = 4
+OUT_H = 4
+
+class reg:
+    # --- Stream/Target IDs (shifted into bits 48-63) ---
+    TARGET_CNA  = 0x0201   # CNA (Convolution/Matrix unit)
+    TARGET_CORE = 0x0801   # CORE (Matrix compute engine)
+    TARGET_DPU  = 0x1001   # DPU (Elementwise/DPU unit)
+    TARGET_RDMA = 0x2001   # RDMA (Read DMA for inputs/weights)
+    TARGET_PC   = 0x0081   # PC (Program Control / operation enable)
+    TARGET_PC_REG = 0x0101 # PC chain registers
+    TARGET_VERSION = 0x0041
+
+    # --- PC (0x0000) ---
+    OPERATION_ENABLE    = 0x0008   # PC operation enable
+    PC_BASE_ADDRESS     = 0x0010   # next regcmd DMA address for PC chain
+    PC_REGISTER_AMOUNTS = 0x0014   # next regcmd fetch amount for PC chain
+
+    # --- CNA (0x1000) ---
+    CNA_CONV_CON1       = 0x100c   # CNA convolution control 1
+    CNA_CONV_CON2       = 0x1010   # CNA convolution control 2 (grains)
+    CNA_CONV_CON3       = 0x1014   # CNA convolution control 3 (stride)
+    CNA_DATA_SIZE0      = 0x1020   # CNA input data size 0
+    CNA_DATA_SIZE1      = 0x1024   # CNA input data size 1 (channel)
+    CNA_DATA_SIZE2      = 0x1028   # CNA output data size 2
+    CNA_DATA_SIZE3      = 0x102c   # CNA output data size 3 (atomics)
+    CNA_WEIGHT_SIZE0    = 0x1030   # CNA weight total size
+    CNA_WEIGHT_SIZE1    = 0x1034   # CNA weight per-kernel size
+    CNA_WEIGHT_SIZE2    = 0x1038   # CNA weight dims (width/height/kernels)
+    CNA_CBUF_CON0       = 0x1040   # CNA CBUF config 0 (banks)
+    CNA_CBUF_CON1       = 0x1044   # CNA CBUF config 1 (entries)
+    CNA_CVT_CON0        = 0x104c   # CNA convert config 0
+    CNA_CVT_CON1        = 0x1050   # CNA convert config 1 (scale/offset 0)
+    CNA_CVT_CON2        = 0x1054   # CNA convert config 2 (scale/offset 1)
+    CNA_CVT_CON3        = 0x1058   # CNA convert config 3 (scale/offset 2)
+    CNA_CVT_CON4        = 0x105c   # CNA convert config 4 (scale/offset 3)
+    CNA_PAD_CON0        = 0x1068   # CNA padding config 0 (left/top)
+    CNA_FEATURE_DATA_ADDR = 0x1070 # CNA feature data base address
+    CNA_DMA_CON0        = 0x1078   # CNA DMA control 0 (burst)
+    CNA_DMA_CON1        = 0x107c   # CNA DMA control 1 (line stride)
+    CNA_DMA_CON2        = 0x1080   # CNA DMA control 2 (surface stride)
+    CNA_FC_DATA_SIZE0   = 0x1084   # CNA FC data size 0
+    CNA_FC_DATA_SIZE1   = 0x1088   # CNA FC data size 1 (channel)
+    CNA_DCOMP_ADDR0     = 0x1110   # CNA weight decompress address 0
+    CNA_CVT_CON5        = 0x1180   # CNA convert config 5 (mask)
+    CNA_PAD_CON1        = 0x1184   # CNA padding config 1 (pad value)
+
+    # --- CORE (0x3000) ---
+    CORE_MISC_CFG       = 0x3010   # CORE misc config
+    CORE_DATAOUT_SIZE_0 = 0x3014   # CORE dataout size 0 (height/width)
+    CORE_DATAOUT_SIZE_1 = 0x3018   # CORE dataout size 1 (channel)
+    CORE_CLIP_TRUNCATE  = 0x301c   # CORE clip truncate config
+    CORE_RESERVED_3030  = 0x3030   # CORE reserved (write 0 to clear stale state)
+
+    # --- DPU (0x4000) ---
+    S_POINTER           = 0x4004   # DPU S pointer config (pp/exec)
+    FEATURE_MODE_CFG    = 0x400c   # DPU feature mode config
+    DATA_FORMAT         = 0x4010   # DPU data format config
+    DST_BASE_ADDR       = 0x4020   # DPU destination base address
+    DST_SURF_STRIDE     = 0x4024   # DPU destination surface stride
+    DATA_CUBE_WIDTH     = 0x4030   # DPU data cube width
+    DATA_CUBE_HEIGHT    = 0x4034   # DPU data cube height
+    DATA_CUBE_NOTCH     = 0x4038   # DPU data cube notch
+    DATA_CUBE_CHANNEL   = 0x403c   # DPU data cube channel
+    BS_CFG              = 0x4040   # DPU batch/scale config
+    BS_ALU_CFG          = 0x4044   # DPU batch/scale ALU config
+    BS_MUL_CFG          = 0x4048   # DPU batch/scale multiply config
+    BS_RELUX_CMP_VALUE  = 0x404c   # DPU batch/scale ReLU-X compare value
+    BS_OW_CFG           = 0x4050   # DPU batch OW config
+    BS_OW_OP            = 0x4054   # DPU batch OW operation
+    WDMA_SIZE_0         = 0x4058   # DPU write DMA size 0
+    WDMA_SIZE_1         = 0x405c   # DPU write DMA size 1
+    BN_CFG              = 0x4060   # DPU batch norm config
+    EW_CFG              = 0x4070   # DPU elementwise config
+    EW_CVT_SCALE_VALUE  = 0x4078   # DPU EW convert scale value
+    OUT_CVT_OFFSET      = 0x4080   # DPU output conversion offset
+    OUT_CVT_SCALE       = 0x4084   # DPU output conversion scale
+    OUT_CVT_SHIFT       = 0x4088   # DPU output conversion shift
+    SURFACE_ADD         = 0x40c0   # DPU surface add
+
+    # --- DPU RDMA (0x5000) ---
+    RDMA_S_POINTER      = 0x5004   # RDMA S pointer config
+    RDMA_DATA_CUBE_WIDTH  = 0x500c # RDMA data cube width
+    RDMA_DATA_CUBE_HEIGHT = 0x5010 # RDMA data cube height
+    RDMA_DATA_CUBE_CHANNEL= 0x5014 # RDMA data cube channel
+    RDMA_BRDMA_CFG        = 0x501c # RDMA BRDMA config
+    RDMA_BS_BASE_ADDR     = 0x5020 # RDMA batch/scale base address (bias)
+    RDMA_ERDMA_CFG        = 0x5034 # RDMA ERDMA config
+    RDMA_FEATURE_MODE_CFG = 0x5044 # RDMA feature mode config
+    RDMA_WEIGHT           = 0x5068 # RDMA weight config
+
+class drm_rocket_create_bo(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_uint32),
+        ("handle", ctypes.c_uint32),
+        ("dma_address", ctypes.c_uint64),
+        ("offset", ctypes.c_uint64),
+    ]
+
+class drm_rocket_prep_bo(ctypes.Structure):
+    _fields_ = [
+        ("handle", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
+        ("timeout_ns", ctypes.c_int64),
+    ]
+
+class drm_rocket_fini_bo(ctypes.Structure):
+    _fields_ = [
+        ("handle", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
+    ]
+
+class drm_rocket_task(ctypes.Structure):
+    _fields_ = [
+        ("regcmd", ctypes.c_uint32),
+        ("regcmd_count", ctypes.c_uint32),
+    ]
+
+class drm_rocket_job(ctypes.Structure):
+    _fields_ = [
+        ("tasks", ctypes.c_uint64),
+        ("in_bo_handles", ctypes.c_uint64),
+        ("out_bo_handles", ctypes.c_uint64),
+        ("task_count", ctypes.c_uint32),
+        ("task_struct_size", ctypes.c_uint32),
+        ("in_bo_handle_count", ctypes.c_uint32),
+        ("out_bo_handle_count", ctypes.c_uint32),
+    ]
+
+class drm_rocket_submit(ctypes.Structure):
+    _fields_ = [
+        ("jobs", ctypes.c_uint64),
+        ("job_count", ctypes.c_uint32),
+        ("job_struct_size", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint64),
+    ]
+
+class struct_rknpu_task(ctypes.Structure):
+    _fields_ = [
+        ("flags", ctypes.c_uint32),
+        ("op_idx", ctypes.c_uint32),
+        ("enable_mask", ctypes.c_uint32),
+        ("int_mask", ctypes.c_uint32),
+        ("int_clear", ctypes.c_uint32),
+        ("int_status", ctypes.c_uint32),
+        ("regcfg_amount", ctypes.c_uint32),
+        ("regcfg_offset", ctypes.c_uint32),
+        ("regcmd_addr", ctypes.c_uint64),
+    ]
+
+def _IOW(type_, nr, size):
+    return (1 << 30) | (ord(type_) << 8) | nr | (size << 16)
+
+def _IOWR(type_, nr, size):
+    return (3 << 30) | (ord(type_) << 8) | nr | (size << 16)
+
+DRM_IOCTL_ROCKET_CREATE_BO = _IOWR('d', 0x40, ctypes.sizeof(drm_rocket_create_bo))
+DRM_IOCTL_ROCKET_SUBMIT = _IOW('d', 0x41, ctypes.sizeof(drm_rocket_submit))
+DRM_IOCTL_ROCKET_PREP_BO = _IOW('d', 0x42, ctypes.sizeof(drm_rocket_prep_bo))
+DRM_IOCTL_ROCKET_FINI_BO = _IOW('d', 0x43, ctypes.sizeof(drm_rocket_fini_bo))
+
+class RocketBO:
+    __slots__ = ("handle", "size", "dma_address", "offset")
+    def __init__(self, handle, size, dma_address, offset):
+        self.handle = int(handle)
+        self.size = int(size)
+        self.dma_address = int(dma_address)
+        self.offset = int(offset)
+
+    @property
+    def dma_addr(self):
+        return self.dma_address
+
+    @property
+    def obj_addr(self):
+        return self.handle
+
+def open_rocket_device():
+    path = os.environ.get("ROCKET_DEVICE")
+    if path:
+        return os.open(path, os.O_RDWR)
+    candidates = (sorted(glob.glob("/dev/accel/accel*")) + sorted(glob.glob("/dev/dri/renderD*")) + sorted(glob.glob("/dev/dri/card*")))
+    for c in candidates:
+        try: return os.open(c, os.O_RDWR)
+        except OSError: pass
+    raise FileNotFoundError("No Rocket device found")
+
+fd = open_rocket_device()
+
+def mem_allocate(fd, size, flags=0):
+    bo = drm_rocket_create_bo(size=size)
+    ioctl(fd, DRM_IOCTL_ROCKET_CREATE_BO, bo)
+    buf = mmap.mmap(fd, bo.size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=bo.offset)
+    return buf, RocketBO(bo.handle, bo.size, bo.dma_address, bo.offset)
+
+def rocket_submit(fd, vendor_tasks, task_count=1, in_bos=(), out_bos=()):
+    rocket_tasks = (drm_rocket_task * task_count)()
+    for i in range(task_count):
+        rocket_tasks[i].regcmd = int(vendor_tasks[i].regcmd_addr) & 0xFFFFFFFF
+        rocket_tasks[i].regcmd_count = int(vendor_tasks[i].regcfg_amount)
+    in_handles = (ctypes.c_uint32 * len(in_bos))(*(bo.handle for bo in in_bos)) if in_bos else None
+    out_handles = (ctypes.c_uint32 * len(out_bos))(*(bo.handle for bo in out_bos)) if out_bos else None
+    job = drm_rocket_job(
+        tasks=ctypes.addressof(rocket_tasks),
+        in_bo_handles=ctypes.addressof(in_handles) if in_handles is not None else 0,
+        out_bo_handles=ctypes.addressof(out_handles) if out_handles is not None else 0,
+        task_count=task_count,
+        task_struct_size=ctypes.sizeof(drm_rocket_task),
+        in_bo_handle_count=len(in_bos),
+        out_bo_handle_count=len(out_bos),
+    )
+    jobs = (drm_rocket_job * 1)(job)
+    submit_struct = drm_rocket_submit(
+        jobs=ctypes.addressof(jobs),
+        job_count=1,
+        job_struct_size=ctypes.sizeof(drm_rocket_job),
+    )
+    return ioctl(fd, DRM_IOCTL_ROCKET_SUBMIT, submit_struct)
+
+task_map, tasks_mem_create = mem_allocate(fd, size=1024)
+regcmd_map, regcmd_mem_create = mem_allocate(fd, size=4096)
+input_map, input_mem_create = mem_allocate(fd, size=4096)
+weight_map, weight_mem_create = mem_allocate(fd, size=4096)
+bias_map, bias_mem_create = mem_allocate(fd, size=4096)
+output_map, output_mem_create = mem_allocate(fd, size=4096)
+
+tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
+regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
+
+def _ceil_div(x, y):
+    return (x + y - 1) // y
+
+def _align(x, a):
+    return _ceil_div(x, a) * a
+
+def _field(mask, shift, val):
+    return (int(val) << shift) & mask
+
+def E(target, reg_addr, value):
+    return (target << 48) | ((value & 0xFFFFFFFF) << 16) | reg_addr
+
+def fui(f):
+    return struct.unpack('I', struct.pack('f', f))[0]
+
+def calc_line_stride(width):
+    return width * FEATURE_ATOMIC_SIZE * BPE
+
+def calc_input_size(input_width, input_height, input_channels):
+    input_channels_1 = _ceil_div(input_channels, FEATURE_ATOMIC_SIZE) * 2
+    return input_width * input_height * input_channels_1 * FEATURE_ATOMIC_SIZE
+
+def calc_weight_size(weights_width, weights_height, input_channels, output_channels):
+    wc = _align(max(input_channels, FEATURE_ATOMIC_SIZE), WEIGHT_ATOMIC_SIZE)
+    oc = _align(output_channels, 2)
+    return weights_width * weights_height * oc * wc * 2
+
+def calc_raw_output_size(output_width, output_height, output_channels):
+    oc1 = _ceil_div(output_channels, FEATURE_ATOMIC_SIZE) * 2
+    return output_width * output_height * oc1 * FEATURE_ATOMIC_SIZE
+
+def pack_input(input_nhwc):
+    raw = np.zeros(calc_input_size(IN_W, IN_H, IN_C), dtype=np.uint8)
+    n = 0
+    for x in range(IN_W):
+        for y in range(max(IN_H, FEATURE_ATOMIC_SIZE)):
+            raw[n] = input_nhwc[0, y, x, 0] if y < IN_H else INPUT_ZERO_POINT
+            n += 1
+    return raw
+
+def pack_weights(weight_ohwi):
+    ic = max(IN_C, FEATURE_ATOMIC_SIZE)
+    oc = _align(OUT_C, 2)
+    out = np.zeros(calc_weight_size(KW, KH, IN_C, OUT_C), dtype=np.uint8)
+    n = 0
+    for oo in range(_ceil_div(oc, WEIGHT_ATOMIC_SIZE)):
+        for ii in range(_ceil_div(ic, WEIGHT_ATOMIC_SIZE)):
+            for x in range(KW):
+                for y in range(KH):
+                    for oi in range(min(oc - oo * WEIGHT_ATOMIC_SIZE, WEIGHT_ATOMIC_SIZE)):
+                        for ij in range(min(ic, WEIGHT_ATOMIC_SIZE)):
+                            oc_idx = oo * WEIGHT_ATOMIC_SIZE + oi
+                            ic_idx = ii * WEIGHT_ATOMIC_SIZE + ij
+                            if oc_idx >= OUT_C:
+                                out[n] = 0
+                            elif ic_idx >= IN_C:
+                                out[n] = (WEIGHT_ZERO_POINT - 0x80) & 0xFF
+                            else:
+                                out[n] = (int(weight_ohwi[oc_idx, x, y, ic_idx]) - 0x80) & 0xFF
+                            n += 1
+    return out
+
+def pack_biases(biases, weight_ohwi):
+    packed = np.zeros(OUT_C, dtype=np.int32)
+    for oc in range(OUT_C):
+        correction = (int(weight_ohwi[oc, 0, 0, 0]) - WEIGHT_ZERO_POINT) * (INPUT_ZERO_POINT - 0x80)
+        packed[oc] = int(biases[oc]) - correction
+    return packed
+
+def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
+    input_width = max(IN_W, FEATURE_ATOMIC_SIZE)
+    input_channels = _align(max(IN_C, FEATURE_ATOMIC_SIZE), FEATURE_ATOMIC_SIZE)
+    output_channels = _align(max(OUT_C, 32), 32)
+    input_line_stride = max(calc_line_stride(IN_W) // FEATURE_ATOMIC_SIZE, FEATURE_ATOMIC_SIZE)
+    input_surface_stride = input_line_stride * (IN_H - 1)
+    output_surface_stride = calc_line_stride(OUT_W) * OUT_H // FEATURE_ATOMIC_SIZE
+    input_data_entries = input_width * IN_H
+    weights_kernels = _align(OUT_C, 2)
+    input_banks = 1
+    weight_banks = CBUF_BANKS - input_banks
+    atomic_count = OUT_W * OUT_H
+    surfaces_per_row = OUT_W * OUT_H * 2
+
+    trunc = 14
+    cna_cvt_con0 = ((trunc << 22) | (trunc << 16) | (trunc << 10) | (trunc << 4))
+    cna_cvt_scale_offset = (16384 << 16) | 65408
+
+    conv_scale = (INPUT_SCALE * WEIGHT_SCALE) / OUTPUT_SCALE
+    scale_bits = fui(conv_scale)
+    shift = 127 + 31 - 32 - (scale_bits >> 23) + 16
+    out_scale = ((scale_bits >> 9) & 0x7fff) + 1
+    if out_scale < 1 << 14:
+        out_scale |= 1 << 14
+
+    return [
+        E(reg.TARGET_DPU, reg.S_POINTER,
+          (1 << 3) | (1 << 2) | (1 << 1)),                              # DPU PP mode/enable
+        E(reg.TARGET_RDMA, reg.RDMA_S_POINTER,
+          (1 << 3) | (1 << 2) | (1 << 1)),                              # RDMA PP mode/enable
+        E(reg.TARGET_CNA, reg.CNA_CONV_CON1,
+          (1 << 30) | (1 << 29) | (8 << 12)),                           # nonalign DMA, group line off, ARGB_IN=8
+        E(reg.TARGET_CNA, reg.CNA_CONV_CON2, (50 + 1 + 1) << 4),        # FEATURE_GRAINS
+        E(reg.TARGET_CNA, reg.CNA_CONV_CON3, (1 << 3) | 1),             # stride Y/X
+        E(reg.TARGET_CNA, reg.CNA_DATA_SIZE0, (input_width << 16) | IN_H),
+        E(reg.TARGET_CNA, reg.CNA_DATA_SIZE1, ((IN_C - 1) << 16) | input_channels),
+        E(reg.TARGET_CNA, reg.CNA_DATA_SIZE2, OUT_W),
+        E(reg.TARGET_CNA, reg.CNA_DATA_SIZE3, atomic_count),
+        E(reg.TARGET_CNA, reg.CNA_WEIGHT_SIZE0, KW * KH * input_channels * weights_kernels),
+        E(reg.TARGET_CNA, reg.CNA_WEIGHT_SIZE1, KW * KH * input_channels),
+        E(reg.TARGET_CNA, reg.CNA_WEIGHT_SIZE2, (KW << 24) | (KH << 16) | weights_kernels),
+        E(reg.TARGET_CNA, reg.CNA_CBUF_CON0, (weight_banks << 4) | input_banks),
+        E(reg.TARGET_CNA, reg.CNA_CBUF_CON1, input_data_entries),
+        E(reg.TARGET_CNA, reg.CNA_CVT_CON0, cna_cvt_con0),
+        E(reg.TARGET_CNA, reg.CNA_CVT_CON1, cna_cvt_scale_offset),
+        E(reg.TARGET_CNA, reg.CNA_CVT_CON2, cna_cvt_scale_offset),
+        E(reg.TARGET_CNA, reg.CNA_CVT_CON3, cna_cvt_scale_offset),
+        E(reg.TARGET_CNA, reg.CNA_CVT_CON4, cna_cvt_scale_offset),
+        E(reg.TARGET_CNA, reg.CNA_PAD_CON0, 0),
+        E(reg.TARGET_CNA, reg.CNA_FEATURE_DATA_ADDR, input_dma & 0xFFFFFFFF),
+        E(reg.TARGET_CNA, reg.CNA_DMA_CON0, (15 << 16) | 15),
+        E(reg.TARGET_CNA, reg.CNA_DMA_CON1, input_line_stride),
+        E(reg.TARGET_CNA, reg.CNA_DMA_CON2, input_surface_stride),
+        E(reg.TARGET_CNA, reg.CNA_FC_DATA_SIZE0, (IN_W << 16) | IN_H),
+        E(reg.TARGET_CNA, reg.CNA_FC_DATA_SIZE1, input_channels),
+        E(reg.TARGET_CNA, reg.CNA_DCOMP_ADDR0, weight_dma & 0xFFFFFFFF),
+        E(reg.TARGET_CNA, reg.CNA_CVT_CON5, 0xffff),
+        E(reg.TARGET_CNA, reg.CNA_PAD_CON1, INPUT_ZERO_POINT - 0x80),
+        E(reg.TARGET_CORE, reg.CORE_MISC_CFG, 1),                       # QD_EN
+        E(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_0, ((OUT_H - 1) << 16) | (OUT_W - 1)),
+        E(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_1, output_channels - 1),
+        E(reg.TARGET_CORE, reg.CORE_CLIP_TRUNCATE, 0),
+        E(reg.TARGET_CORE, reg.CORE_RESERVED_3030, 0),
+        E(reg.TARGET_DPU, reg.FEATURE_MODE_CFG, (15 << 5) | (2 << 1)),  # burst len, output mode
+        E(reg.TARGET_DPU, reg.DATA_FORMAT, 0),
+        E(reg.TARGET_DPU, reg.DST_BASE_ADDR, output_dma & 0xFFFFFFFF),
+        E(reg.TARGET_DPU, reg.DST_SURF_STRIDE, output_surface_stride << 4),
+        E(reg.TARGET_DPU, reg.DATA_CUBE_WIDTH, OUT_W - 1),
+        E(reg.TARGET_DPU, reg.DATA_CUBE_HEIGHT, OUT_H - 1),
+        E(reg.TARGET_DPU, reg.DATA_CUBE_NOTCH, 0),
+        E(reg.TARGET_DPU, reg.DATA_CUBE_CHANNEL, ((OUT_C - 1) << 16) | (output_channels - 1)),
+        E(reg.TARGET_DPU, reg.BS_CFG, (2 << 16) | (1 << 8) | (1 << 6) | (1 << 4)),
+        E(reg.TARGET_DPU, reg.BS_ALU_CFG, 0),
+        E(reg.TARGET_DPU, reg.BS_MUL_CFG, 0),
+        E(reg.TARGET_DPU, reg.BS_RELUX_CMP_VALUE, 0),
+        E(reg.TARGET_DPU, reg.BS_OW_CFG, (1 << 8) | (1 << 5) | (1 << 2)),
+        E(reg.TARGET_DPU, reg.BS_OW_OP, 0x80 - WEIGHT_ZERO_POINT),
+        E(reg.TARGET_DPU, reg.WDMA_SIZE_0, output_channels - 1),
+        E(reg.TARGET_DPU, reg.WDMA_SIZE_1, ((OUT_H - 1) << 16) | (OUT_W - 1)),
+        E(reg.TARGET_DPU, reg.BN_CFG, (1 << 6) | (1 << 4) | (1 << 1) | 1),
+        E(reg.TARGET_DPU, reg.EW_CFG, (1 << 9) | (1 << 8) | (1 << 7) | (1 << 1) | 1),
+        E(reg.TARGET_DPU, reg.EW_CVT_SCALE_VALUE, 1),
+        E(reg.TARGET_DPU, reg.OUT_CVT_OFFSET, OUTPUT_ZERO_POINT - 0x80),
+        E(reg.TARGET_DPU, reg.OUT_CVT_SCALE, out_scale),
+        E(reg.TARGET_DPU, reg.OUT_CVT_SHIFT, shift - 1),
+        E(reg.TARGET_DPU, reg.SURFACE_ADD, surfaces_per_row << 4),
+        E(reg.TARGET_RDMA, reg.RDMA_DATA_CUBE_WIDTH, OUT_W - 1),
+        E(reg.TARGET_RDMA, reg.RDMA_DATA_CUBE_HEIGHT, OUT_H - 1),
+        E(reg.TARGET_RDMA, reg.RDMA_DATA_CUBE_CHANNEL, output_channels - 1),
+        E(reg.TARGET_RDMA, reg.RDMA_BRDMA_CFG, 1 << 1),
+        E(reg.TARGET_RDMA, reg.RDMA_BS_BASE_ADDR, bias_dma & 0xFFFFFFFF),
+        E(reg.TARGET_RDMA, reg.RDMA_ERDMA_CFG, 1),
+        E(reg.TARGET_RDMA, reg.RDMA_FEATURE_MODE_CFG, (15 << 11) | (1 << 4)),
+        E(reg.TARGET_RDMA, reg.RDMA_WEIGHT, (1 << 24) | (1 << 16) | (1 << 8) | 1),
+        0,
+        E(reg.TARGET_PC_REG, reg.PC_REGISTER_AMOUNTS, 0),
+        E(reg.TARGET_VERSION, 0, 0),
+        E(reg.TARGET_PC, reg.OPERATION_ENABLE, (14 << 1) | 1),
+    ]
+
+def write_buffers(input_nhwc, weight_ohwi, biases):
+    packed_input = pack_input(input_nhwc)
+    packed_weight = pack_weights(weight_ohwi)
+    packed_bias = pack_biases(biases, weight_ohwi)
+
+    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(input_map)), 0, input_map.size())
+    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(weight_map)), 0, weight_map.size())
+    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(bias_map)), 0, bias_map.size())
+    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_map.size())
+    ctypes.memmove(ctypes.addressof(ctypes.c_char.from_buffer(input_map)), packed_input.ctypes.data, packed_input.nbytes)
+    ctypes.memmove(ctypes.addressof(ctypes.c_char.from_buffer(weight_map)), packed_weight.ctypes.data, packed_weight.nbytes)
+    ctypes.memmove(ctypes.addressof(ctypes.c_char.from_buffer(bias_map)), packed_bias.ctypes.data, packed_bias.nbytes)
+
+def read_output():
+    raw = np.frombuffer(output_map, dtype=np.uint8, count=calc_raw_output_size(OUT_W, OUT_H, OUT_C)).copy()
+    raw = raw.reshape(-1, OUT_W, OUT_H, FEATURE_ATOMIC_SIZE)
+    out = np.zeros((1, OUT_H, OUT_W, OUT_C), dtype=np.uint8)
+    for oc in range(OUT_C):
+        c = oc % FEATURE_ATOMIC_SIZE
+        g = oc // FEATURE_ATOMIC_SIZE
+        for y in range(OUT_H):
+            for x in range(OUT_W):
+                out[0, y, x, oc] = (int(raw[g, x, y, c]) + 0x80) & 0xFF
+    return out
+
+def expected_output(input_nhwc, weight_ohwi, biases):
+    expected = np.zeros((1, OUT_H, OUT_W, OUT_C), dtype=np.int64)
+    for oc in range(OUT_C):
+        expected[0, :, :, oc] = input_nhwc[0, :, :, 0].astype(np.int64) * int(weight_ohwi[oc, 0, 0, 0]) + int(biases[oc])
+    conv_scale = (INPUT_SCALE * WEIGHT_SCALE) / OUTPUT_SCALE
+    return np.clip(np.round(expected.astype(np.float64) * conv_scale + OUTPUT_ZERO_POINT), 0, 255).astype(np.uint8)
+
+def run_conv2d_1x6_1x1_4x4(input_nhwc, weight_ohwi, biases):
+    npu_regs = build_conv_regs(input_mem_create.dma_addr, weight_mem_create.dma_addr, bias_mem_create.dma_addr, output_mem_create.dma_addr)
+    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), 0, task_map.size())
+    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), 0, regcmd_map.size())
+    for i, qword in enumerate(npu_regs):
+        regcmd[i] = qword
+
+    write_buffers(input_nhwc, weight_ohwi, biases)
+
+    tasks[0].flags  = 0;
+    tasks[0].op_idx = 1;
+    tasks[0].enable_mask = 0xd;
+    tasks[0].int_mask = 0x300;
+    tasks[0].int_clear = 0x1ffff;
+    tasks[0].int_status = 0;
+    tasks[0].regcfg_amount = len(npu_regs)
+    tasks[0].regcfg_offset = 0;
+    tasks[0].regcmd_addr = regcmd_mem_create.dma_addr
+
+    for bo in (regcmd_mem_create, input_mem_create, weight_mem_create, bias_mem_create, output_mem_create):
+        ioctl(fd, DRM_IOCTL_ROCKET_FINI_BO, drm_rocket_fini_bo(handle=bo.handle))
+    ret = rocket_submit(fd, tasks, 1,
+        in_bos=[input_mem_create, regcmd_mem_create, weight_mem_create, bias_mem_create],
+        out_bos=[output_mem_create])
+    ioctl(fd, DRM_IOCTL_ROCKET_PREP_BO, drm_rocket_prep_bo(handle=output_mem_create.handle, timeout_ns=time.monotonic_ns() + 6000000000))
+    print(f"SUBMIT ret={ret}")
+
+    return read_output()
+
+if __name__ == "__main__":
+    np.random.seed(42)
+    input_nhwc = np.random.randint(0, 256, (1, IN_H, IN_W, IN_C), dtype=np.uint8)
+    weight_ohwi = np.random.randint(0, 256, (OUT_C, KW, KH, IN_C), dtype=np.uint8)
+    biases = np.random.randint(-128, 128, (OUT_C,), dtype=np.int32)
+
+    result = run_conv2d_1x6_1x1_4x4(input_nhwc, weight_ohwi, biases)
+    expected = expected_output(input_nhwc, weight_ohwi, biases)
+    diff = int(np.max(np.abs(result.astype(np.int32) - expected.astype(np.int32))))
+    ok = diff <= 1
+    print(f"conv2d_1x6_1x1_4x4 NPU={result.ravel().tolist()} expected={expected.ravel().tolist()} {'PASS' if ok else 'FAIL'} (max_diff={diff})")
+    os.close(fd)
+    sys.exit(0 if ok else 1)

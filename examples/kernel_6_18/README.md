@@ -1,9 +1,27 @@
-we are working on cleaning up conv_compile.py reference to conv.py
-test with
-python3 examples/kernel_6_18/conv_compile.py --conv-py-shapes
+we are working on conv_new.py to keep its own coding style while mirror conv_mesa.py CONV logic
+- conv_legacy.py is just a refernce, do not copy its code
+test with 
+- python3 examples/kernel_6_18/conv_new.py  (we are changing this)
+- python3 examples/kernel_6_18/conv_mesa.py (known good target, do not change) 
 
+# How pad works
+```
+from create_operation_from_args(pad_left=pad_left)
 
-# How conv_mesa.py works 
+    pad_left = op.padding_left
+    pad_right = op.padding_right
+
+    out_h = (in_h + pad_top + pad_bottom - kh) // stride + 1
+    out_w = (in_w + pad_left + pad_right - kw) // stride + 1
+
+    padded = np.zeros((1, in_h + pad_top + pad_bottom, in_w + pad_left + pad_right, in_c), dtype=np.int32)
+    padded[:, pad_top:pad_top + in_h, pad_left:pad_left + in_w, :] = input_s
+
+        cur.output_width = (cur.input_width + cur.pad_left + cur.pad_right -
+                            op.weights_width) // op.stride + 1
+```
+
+# How stride works in conv_mesa.py 
 ```
 EMIT(REG_CNA_CONV_CON3, CNA_CONV_CON3_CONV_X_STRIDE(task->stride_x) |
                          CNA_CONV_CON3_CONV_Y_STRIDE(task->stride_y));
@@ -41,9 +59,17 @@ cur.output_width = (cur.input_width + cur.pad_left + cur.pad_right -
 cur.output_height = (cur.input_height + cur.pad_top + cur.pad_bottom -
                         op.weights_height) // op.stride + 1
 
-emit(REG_CNA_DATA_SIZE0,
-        CNA_DATA_SIZE0_DATAIN_WIDTH(task.input_width) |
-        CNA_DATA_SIZE0_DATAIN_HEIGHT(task.input_height))
+        E(reg.CNA, reg.CNA_DATA_SIZE2, CNA_DATA_SIZE2_DATAOUT_WIDTH(task.output_width)),
+
+        E(reg.CNA, reg.CNA_CONV_CON3,
+          CNA_CONV_CON3_CONV_X_STRIDE(task.stride_x) |
+          CNA_CONV_CON3_CONV_Y_STRIDE(task.stride_y)),
+        E(reg.CNA, reg.CNA_DATA_SIZE0,
+          CNA_DATA_SIZE0_DATAIN_WIDTH(task.input_width) |
+          CNA_DATA_SIZE0_DATAIN_HEIGHT(task.input_height)),
+                  E(reg.CORE, reg.CORE_DATAOUT_SIZE_0,
+          CORE_DATAOUT_SIZE_0_DATAOUT_HEIGHT(task.output_height - 1) |
+          CORE_DATAOUT_SIZE_0_DATAOUT_WIDTH(task.output_width - 1)),
 ```
 
 
