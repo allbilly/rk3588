@@ -29,6 +29,7 @@ output_width = 0
 output_height = 0
 ADDITION_INPUT = False
 ADD_TENSOR = -1
+DEPTHWISE = False
 
 def load_conv_legacy_shapes():
     def literal_dict_call(node):
@@ -60,8 +61,9 @@ def load_conv_legacy_shapes():
     raise RuntimeError("Could not find literal shapes list in conv_legacy.py")
 
 def use_shape(shape):
-    global input_width, input_height, input_channels, output_channels, weights_height, weights_width, output_width, output_height, ADDITION_INPUT, ADD_TENSOR
-    if shape["groups"] != 1 or shape["weight_in_c"] != shape["in_c"]:
+    global input_width, input_height, input_channels, output_channels, weights_height, weights_width, output_width, output_height, ADDITION_INPUT, ADD_TENSOR, DEPTHWISE
+    DEPTHWISE = shape["groups"] == shape["in_c"] == shape["out_c"] and shape["weight_in_c"] == 1
+    if not DEPTHWISE and (shape["groups"] != 1 or shape["weight_in_c"] != shape["in_c"]):
         raise ValueError(f"unsupported simple_conv shape: {shape['name']}")
     input_width = shape["in_w"]
     input_height = shape["in_h"]
@@ -576,17 +578,22 @@ def expected_output(input_nhwc, weight_ohwi, biases):
     for batch_index in range(input_nhwc.shape[0]):
         for oc in range(output_channels):
             expected[batch_index, :, :, oc] = int(biases[oc])
-            for ic in range(input_channels):
-                for wy in range(weights_height):
-                    for wx in range(weights_width):
+            for wy in range(weights_height):
+                for wx in range(weights_width):
+                    if DEPTHWISE:
                         expected[batch_index, :, :, oc] += (
-                            input_nhwc[batch_index, wy:wy + output_height, wx:wx + output_width, ic].astype(np.int64) *
-                            int(weight_ohwi[oc, wx, wy, ic]))
+                            input_nhwc[batch_index, wy:wy + output_height, wx:wx + output_width, oc].astype(np.int64) *
+                            int(weight_ohwi[0, wx, wy, oc]))
+                    else:
+                        for ic in range(input_channels):
+                            expected[batch_index, :, :, oc] += (
+                                input_nhwc[batch_index, wy:wy + output_height, wx:wx + output_width, ic].astype(np.int64) *
+                                int(weight_ohwi[oc, wx, wy, ic]))
     conv_scale = (INPUT_SCALE * WEIGHT_SCALE) / OUTPUT_SCALE
     return np.clip(np.round(expected.astype(np.float64) * conv_scale + OUTPUT_ZERO_POINT), 0, 255).astype(np.uint8)
 
 def run_conv2d_im2col(input_nhwc, weight_ohwi, biases):
-    global input_width, input_height, input_channels, weights_width, weights_height, output_width, output_height
+    global input_width, input_height, input_channels, weights_width, weights_height, output_width, output_height, DEPTHWISE
 
     real_input_width = input_width
     real_input_height = input_height
@@ -595,6 +602,7 @@ def run_conv2d_im2col(input_nhwc, weight_ohwi, biases):
     real_weights_height = weights_height
     real_output_width = output_width
     real_output_height = output_height
+    real_depthwise = DEPTHWISE
 
     flat_c = real_weights_height * real_weights_width * real_input_channels
     flat_c_aligned = _align(flat_c, FEATURE_ATOMIC_SIZE)
@@ -607,13 +615,21 @@ def run_conv2d_im2col(input_nhwc, weight_ohwi, biases):
                 flat += 1
 
     weight_1x1 = np.full((output_channels, 1, 1, flat_c_aligned), WEIGHT_ZERO_POINT, dtype=np.uint8)
-    for oc in range(output_channels):
-        flat = 0
-        for ic in range(real_input_channels):
+    if real_depthwise:
+        for channel in range(real_input_channels):
+            flat = channel * real_weights_height * real_weights_width
             for wy in range(real_weights_height):
                 for wx in range(real_weights_width):
-                    weight_1x1[oc, 0, 0, flat] = weight_ohwi[oc, wx, wy, ic]
+                    weight_1x1[channel, 0, 0, flat] = weight_ohwi[0, wx, wy, channel]
                     flat += 1
+    else:
+        for oc in range(output_channels):
+            flat = 0
+            for ic in range(real_input_channels):
+                for wy in range(real_weights_height):
+                    for wx in range(real_weights_width):
+                        weight_1x1[oc, 0, 0, flat] = weight_ohwi[oc, wx, wy, ic]
+                        flat += 1
 
     input_width = real_output_width
     input_height = real_output_height
@@ -622,6 +638,7 @@ def run_conv2d_im2col(input_nhwc, weight_ohwi, biases):
     weights_height = 1
     output_width = real_output_width
     output_height = real_output_height
+    DEPTHWISE = False
     try:
         return run_conv2d_shape(im2col, weight_1x1, biases)
     finally:
@@ -632,6 +649,7 @@ def run_conv2d_im2col(input_nhwc, weight_ohwi, biases):
         weights_height = real_weights_height
         output_width = real_output_width
         output_height = real_output_height
+        DEPTHWISE = real_depthwise
 
 def run_conv2d_shape(input_nhwc, weight_ohwi, biases):
     if input_nhwc.shape[0] > 1:
@@ -689,7 +707,9 @@ if __name__ == "__main__":
 
         np.random.seed(42)
         input_nhwc = np.random.randint(0, 256, (shape["batch"], input_height, input_width, input_channels), dtype=np.uint8)
-        weight_ohwi = np.random.randint(0, 256, (output_channels, weights_width, weights_height, input_channels), dtype=np.uint8)
+        weight_shape = ((1, weights_width, weights_height, input_channels) if DEPTHWISE else
+                        (output_channels, weights_width, weights_height, input_channels))
+        weight_ohwi = np.random.randint(0, 256, weight_shape, dtype=np.uint8)
         biases = np.random.randint(-128, 128, (output_channels,), dtype=np.int32)
 
         result = run_conv2d_shape(input_nhwc, weight_ohwi, biases)
