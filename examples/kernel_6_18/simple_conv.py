@@ -778,7 +778,8 @@ def run_conv2d_shape(input_nhwc, weight_ohwi, biases):
     if GROUPS != 1 and not DEPTHWISE:
         return run_conv2d_grouped(input_nhwc, weight_ohwi, biases)
 
-    if (weights_width != 1 or weights_height != 1) and input_channels <= 3:
+    if ((weights_width != 1 or weights_height != 1) and input_channels <= 3) or \
+       (input_channels == 1 and (output_height == 1 or output_width == 1)):
         return run_conv2d_im2col(input_nhwc, weight_ohwi, biases)
 
     write_buffers(input_nhwc, weight_ohwi, biases)
