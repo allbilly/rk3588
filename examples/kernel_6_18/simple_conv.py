@@ -61,11 +61,8 @@ def load_conv_legacy_shapes():
 
 def use_shape(shape):
     global input_width, input_height, input_channels, output_channels, weights_height, weights_width, output_width, output_height, ADDITION_INPUT, ADD_TENSOR
-    if shape["batch"] != 1 or shape["groups"] != 1 or shape["weight_in_c"] != shape["in_c"]:
+    if shape["groups"] != 1 or shape["weight_in_c"] != shape["in_c"]:
         raise ValueError(f"unsupported simple_conv shape: {shape['name']}")
-    if shape["kh"] != 1 or shape["kw"] != 1:
-        raise ValueError(f"unsupported simple_conv shape: {shape['name']}")
-
     input_width = shape["in_w"]
     input_height = shape["in_h"]
     input_channels = shape["in_c"]
@@ -401,8 +398,10 @@ def pack_biases(biases, weight_ohwi):
     packed = np.zeros(output_channels, dtype=np.int32)
     for oc in range(output_channels):
         correction = 0
-        for ic in range(input_channels):
-            correction += (int(weight_ohwi[oc, 0, 0, ic]) - WEIGHT_ZERO_POINT) * (INPUT_ZERO_POINT - 0x80)
+        for wx in range(weights_width):
+            for wy in range(weights_height):
+                for ic in range(input_channels):
+                    correction += (int(weight_ohwi[oc, wx, wy, ic]) - WEIGHT_ZERO_POINT) * (INPUT_ZERO_POINT - 0x80)
         packed[oc] = int(biases[oc]) - correction
     return packed
 
@@ -442,6 +441,9 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
         weight_banks = CBUF_BANKS - input_banks
     atomic_count = output_width * output_height
     surfaces_per_row = output_width * output_height * 2
+    pad_con1 = 0xffff8080 if (weights_width >= 3 and INPUT_ZERO_POINT == 0) else INPUT_ZERO_POINT - 0x80
+    if ADDITION_INPUT or ADD_TENSOR != -1:
+        pad_con1 = 0xffffff80
 
     scale = 1
     coff = 0
@@ -501,7 +503,7 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
         E(reg.TARGET_CNA, reg.CNA_FC_DATA_SIZE1, input_channels),
         E(reg.TARGET_CNA, reg.CNA_DCOMP_ADDR0, weight_dma & 0xFFFFFFFF),
         E(reg.TARGET_CNA, reg.CNA_CVT_CON5, 0xffff if input_channels_real == 1 else 0),
-        E(reg.TARGET_CNA, reg.CNA_PAD_CON1, INPUT_ZERO_POINT - 0x80),
+        E(reg.TARGET_CNA, reg.CNA_PAD_CON1, pad_con1),
         E(reg.TARGET_CORE, reg.CORE_MISC_CFG, 1),                       # QD_EN
         E(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_0, ((output_height - 1) << 16) | (output_width - 1)),
         E(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_1, output_channels - 1),
@@ -570,15 +572,77 @@ def read_output():
     return out
 
 def expected_output(input_nhwc, weight_ohwi, biases):
-    expected = np.zeros((1, output_height, output_width, output_channels), dtype=np.int64)
-    for oc in range(output_channels):
-        expected[0, :, :, oc] = int(biases[oc])
-        for ic in range(input_channels):
-            expected[0, :, :, oc] += input_nhwc[0, :, :, ic].astype(np.int64) * int(weight_ohwi[oc, 0, 0, ic])
+    expected = np.zeros((input_nhwc.shape[0], output_height, output_width, output_channels), dtype=np.int64)
+    for batch_index in range(input_nhwc.shape[0]):
+        for oc in range(output_channels):
+            expected[batch_index, :, :, oc] = int(biases[oc])
+            for ic in range(input_channels):
+                for wy in range(weights_height):
+                    for wx in range(weights_width):
+                        expected[batch_index, :, :, oc] += (
+                            input_nhwc[batch_index, wy:wy + output_height, wx:wx + output_width, ic].astype(np.int64) *
+                            int(weight_ohwi[oc, wx, wy, ic]))
     conv_scale = (INPUT_SCALE * WEIGHT_SCALE) / OUTPUT_SCALE
     return np.clip(np.round(expected.astype(np.float64) * conv_scale + OUTPUT_ZERO_POINT), 0, 255).astype(np.uint8)
 
+def run_conv2d_im2col(input_nhwc, weight_ohwi, biases):
+    global input_width, input_height, input_channels, weights_width, weights_height, output_width, output_height
+
+    real_input_width = input_width
+    real_input_height = input_height
+    real_input_channels = input_channels
+    real_weights_width = weights_width
+    real_weights_height = weights_height
+    real_output_width = output_width
+    real_output_height = output_height
+
+    flat_c = real_weights_height * real_weights_width * real_input_channels
+    flat_c_aligned = _align(flat_c, FEATURE_ATOMIC_SIZE)
+    im2col = np.full((1, real_output_height, real_output_width, flat_c_aligned), INPUT_ZERO_POINT, dtype=np.uint8)
+    flat = 0
+    for ic in range(real_input_channels):
+        for wy in range(real_weights_height):
+            for wx in range(real_weights_width):
+                im2col[0, :, :, flat] = input_nhwc[0, wy:wy + real_output_height, wx:wx + real_output_width, ic]
+                flat += 1
+
+    weight_1x1 = np.full((output_channels, 1, 1, flat_c_aligned), WEIGHT_ZERO_POINT, dtype=np.uint8)
+    for oc in range(output_channels):
+        flat = 0
+        for ic in range(real_input_channels):
+            for wy in range(real_weights_height):
+                for wx in range(real_weights_width):
+                    weight_1x1[oc, 0, 0, flat] = weight_ohwi[oc, wx, wy, ic]
+                    flat += 1
+
+    input_width = real_output_width
+    input_height = real_output_height
+    input_channels = flat_c_aligned
+    weights_width = 1
+    weights_height = 1
+    output_width = real_output_width
+    output_height = real_output_height
+    try:
+        return run_conv2d_shape(im2col, weight_1x1, biases)
+    finally:
+        input_width = real_input_width
+        input_height = real_input_height
+        input_channels = real_input_channels
+        weights_width = real_weights_width
+        weights_height = real_weights_height
+        output_width = real_output_width
+        output_height = real_output_height
+
 def run_conv2d_shape(input_nhwc, weight_ohwi, biases):
+    if input_nhwc.shape[0] > 1:
+        return np.concatenate([
+            run_conv2d_shape(input_nhwc[batch_index:batch_index + 1], weight_ohwi, biases)
+            for batch_index in range(input_nhwc.shape[0])
+        ], axis=0)
+
+    if (weights_width != 1 or weights_height != 1) and input_channels <= 3:
+        return run_conv2d_im2col(input_nhwc, weight_ohwi, biases)
+
     npu_regs = build_conv_regs(input_mem_create.dma_addr, weight_mem_create.dma_addr, bias_mem_create.dma_addr, output_mem_create.dma_addr)
     ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), 0, task_map.size())
     ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), 0, regcmd_map.size())
@@ -624,7 +688,7 @@ if __name__ == "__main__":
             raise
 
         np.random.seed(42)
-        input_nhwc = np.random.randint(0, 256, (1, input_height, input_width, input_channels), dtype=np.uint8)
+        input_nhwc = np.random.randint(0, 256, (shape["batch"], input_height, input_width, input_channels), dtype=np.uint8)
         weight_ohwi = np.random.randint(0, 256, (output_channels, weights_width, weights_height, input_channels), dtype=np.uint8)
         biases = np.random.randint(-128, 128, (output_channels,), dtype=np.int32)
 
