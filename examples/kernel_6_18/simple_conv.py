@@ -30,6 +30,8 @@ output_height = 0
 ADDITION_INPUT = False
 ADD_TENSOR = -1
 DEPTHWISE = False
+GROUPS = 1
+weight_input_channels = 0
 
 def load_conv_legacy_shapes():
     def literal_dict_call(node):
@@ -61,10 +63,14 @@ def load_conv_legacy_shapes():
     raise RuntimeError("Could not find literal shapes list in conv_legacy.py")
 
 def use_shape(shape):
-    global input_width, input_height, input_channels, output_channels, weights_height, weights_width, output_width, output_height, ADDITION_INPUT, ADD_TENSOR, DEPTHWISE
+    global input_width, input_height, input_channels, output_channels, weights_height, weights_width, output_width, output_height, ADDITION_INPUT, ADD_TENSOR, DEPTHWISE, GROUPS, weight_input_channels
     DEPTHWISE = shape["groups"] == shape["in_c"] == shape["out_c"] and shape["weight_in_c"] == 1
-    if not DEPTHWISE and (shape["groups"] != 1 or shape["weight_in_c"] != shape["in_c"]):
+    if shape["in_c"] % shape["groups"] != 0 or shape["out_c"] % shape["groups"] != 0:
         raise ValueError(f"unsupported simple_conv shape: {shape['name']}")
+    if not DEPTHWISE and shape["weight_in_c"] != shape["in_c"] // shape["groups"]:
+        raise ValueError(f"unsupported simple_conv shape: {shape['name']}")
+    GROUPS = shape["groups"]
+    weight_input_channels = shape["weight_in_c"]
     input_width = shape["in_w"]
     input_height = shape["in_h"]
     input_channels = shape["in_c"]
@@ -326,7 +332,7 @@ def calc_input_size(input_width, input_height, input_channels):
 
 def calc_weight_size(weights_width, weights_height, input_channels, output_channels):
     wc = _align(max(input_channels, FEATURE_ATOMIC_SIZE), WEIGHT_ATOMIC_SIZE)
-    oc = _align(output_channels, 2)
+    oc = 1 if DEPTHWISE else _align(output_channels, 2)
     return weights_width * weights_height * oc * wc * 2
 
 def calc_raw_output_size(output_width, output_height, output_channels):
@@ -348,7 +354,9 @@ def calc_input_banks(input_width, input_height, input_channels):
     return _ceil_div(calc_entries_per_slice(input_width, input_channels) * input_height, CBUF_ENTRIES_PER_BANK)
 
 def calc_weights_banks(weights_width, weights_height, input_channels, output_channels):
-    bytes_ = weights_width * weights_height * input_channels * BPE * output_channels
+    bytes_ = weights_width * weights_height * input_channels * BPE
+    if not DEPTHWISE:
+        bytes_ *= output_channels
     return _ceil_div(_ceil_div(bytes_, CBUF_ENTRY_SIZE), CBUF_ENTRIES_PER_BANK) + 1
 
 def pack_input(input_nhwc):
@@ -376,23 +384,27 @@ def pack_input(input_nhwc):
 
 def pack_weights(weight_ohwi):
     ic = max(input_channels, FEATURE_ATOMIC_SIZE)
-    oc = _align(output_channels, 2)
+    oc = 1 if DEPTHWISE else _align(output_channels, 2)
+    ic_groups = WEIGHT_ATOMIC_SIZE * (2 if DEPTHWISE else 1)
     out = np.zeros(calc_weight_size(weights_width, weights_height, input_channels, output_channels), dtype=np.uint8)
     n = 0
     for oo in range(_ceil_div(oc, WEIGHT_ATOMIC_SIZE)):
-        for ii in range(_ceil_div(ic, WEIGHT_ATOMIC_SIZE)):
+        for ii in range(_ceil_div(ic, ic_groups)):
             for x in range(weights_width):
                 for y in range(weights_height):
                     for oi in range(min(oc - oo * WEIGHT_ATOMIC_SIZE, WEIGHT_ATOMIC_SIZE)):
-                        for ij in range(min(ic, WEIGHT_ATOMIC_SIZE)):
+                        for ij in range(min(ic, ic_groups)):
                             oc_idx = oo * WEIGHT_ATOMIC_SIZE + oi
-                            ic_idx = ii * WEIGHT_ATOMIC_SIZE + ij
+                            ic_idx = ii * ic_groups + ij
                             if oc_idx >= output_channels:
                                 out[n] = 0
                             elif ic_idx >= input_channels:
                                 out[n] = (WEIGHT_ZERO_POINT - 0x80) & 0xFF
                             else:
-                                out[n] = (int(weight_ohwi[oc_idx, x, y, ic_idx]) - 0x80) & 0xFF
+                                if DEPTHWISE:
+                                    out[n] = (int(weight_ohwi[0, x, y, ic_idx]) - 0x80) & 0xFF
+                                else:
+                                    out[n] = (int(weight_ohwi[oc_idx, x, y, ic_idx]) - 0x80) & 0xFF
                             n += 1
     return out
 
@@ -402,8 +414,11 @@ def pack_biases(biases, weight_ohwi):
         correction = 0
         for wx in range(weights_width):
             for wy in range(weights_height):
-                for ic in range(input_channels):
-                    correction += (int(weight_ohwi[oc, wx, wy, ic]) - WEIGHT_ZERO_POINT) * (INPUT_ZERO_POINT - 0x80)
+                if DEPTHWISE:
+                    correction += (int(weight_ohwi[0, wx, wy, oc]) - WEIGHT_ZERO_POINT) * (INPUT_ZERO_POINT - 0x80)
+                else:
+                    for ic in range(input_channels):
+                        correction += (int(weight_ohwi[oc, wx, wy, ic]) - WEIGHT_ZERO_POINT) * (INPUT_ZERO_POINT - 0x80)
         packed[oc] = int(biases[oc]) - correction
     return packed
 
@@ -411,10 +426,14 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
     input_width_real = globals()["input_width"]
     input_channels_real = globals()["input_channels"]
     output_channels_real = globals()["output_channels"]
-    depthwise = False
+    depthwise = DEPTHWISE
     
     input_channels = _align(max(input_channels_real, FEATURE_ATOMIC_SIZE), FEATURE_ATOMIC_SIZE)
     output_channels = _align(max(output_channels_real, 32), 32)
+    if depthwise and output_channels_real <= 32:
+        output_channels *= 2
+    if depthwise:
+        output_channels = _align(output_channels, 64)
     output_surface_stride = calc_line_stride(output_width) * output_height // FEATURE_ATOMIC_SIZE
     
     input_width = input_width_real
@@ -433,7 +452,7 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
         input_line_stride //= 2
         input_surface_stride = 112
     
-    weights_kernels = _align(output_channels_real, 2)
+    weights_kernels = 1 if depthwise else _align(output_channels_real, 2)
     input_banks_required = calc_input_banks(input_width_real, input_height, input_channels_real)
     weights_banks_required = calc_weights_banks(weights_width, weights_height, input_channels_real, output_channels_real)
     input_banks = input_banks_required
@@ -443,6 +462,8 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
         weight_banks = CBUF_BANKS - input_banks
     atomic_count = output_width * output_height
     surfaces_per_row = output_width * output_height * 2
+    if depthwise:
+        surfaces_per_row *= 2
     pad_con1 = 0xffff8080 if (weights_width >= 3 and INPUT_ZERO_POINT == 0) else INPUT_ZERO_POINT - 0x80
     if ADDITION_INPUT or ADD_TENSOR != -1:
         pad_con1 = 0xffffff80
@@ -506,12 +527,12 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
         E(reg.TARGET_CNA, reg.CNA_DCOMP_ADDR0, weight_dma & 0xFFFFFFFF),
         E(reg.TARGET_CNA, reg.CNA_CVT_CON5, 0xffff if input_channels_real == 1 else 0),
         E(reg.TARGET_CNA, reg.CNA_PAD_CON1, pad_con1),
-        E(reg.TARGET_CORE, reg.CORE_MISC_CFG, 1),                       # QD_EN
+        E(reg.TARGET_CORE, reg.CORE_MISC_CFG, 1 | (2 if depthwise else 0)), # QD_EN, DW_EN
         E(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_0, ((output_height - 1) << 16) | (output_width - 1)),
         E(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_1, output_channels - 1),
         E(reg.TARGET_CORE, reg.CORE_CLIP_TRUNCATE, 0),
         E(reg.TARGET_CORE, reg.CORE_RESERVED_3030, 0),
-        E(reg.TARGET_DPU, reg.FEATURE_MODE_CFG, (15 << 5) | (2 << 1)),  # burst len, output mode
+        E(reg.TARGET_DPU, reg.FEATURE_MODE_CFG, (15 << 5) | ((3 if depthwise else 0) << 3) | (2 << 1)),  # burst len, output mode
         E(reg.TARGET_DPU, reg.DATA_FORMAT, 0),
         E(reg.TARGET_DPU, reg.DST_BASE_ADDR, output_dma & 0xFFFFFFFF),
         E(reg.TARGET_DPU, reg.DST_SURF_STRIDE, output_surface_stride << 4),
@@ -523,7 +544,8 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
         E(reg.TARGET_DPU, reg.BS_ALU_CFG, 0),
         E(reg.TARGET_DPU, reg.BS_MUL_CFG, 0),
         E(reg.TARGET_DPU, reg.BS_RELUX_CMP_VALUE, 0),
-        E(reg.TARGET_DPU, reg.BS_OW_CFG, (1 << 8) | (1 << 5) | (1 << 2)),
+        E(reg.TARGET_DPU, reg.BS_OW_CFG,
+          ((3 if depthwise else 1) << 8) | ((3 if depthwise else 1) << 5) | ((3 if depthwise else 1) << 2)),
         E(reg.TARGET_DPU, reg.BS_OW_OP, 0x80 - WEIGHT_ZERO_POINT),
         E(reg.TARGET_DPU, reg.WDMA_SIZE_0, output_channels - 1),
         E(reg.TARGET_DPU, reg.WDMA_SIZE_1, ((output_height - 1) << 16) | (output_width - 1)),
@@ -540,7 +562,7 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
         E(reg.TARGET_RDMA, reg.RDMA_BRDMA_CFG, 1 << 1),
         E(reg.TARGET_RDMA, reg.RDMA_BS_BASE_ADDR, bias_dma & 0xFFFFFFFF),
         E(reg.TARGET_RDMA, reg.RDMA_ERDMA_CFG, 1),
-        E(reg.TARGET_RDMA, reg.RDMA_FEATURE_MODE_CFG, (15 << 11) | (1 << 4)),
+        E(reg.TARGET_RDMA, reg.RDMA_FEATURE_MODE_CFG, (15 << 11) | (1 << 4) | ((3 if depthwise else 0) << 1)),
         E(reg.TARGET_RDMA, reg.RDMA_WEIGHT, (1 << 24) | (1 << 16) | (1 << 8) | 1),
         0,
         E(reg.TARGET_PC_REG, reg.PC_REGISTER_AMOUNTS, 0),
@@ -575,9 +597,14 @@ def read_output():
 
 def expected_output(input_nhwc, weight_ohwi, biases):
     expected = np.zeros((input_nhwc.shape[0], output_height, output_width, output_channels), dtype=np.int64)
+    input_per_group = input_channels // GROUPS
+    output_per_group = output_channels // GROUPS
     for batch_index in range(input_nhwc.shape[0]):
         for oc in range(output_channels):
             expected[batch_index, :, :, oc] = int(biases[oc])
+            group = oc // output_per_group if not DEPTHWISE else oc
+            input_start = group * input_per_group if not DEPTHWISE else oc
+            input_end = input_start + input_per_group if not DEPTHWISE else oc + 1
             for wy in range(weights_height):
                 for wx in range(weights_width):
                     if DEPTHWISE:
@@ -585,15 +612,47 @@ def expected_output(input_nhwc, weight_ohwi, biases):
                             input_nhwc[batch_index, wy:wy + output_height, wx:wx + output_width, oc].astype(np.int64) *
                             int(weight_ohwi[0, wx, wy, oc]))
                     else:
-                        for ic in range(input_channels):
+                        for ic in range(input_start, input_end):
                             expected[batch_index, :, :, oc] += (
                                 input_nhwc[batch_index, wy:wy + output_height, wx:wx + output_width, ic].astype(np.int64) *
-                                int(weight_ohwi[oc, wx, wy, ic]))
+                                int(weight_ohwi[oc, wx, wy, ic - input_start]))
     conv_scale = (INPUT_SCALE * WEIGHT_SCALE) / OUTPUT_SCALE
     return np.clip(np.round(expected.astype(np.float64) * conv_scale + OUTPUT_ZERO_POINT), 0, 255).astype(np.uint8)
 
+def run_conv2d_grouped(input_nhwc, weight_ohwi, biases):
+    global input_channels, output_channels, GROUPS, DEPTHWISE
+
+    real_input_channels = input_channels
+    real_output_channels = output_channels
+    real_groups = GROUPS
+    real_depthwise = DEPTHWISE
+    input_per_group = real_input_channels // real_groups
+    output_per_group = real_output_channels // real_groups
+    outputs = []
+
+    try:
+        GROUPS = 1
+        DEPTHWISE = False
+        input_channels = input_per_group
+        output_channels = output_per_group
+        for group in range(real_groups):
+            input_start = group * input_per_group
+            input_end = input_start + input_per_group
+            output_start = group * output_per_group
+            output_end = output_start + output_per_group
+            outputs.append(run_conv2d_shape(
+                input_nhwc[:, :, :, input_start:input_end],
+                weight_ohwi[output_start:output_end],
+                biases[output_start:output_end]))
+        return np.concatenate(outputs, axis=3)
+    finally:
+        input_channels = real_input_channels
+        output_channels = real_output_channels
+        GROUPS = real_groups
+        DEPTHWISE = real_depthwise
+
 def run_conv2d_im2col(input_nhwc, weight_ohwi, biases):
-    global input_width, input_height, input_channels, weights_width, weights_height, output_width, output_height, DEPTHWISE
+    global input_width, input_height, input_channels, weights_width, weights_height, output_width, output_height, DEPTHWISE, GROUPS
 
     real_input_width = input_width
     real_input_height = input_height
@@ -603,6 +662,7 @@ def run_conv2d_im2col(input_nhwc, weight_ohwi, biases):
     real_output_width = output_width
     real_output_height = output_height
     real_depthwise = DEPTHWISE
+    real_groups = GROUPS
 
     flat_c = real_weights_height * real_weights_width * real_input_channels
     flat_c_aligned = _align(flat_c, FEATURE_ATOMIC_SIZE)
@@ -639,6 +699,7 @@ def run_conv2d_im2col(input_nhwc, weight_ohwi, biases):
     output_width = real_output_width
     output_height = real_output_height
     DEPTHWISE = False
+    GROUPS = 1
     try:
         return run_conv2d_shape(im2col, weight_1x1, biases)
     finally:
@@ -650,6 +711,7 @@ def run_conv2d_im2col(input_nhwc, weight_ohwi, biases):
         output_width = real_output_width
         output_height = real_output_height
         DEPTHWISE = real_depthwise
+        GROUPS = real_groups
 
 def run_conv2d_shape(input_nhwc, weight_ohwi, biases):
     if input_nhwc.shape[0] > 1:
@@ -657,6 +719,9 @@ def run_conv2d_shape(input_nhwc, weight_ohwi, biases):
             run_conv2d_shape(input_nhwc[batch_index:batch_index + 1], weight_ohwi, biases)
             for batch_index in range(input_nhwc.shape[0])
         ], axis=0)
+
+    if GROUPS != 1 and not DEPTHWISE:
+        return run_conv2d_grouped(input_nhwc, weight_ohwi, biases)
 
     if (weights_width != 1 or weights_height != 1) and input_channels <= 3:
         return run_conv2d_im2col(input_nhwc, weight_ohwi, biases)
@@ -708,7 +773,7 @@ if __name__ == "__main__":
         np.random.seed(42)
         input_nhwc = np.random.randint(0, 256, (shape["batch"], input_height, input_width, input_channels), dtype=np.uint8)
         weight_shape = ((1, weights_width, weights_height, input_channels) if DEPTHWISE else
-                        (output_channels, weights_width, weights_height, input_channels))
+                        (output_channels, weights_width, weights_height, weight_input_channels))
         weight_ohwi = np.random.randint(0, 256, weight_shape, dtype=np.uint8)
         biases = np.random.randint(-128, 128, (output_channels,), dtype=np.int32)
 
