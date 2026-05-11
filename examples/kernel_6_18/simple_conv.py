@@ -394,7 +394,7 @@ def split_tasks():
 
     output_height_processed = 0
     tasks_out = []
-    for sl in slices:
+    for idx, sl in enumerate(slices):
         task_input_height = min(sl["bottom_slice"], input_height - 1) - sl["top_slice"] + 1
         if task_input_height < weights_height:
             continue
@@ -402,7 +402,8 @@ def split_tasks():
         tasks_out.append(dict(input_height=task_input_height, output_height=task_output_height,
                               input_offset=calc_line_stride(input_width) * sl["top_slice"],
                               output_offset=calc_line_stride(output_width) * output_height_processed,
-                              input_banks=available_input_banks, weight_banks=available_weights_banks))
+                              input_banks=available_input_banks, weight_banks=available_weights_banks,
+                              weight_reuse=idx > 0 and weights_banks_required + 1 < CBUF_BANKS))
         output_height_processed += task_output_height
     return tasks_out
 
@@ -562,7 +563,7 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma, task=None):
         E(reg.TARGET_CNA, reg.CNA_WEIGHT_SIZE0, weights_width * weights_height * input_channels * weights_kernels),
         E(reg.TARGET_CNA, reg.CNA_WEIGHT_SIZE1, weights_width * weights_height * input_channels),
         E(reg.TARGET_CNA, reg.CNA_WEIGHT_SIZE2, (weights_width << 24) | (weights_height << 16) | weights_kernels),
-        E(reg.TARGET_CNA, reg.CNA_CBUF_CON0, (weight_banks << 4) | input_banks),
+        E(reg.TARGET_CNA, reg.CNA_CBUF_CON0, ((1 << 13) if task is not None and task.get("weight_reuse") else 0) | (weight_banks << 4) | input_banks),
         E(reg.TARGET_CNA, reg.CNA_CBUF_CON1, input_data_entries),
         E(reg.TARGET_CNA, reg.CNA_CVT_CON0, 
             (1 << 3) | (1 << 1) | 1 
@@ -706,6 +707,30 @@ def run_conv2d_grouped(input_nhwc, weight_ohwi, biases):
         GROUPS = real_groups
         DEPTHWISE = real_depthwise
 
+def run_conv2d_depthwise_chunks(input_nhwc, weight_ohwi, biases):
+    global input_channels, output_channels, GROUPS
+
+    real_input_channels = input_channels
+    real_output_channels = output_channels
+    real_groups = GROUPS
+    outputs = []
+
+    try:
+        for start in range(0, real_input_channels, 64):
+            end = min(start + 64, real_input_channels)
+            input_channels = end - start
+            output_channels = end - start
+            GROUPS = end - start
+            outputs.append(run_conv2d_shape(
+                input_nhwc[:, :, :, start:end],
+                weight_ohwi[:, :, :, start:end],
+                biases[start:end]))
+        return np.concatenate(outputs, axis=3)
+    finally:
+        input_channels = real_input_channels
+        output_channels = real_output_channels
+        GROUPS = real_groups
+
 def run_conv2d_im2col(input_nhwc, weight_ohwi, biases):
     global input_width, input_height, input_channels, weights_width, weights_height, output_width, output_height, DEPTHWISE, GROUPS
 
@@ -778,36 +803,55 @@ def run_conv2d_shape(input_nhwc, weight_ohwi, biases):
     if GROUPS != 1 and not DEPTHWISE:
         return run_conv2d_grouped(input_nhwc, weight_ohwi, biases)
 
+    if DEPTHWISE and input_channels > 64 and (input_channels % 64) != 0:
+        return run_conv2d_depthwise_chunks(input_nhwc, weight_ohwi, biases)
+
     if ((weights_width != 1 or weights_height != 1) and input_channels <= 3) or \
        (input_channels == 1 and (output_height == 1 or output_width == 1)):
         return run_conv2d_im2col(input_nhwc, weight_ohwi, biases)
 
     write_buffers(input_nhwc, weight_ohwi, biases)
 
-    for task in split_tasks():
-        npu_regs = build_conv_regs(input_mem_create.dma_addr, weight_mem_create.dma_addr, bias_mem_create.dma_addr, output_mem_create.dma_addr, task)
-        ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), 0, task_map.size())
-        ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), 0, regcmd_map.size())
+    task_list = split_tasks()
+    reg_lists = [build_conv_regs(input_mem_create.dma_addr, weight_mem_create.dma_addr, bias_mem_create.dma_addr, output_mem_create.dma_addr, task)
+                 for task in task_list]
+    offsets = []
+    regcmd_offset = 0
+    for regs in reg_lists:
+        offsets.append(regcmd_offset)
+        regcmd_offset += _align(len(regs), 8)
+    for task_index, regs in enumerate(reg_lists[:-1]):
+        next_regs = reg_lists[task_index + 1]
+        next_addr = regcmd_mem_create.dma_addr + offsets[task_index + 1] * ctypes.sizeof(ctypes.c_uint64)
+        regs_to_fetch = len(next_regs) - 4
+        regs_to_fetch = _align(regs_to_fetch // 2, 2)
+        regs[-4] = E(reg.TARGET_PC_REG, reg.PC_BASE_ADDRESS, next_addr & 0xFFFFFFF0)
+        regs[-3] = E(reg.TARGET_PC_REG, reg.PC_REGISTER_AMOUNTS, regs_to_fetch)
+
+    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), 0, task_map.size())
+    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), 0, regcmd_map.size())
+    for task_index, npu_regs in enumerate(reg_lists):
+        regcmd_offset = offsets[task_index]
         for i, qword in enumerate(npu_regs):
-            regcmd[i] = qword
+            regcmd[regcmd_offset + i] = qword
 
-        tasks[0].flags  = 0;
-        tasks[0].op_idx = 1;
-        tasks[0].enable_mask = 0xd;
-        tasks[0].int_mask = 0x300;
-        tasks[0].int_clear = 0x1ffff;
-        tasks[0].int_status = 0;
-        tasks[0].regcfg_amount = len(npu_regs)
-        tasks[0].regcfg_offset = 0;
-        tasks[0].regcmd_addr = regcmd_mem_create.dma_addr
+        tasks[task_index].flags  = 0;
+        tasks[task_index].op_idx = 1;
+        tasks[task_index].enable_mask = 0xd;
+        tasks[task_index].int_mask = 0x300;
+        tasks[task_index].int_clear = 0x1ffff;
+        tasks[task_index].int_status = 0;
+        tasks[task_index].regcfg_amount = len(npu_regs)
+        tasks[task_index].regcfg_offset = 0;
+        tasks[task_index].regcmd_addr = regcmd_mem_create.dma_addr + regcmd_offset * ctypes.sizeof(ctypes.c_uint64)
 
-        for bo in (regcmd_mem_create, input_mem_create, weight_mem_create, bias_mem_create, output_mem_create):
-            ioctl(fd, DRM_IOCTL_ROCKET_FINI_BO, drm_rocket_fini_bo(handle=bo.handle))
-        ret = rocket_submit(fd, tasks, 1,
-            in_bos=[input_mem_create, regcmd_mem_create, weight_mem_create, bias_mem_create],
-            out_bos=[output_mem_create])
-        ioctl(fd, DRM_IOCTL_ROCKET_PREP_BO, drm_rocket_prep_bo(handle=output_mem_create.handle, timeout_ns=time.monotonic_ns() + 6000000000))
-        print(f"SUBMIT ret={ret}")
+    for bo in (regcmd_mem_create, input_mem_create, weight_mem_create, bias_mem_create, output_mem_create):
+        ioctl(fd, DRM_IOCTL_ROCKET_FINI_BO, drm_rocket_fini_bo(handle=bo.handle))
+    ret = rocket_submit(fd, tasks, len(task_list),
+        in_bos=[input_mem_create, regcmd_mem_create, weight_mem_create, bias_mem_create],
+        out_bos=[output_mem_create])
+    ioctl(fd, DRM_IOCTL_ROCKET_PREP_BO, drm_rocket_prep_bo(handle=output_mem_create.handle, timeout_ns=time.monotonic_ns() + 6000000000))
+    print(f"SUBMIT ret={ret}")
 
     return read_output()
 
