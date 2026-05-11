@@ -298,12 +298,14 @@ def rocket_submit(fd, vendor_tasks, task_count=1, in_bos=(), out_bos=()):
     )
     return ioctl(fd, DRM_IOCTL_ROCKET_SUBMIT, submit_struct)
 
+DATA_BO_SIZE = 16 * 1024 * 1024
+
 task_map, tasks_mem_create = mem_allocate(fd, size=1024)
-regcmd_map, regcmd_mem_create = mem_allocate(fd, size=4096)
-input_map, input_mem_create = mem_allocate(fd, size=4194304)
-weight_map, weight_mem_create = mem_allocate(fd, size=4194304)
-bias_map, bias_mem_create = mem_allocate(fd, size=4194304)
-output_map, output_mem_create = mem_allocate(fd, size=4194304)
+regcmd_map, regcmd_mem_create = mem_allocate(fd, size=512 * 1024)
+input_map, input_mem_create = mem_allocate(fd, size=DATA_BO_SIZE)
+weight_map, weight_mem_create = mem_allocate(fd, size=DATA_BO_SIZE)
+bias_map, bias_mem_create = mem_allocate(fd, size=DATA_BO_SIZE)
+output_map, output_mem_create = mem_allocate(fd, size=DATA_BO_SIZE)
 
 tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
 regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
