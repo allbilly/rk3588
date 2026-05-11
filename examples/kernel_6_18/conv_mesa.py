@@ -1217,6 +1217,7 @@ def emit_regcmd_like_mesa(op, task_num, input_phys_addr, output_phys_addr,
         E(reg.CNA, reg.CNA_CVT_CON5, CNA_CVT_CON5_PER_CHANNEL_CVT_EN(cvt_con5)),
         E(reg.CNA, reg.CNA_PAD_CON1, CNA_PAD_CON1_PAD_VALUE(pad_con1)),
         E(reg.CORE, reg.CORE_MISC_CFG, misc_cfg),
+        # TODO
         E(reg.CORE, reg.CORE_DATAOUT_SIZE_0,
           CORE_DATAOUT_SIZE_0_DATAOUT_HEIGHT(task.output_height - 1) |
           CORE_DATAOUT_SIZE_0_DATAOUT_WIDTH(task.output_width - 1)),
@@ -1816,7 +1817,7 @@ def load_conv_py_shapes():
             out[kw.arg] = ast.literal_eval(kw.value)
         return out
 
-    conv_path = os.path.join(os.path.dirname(__file__), "conv.py")
+    conv_path = os.path.join(os.path.dirname(__file__), "conv_legacy.py")
     with open(conv_path, "r", encoding="utf-8") as f:
         tree = ast.parse(f.read(), filename=conv_path)
 
