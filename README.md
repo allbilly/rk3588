@@ -26,7 +26,26 @@ Weight/Feature   MAC Array      Post-Proc      Pooling        Operation
 │  RDMA   │  (0x2001, range 0x5000) — separate DMA for
 │(Read    │   elementwise input/weight data, not in the
 │  DMA)   │   CNA→CORE pipeline. Selected by enable_mask
-└─────────┘   in struct_rknpu_task (0xd for conv, 0x18 for gemm).
+└─────────┘   in struct_rknpu_task .
+
+task.enable_mask 
+0x40 (PPU_RDMA)
+0x20 (PPU)
+0x10 (DPU)
+0x8  (CORE)
+0x4  (CNA) 
+0x1  (PC)
+- CONV            : 0xd  = 0x8 (CORE) | 0x4 (CNA) | 0x1 (PC)
+- GEMM/elementwise: 0x18 = 0x10 (DPU) | 0x8 (CORE)
+- POOL            : 0x60 = 0x40(PPU_RDMA) | 0x20(PPU)
+
+task.int_mask
+0xc00 or 0x300
+(1 << 8) | (1 << 9)
+
+task.op_idx
+gemm: 4
+conv: 1
 ```
 
 The programming model is mulitple NPU submits -> mulitple tasks in one submit -> mulitple ops in one task 

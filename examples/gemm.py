@@ -446,7 +446,14 @@ def write_regs_to_npu_task(task_regs):
         tails = enable_npu_units_and_set_next_pc_addr(next_offset, next_task_regs_len)
         for i, qword in enumerate(tails):
             npu_regcmd[base + len(regs) + i] = qword
-
+        # masks done-signals, rknpu_fuzz_status()
+        # https://github.com/allbilly/rknpu_driver/blob/0e23a914e5322d6b7cdaf3de6e91fdf76b2a9055/rknpu_job.c#L615
+        # 0-1	0x03	CNA_FEATURE / CNA_WEIGHT
+        # 2-3	0x0c	CNA_CSC / CORE
+        # 4-5	0x30	(CNA variants?)
+        # 6-7	0xc0	(CNA variants?)
+        # 8-9	0x300	DPU_0 / DPU_1
+        # 10-11	0xc00	PPU_0 / PPU_1
         # write flag for npu_tasks
         npu_tasks[idx].regcmd_addr = regcmd_mem_create.dma_addr + base * ctypes.sizeof(ctypes.c_uint64)
         npu_tasks[idx].regcfg_amount = len(regs)
