@@ -34,6 +34,9 @@ Reference
   NVDLA HW cmod:          — MAC_ATOMIC_K=32(INT8)/16(FP16), MAC_ATOMIC_C=64
 """
 
+import os
+import re
+
 import numpy as np
 
 FP16_BYTES = 2
@@ -545,28 +548,52 @@ class CSCSim:
             stream_stride = _stream_ic_stride(dtype, in_c, wpack.ic_atom)
             kspatial_outer = range(kw) if fks else range(kh)
             kspatial_inner = range(kh) if fks else range(kw)
-            for si in kspatial_outer:
-                for sj in kspatial_inner:
-                    ky = sj if fks else si
-                    kx = si if fks else sj
-                    for ib in range(ic_blocks):
-                        ic_base = ib * wpack.ic_atom
-                        for ici in range(stream_stride):
-                            ic = ic_base + ici
-                            events.append(dict(
-                                dtype=dtype,
-                                is_depthwise=True,
-                                oc=ic,
-                                oc_base=ic,
-                                oc_lim=1 if ic < out_c else 0,
-                                ic_base=ic,
-                                ic_lim=1 if ic < in_c else 0,
-                                ky=ky,
-                                kx=kx,
-                                weight_offset=w_idx,
-                                weight_stride=1,
-                            ))
-                            w_idx += 1
+            if dtype == "int8":
+                for ib in range(ic_blocks):
+                    ic_base = ib * wpack.ic_atom
+                    for si in kspatial_outer:
+                        for sj in kspatial_inner:
+                            ky = sj if fks else si
+                            kx = si if fks else sj
+                            for ici in range(stream_stride):
+                                ic = ic_base + ici
+                                events.append(dict(
+                                    dtype=dtype,
+                                    is_depthwise=True,
+                                    oc=ic,
+                                    oc_base=ic,
+                                    oc_lim=1 if ic < out_c else 0,
+                                    ic_base=ic,
+                                    ic_lim=1 if ic < in_c else 0,
+                                    ky=ky,
+                                    kx=kx,
+                                    weight_offset=w_idx,
+                                    weight_stride=1,
+                                ))
+                                w_idx += 1
+            else:
+                for si in kspatial_outer:
+                    for sj in kspatial_inner:
+                        ky = sj if fks else si
+                        kx = si if fks else sj
+                        for ib in range(ic_blocks):
+                            ic_base = ib * wpack.ic_atom
+                            for ici in range(stream_stride):
+                                ic = ic_base + ici
+                                events.append(dict(
+                                    dtype=dtype,
+                                    is_depthwise=True,
+                                    oc=ic,
+                                    oc_base=ic,
+                                    oc_lim=1 if ic < out_c else 0,
+                                    ic_base=ic,
+                                    ic_lim=1 if ic < in_c else 0,
+                                    ky=ky,
+                                    kx=kx,
+                                    weight_offset=w_idx,
+                                    weight_stride=1,
+                                ))
+                                w_idx += 1
             _mark_trace_flags(events)
             return events
 
@@ -1050,10 +1077,13 @@ def test_split_tasks_multi():
 
 # ---- CSC trace / boundary sweep tests ----
 
-def _verify_trace_fp16(in_c, out_c, kh=1, kw=1):
+def _verify_trace_fp16(in_c, out_c, kh=1, kw=1, in_h=None, in_w=None):
     seed = 1000 + in_c * 17 + out_c * 31 + kh * 7 + kw
     rng = np.random.default_rng(seed)
-    in_h, in_w = kh + 2, kw + 2
+    if in_h is None:
+        in_h = kh + 2
+    if in_w is None:
+        in_w = kw + 2
     x = rng.uniform(-1, 1, (1, in_c, in_h, in_w)).astype(np.float16)
     w = rng.uniform(-1, 1, (out_c, in_c, kh, kw)).astype(np.float16)
     wpack = pack_weights_fp16(w, out_c, in_c, kh, kw)
@@ -1066,10 +1096,13 @@ def _verify_trace_fp16(in_c, out_c, kh=1, kw=1):
     assert np.allclose(result, expected, atol=0.2), (in_c, out_c, kh, kw)
     return True
 
-def _verify_trace_int8(in_c, out_c, kh=1, kw=1):
+def _verify_trace_int8(in_c, out_c, kh=1, kw=1, in_h=None, in_w=None):
     seed = 2000 + in_c * 17 + out_c * 31 + kh * 7 + kw
     rng = np.random.default_rng(seed)
-    in_h, in_w = kh + 2, kw + 2
+    if in_h is None:
+        in_h = kh + 2
+    if in_w is None:
+        in_w = kw + 2
     x = rng.integers(0, 256, (1, in_c, in_h, in_w), dtype=np.uint8)
     w = rng.integers(0, 256, (out_c, in_c, kh, kw), dtype=np.uint8)
     wpack = pack_weights_int8(w, out_c, in_c, kh, kw)
@@ -1081,6 +1114,174 @@ def _verify_trace_int8(in_c, out_c, kh=1, kw=1):
                                  dtype="int8", input_zp=0, weight_zp=0)
     expected = naive_conv_quant(x, w, out_c, in_c, kh, kw, input_zp=0, weight_zp=0)[0]
     assert np.allclose(result, expected, atol=2), (in_c, out_c, kh, kw)
+    return True
+
+def _verify_trace_dw_int8(c, kh=1, kw=1, in_h=None, in_w=None):
+    seed = 2500 + c * 19 + kh * 7 + kw
+    rng = np.random.default_rng(seed)
+    if in_h is None:
+        in_h = kh + 2
+    if in_w is None:
+        in_w = kw + 2
+    x = rng.integers(0, 256, (1, c, in_h, in_w), dtype=np.uint8)
+    w = rng.integers(0, 256, (c, 1, kh, kw), dtype=np.uint8)
+    wpack = pack_weights_int8(w, c, c, kh, kw, groups=c)
+    sim = CSCSim(oc_atom=32, ic_atom=32, flip_kspatial=True)
+    trace = sim.trace(wpack, x, c, c, kh, kw, groups=c)
+    ok, msg = validate_csc_trace(trace, wpack, x, c, c, kh, kw, groups=c)
+    assert ok, msg
+    result = sim.conv_from_trace(trace, wpack, x, c, c, kh, kw,
+                                 dtype="int8", input_zp=0, weight_zp=0)
+    expected = naive_conv_quant(x, w, c, c, kh, kw, groups=c,
+                                input_zp=0, weight_zp=0)[0]
+    assert np.allclose(result, expected, atol=2), (c, kh, kw)
+    return True
+
+def _verify_trace_expanded_group_fp16(in_c, out_c, groups, kh=1, kw=1):
+    seed = 3500 + in_c * 11 + out_c * 13 + groups * 17 + kh * 7 + kw
+    rng = np.random.default_rng(seed)
+    in_h, in_w = kh + 1, kw + 1
+    weight_in_c = in_c // groups
+    x = rng.uniform(-1, 1, (1, in_c, in_h, in_w)).astype(np.float16)
+    w_group = rng.uniform(-1, 1, (out_c, weight_in_c, kh, kw)).astype(np.float16)
+    w_full = expand_grouped_weights(w_group, in_c, out_c, kh, kw, groups)
+    wpack = pack_weights_fp16(w_full, out_c, in_c, kh, kw)
+    sim = CSCSim()
+    trace = sim.trace(wpack, x, out_c, in_c, kh, kw)
+    ok, msg = validate_csc_trace(trace, wpack, x, out_c, in_c, kh, kw)
+    assert ok, msg
+    result = sim.conv_from_trace(trace, wpack, x, out_c, in_c, kh, kw)
+    expected = naive_conv(x, w_full, out_c, in_c, kh, kw)[0]
+    assert np.allclose(result, expected, atol=0.2), (in_c, out_c, groups, kh, kw)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# simple_conv_fp16.py-compatible FP16 weight packing experiment
+# ---------------------------------------------------------------------------
+
+def _simple_fp16_align_c(in_c, groups, out_c):
+    is_depthwise = _is_depthwise(in_c, out_c, groups)
+    if not is_depthwise and (groups > 1 or in_c > 4):
+        return 16
+    return max(8, min(1 << (max(1, in_c) - 1).bit_length(), 32 if is_depthwise else 16))
+
+def _simple_fp16_dense_weight_for_csc(weight, in_c, out_c, kh, kw, groups):
+    if _is_depthwise(in_c, out_c, groups):
+        dense = np.zeros((out_c, in_c, kh, kw), dtype=np.float16)
+        for channel in range(min(out_c, in_c)):
+            dense[channel, channel] = weight[channel, 0]
+        return dense
+    return expand_grouped_weights(weight, in_c, out_c, kh, kw, groups)
+
+def pack_weights_simple_conv_fp16(weight_full, out_c, in_c, kh, kw, align_c, groups):
+    """Pack weights exactly like simple_conv_fp16.py's current packer."""
+    is_depthwise = _is_depthwise(in_c, out_c, groups)
+    aligned_in_c = align_c * _ceil_div(in_c, align_c)
+
+    if is_depthwise:
+        if kh == 1 and kw == 1 and in_c == 32 and out_c == 32:
+            packed = np.zeros(kh * kw * aligned_in_c * out_c, dtype=np.float16)
+            for channel in range(out_c):
+                packed[channel] = weight_full[channel, channel, 0, 0]
+            return WeightPack(packed, out_c, aligned_in_c, align_c,
+                              oc_atom=1, kh=kh, kw=kw, dtype="fp16")
+
+        packed = np.zeros((1, kh, kw, aligned_in_c), dtype=np.float16)
+        for channel in range(min(out_c, in_c)):
+            packed[0, :, :, channel] = weight_full[channel, channel]
+        return WeightPack(packed.ravel(), out_c, aligned_in_c, align_c,
+                          oc_atom=1, kh=kh, kw=kw, dtype="fp16")
+
+    pack_out_c = out_c
+    if groups == 1 and kh == 1 and kw == 1 and in_c >= 64 and out_c >= 48:
+        pack_out_c = _align_up(out_c, 16)
+
+    ic_group = 32 if aligned_in_c >= 32 and aligned_in_c % 32 == 0 else align_c
+    padded = np.zeros((pack_out_c, aligned_in_c, kh, kw), dtype=np.float16)
+    padded[:out_c, :in_c] = weight_full[:out_c, :in_c]
+
+    blocks = []
+    for oc in range(0, pack_out_c, 16):
+        block = padded[oc:oc + 16]
+        block_oc = block.shape[0]
+        blocks.append(
+            block.reshape(block_oc, aligned_in_c // ic_group, ic_group, kh, kw)
+                 .transpose(1, 3, 4, 0, 2)
+                 .ravel()
+        )
+    return WeightPack(np.concatenate(blocks), pack_out_c, aligned_in_c, ic_group,
+                      oc_atom=16, kh=kh, kw=kw, dtype="fp16")
+
+def _simple_fp16_prepare_legacy_shape(shape, rng, value_check):
+    in_c = shape["in_c"]
+    out_c = shape["out_c"]
+    in_h = shape["in_h"]
+    in_w = shape["in_w"]
+    kh = shape["kh"]
+    kw = shape["kw"]
+    groups = shape["groups"]
+    weight_in_c = shape["weight_in_c"]
+    is_spatial = kh != 1 or kw != 1
+
+    if value_check:
+        input_nchw = rng.uniform(-1, 1, (1, in_c, in_h, in_w)).astype(np.float16)
+        weight_nchw = rng.uniform(-1, 1, (out_c, weight_in_c, kh, kw)).astype(np.float16)
+    else:
+        input_nchw = np.zeros((1, in_c, in_h, in_w), dtype=np.float16)
+        weight_nchw = np.zeros((out_c, weight_in_c, kh, kw), dtype=np.float16)
+
+    out_h = in_h - kh + 1
+    out_w = in_w - kw + 1
+    if is_spatial and (groups == 1 or _is_depthwise(in_c, out_c, groups)) and out_h == 1 and out_w == 1 and in_c >= 64:
+        padded_input = np.zeros((1, in_c, in_h + 1, in_w + 1), dtype=np.float16)
+        padded_input[:, :, :in_h, :in_w] = input_nchw
+        input_nchw = padded_input
+        in_h += 1
+        in_w += 1
+
+    if groups == 1 and in_c > 32 and in_c % 32:
+        padded_in_c = _align_up(in_c, 32)
+        padded_input = np.zeros((1, padded_in_c, in_h, in_w), dtype=np.float16)
+        padded_input[:, :in_c] = input_nchw
+        padded_weight = np.zeros((out_c, padded_in_c, kh, kw), dtype=np.float16)
+        padded_weight[:, :in_c] = weight_nchw
+        input_nchw = padded_input
+        weight_nchw = padded_weight
+        in_c = padded_in_c
+        weight_in_c = padded_in_c
+
+    return input_nchw, weight_nchw, in_c, out_c, in_h, in_w, kh, kw, groups, weight_in_c
+
+def _verify_simple_conv_fp16_weight_pack_shape(shape):
+    value_check = os.environ.get("CSC_SIM_PARITY_VALUE") == "1" and _legacy_fp16_value_check_budget(shape)
+    seed = 5000 + shape["in_c"] * 3 + shape["out_c"] * 5 + shape["in_h"] * 7 + shape["in_w"] * 11 + shape["kh"] * 13 + shape["kw"] * 17 + shape["groups"] * 19
+    rng = np.random.default_rng(seed)
+    input_nchw, weight_nchw, in_c, out_c, in_h, in_w, kh, kw, groups, weight_in_c = \
+        _simple_fp16_prepare_legacy_shape(shape, rng, value_check)
+
+    align_c = 32 if (kh == 1 and kw == 1 and groups == 1 and in_c >= 64) else _simple_fp16_align_c(in_c, groups, out_c)
+    weight_full = _simple_fp16_dense_weight_for_csc(weight_nchw, in_c, out_c, kh, kw, groups)
+    wpack = pack_weights_simple_conv_fp16(weight_full, out_c, in_c, kh, kw, align_c, groups)
+
+    sim_groups = groups if _is_depthwise(in_c, out_c, groups) else 1
+    trace = CSCSim().trace(wpack, input_nchw, out_c, in_c, kh, kw, groups=sim_groups)
+    ok, msg = validate_csc_trace(trace, wpack, input_nchw, out_c, in_c, kh, kw, groups=sim_groups)
+    assert ok, f"{shape['name']}: {msg}"
+
+    if value_check:
+        result = CSCSim().conv_from_trace(trace, wpack, input_nchw, out_c, in_c, kh, kw)
+        expected = naive_conv(input_nchw, weight_full, out_c, in_c, kh, kw, groups=1)[0]
+        assert np.allclose(result, expected, atol=0.2), shape["name"]
+    return value_check
+
+def test_simple_conv_fp16_weight_pack_parity():
+    shapes = _conv_legacy_shapes()
+    assert shapes, "no conv_legacy.py shapes found"
+    value_checked = 0
+    for shape in shapes:
+        value_checked += int(_verify_simple_conv_fp16_weight_pack_shape(shape))
+    print(f"    simple_conv_fp16_weight_pack_shapes={len(shapes)} value_checked={value_checked} trace_only={len(shapes) - value_checked}")
     return True
 
 def test_trace_depthwise_fp16():
@@ -1118,6 +1319,160 @@ def test_trace_sweep_int8_boundaries():
         _verify_trace_int8(in_c, out_c, 3, 2)
     return True
 
+def test_trace_sweep_fp16_spatial_matrix():
+    kernels = [(1, 2), (2, 1), (2, 2), (2, 3), (3, 3)]
+    shapes = [
+        (1, 16), (2, 17), (7, 15), (8, 31), (15, 33),
+        (16, 47), (17, 48), (24, 49), (31, 16), (32, 24),
+        (33, 32), (48, 17), (63, 15), (64, 33), (65, 16),
+    ]
+    count = 0
+    for idx, (in_c, out_c) in enumerate(shapes):
+        kh, kw = kernels[idx % len(kernels)]
+        _verify_trace_fp16(in_c, out_c, kh, kw, in_h=kh + 1, in_w=kw + 2)
+        count += 1
+    assert count == len(shapes)
+    return True
+
+def test_trace_sweep_int8_spatial_matrix():
+    kernels = [(1, 2), (2, 1), (2, 2), (2, 3), (3, 3)]
+    shapes = [
+        (1, 16), (2, 17), (7, 15), (8, 31), (15, 33),
+        (16, 32), (17, 31), (24, 16), (31, 24), (32, 33),
+        (33, 32), (48, 17), (63, 15), (64, 33), (65, 16),
+    ]
+    count = 0
+    for idx, (in_c, out_c) in enumerate(shapes):
+        kh, kw = kernels[idx % len(kernels)]
+        _verify_trace_int8(in_c, out_c, kh, kw, in_h=kh + 1, in_w=kw + 2)
+        count += 1
+    assert count == len(shapes)
+    return True
+
+def test_trace_sweep_depthwise_matrix():
+    channels = [1, 2, 7, 15, 16, 17, 31, 32, 33, 63, 64, 65]
+    kernels = [(1, 1), (1, 2), (2, 1), (3, 2), (3, 3)]
+    for idx, c in enumerate(channels):
+        kh, kw = kernels[idx % len(kernels)]
+        _verify_trace_dw_int8(c, kh, kw, in_h=kh + 1, in_w=kw + 1)
+    return True
+
+def test_trace_sweep_expanded_group_fp16():
+    cases = [
+        (4, 8, 2, 1, 1),
+        (8, 8, 4, 1, 2),
+        (16, 32, 4, 2, 1),
+        (24, 24, 3, 2, 2),
+        (32, 48, 8, 3, 2),
+    ]
+    for in_c, out_c, groups, kh, kw in cases:
+        _verify_trace_expanded_group_fp16(in_c, out_c, groups, kh, kw)
+    return True
+
+def _conv_legacy_shapes():
+    path = os.path.join(os.path.dirname(__file__), "conv_legacy.py")
+    shapes = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped.startswith("#") or "dict(name=" not in stripped:
+                continue
+            shape = {}
+            name_match = re.search(r'name="([^"]+)"', stripped)
+            if not name_match:
+                continue
+            shape["name"] = name_match.group(1)
+            missing = False
+            for key in ("batch", "in_c", "in_h", "in_w", "out_c", "weight_in_c", "kh", "kw", "groups"):
+                match = re.search(rf"\b{key}=([0-9]+)", stripped)
+                if not match:
+                    missing = True
+                    break
+                shape[key] = int(match.group(1))
+            if not missing:
+                shapes.append(shape)
+    return shapes
+
+def _legacy_fp16_value_check_budget(shape):
+    out_h = shape["in_h"] - shape["kh"] + 1
+    out_w = shape["in_w"] - shape["kw"] + 1
+    if out_h <= 0 or out_w <= 0:
+        return False
+    if shape["batch"] != 1:
+        return False
+    ops = shape["out_c"] * shape["weight_in_c"] * shape["kh"] * shape["kw"] * out_h * out_w
+    budget = int(os.environ.get("CSC_SIM_VALUE_BUDGET", "20000"))
+    return ops <= budget
+
+def _verify_conv_legacy_shape_fp16(shape):
+    batch = shape["batch"]
+    in_c = shape["in_c"]
+    out_c = shape["out_c"]
+    in_h = shape["in_h"]
+    in_w = shape["in_w"]
+    kh = shape["kh"]
+    kw = shape["kw"]
+    groups = shape["groups"]
+    weight_in_c = shape["weight_in_c"]
+    if in_h < kh or in_w < kw:
+        raise AssertionError(f"invalid legacy shape: {shape['name']}")
+
+    value_check = _legacy_fp16_value_check_budget(shape)
+    seed = 4000 + in_c * 3 + out_c * 5 + in_h * 7 + in_w * 11 + kh * 13 + kw * 17 + groups * 19
+    rng = np.random.default_rng(seed)
+    if value_check:
+        x = rng.uniform(-1, 1, (1, in_c, in_h, in_w)).astype(np.float16)
+    else:
+        x = np.zeros((1, in_c, in_h, in_w), dtype=np.float16)
+
+    if _is_depthwise(in_c, out_c, groups):
+        if value_check:
+            w = rng.uniform(-1, 1, (out_c, 1, kh, kw)).astype(np.float16)
+        else:
+            w = np.zeros((out_c, 1, kh, kw), dtype=np.float16)
+        wpack = pack_weights_fp16(w, out_c, in_c, kh, kw, groups=groups)
+        sim = CSCSim()
+        trace = sim.trace(wpack, x, out_c, in_c, kh, kw, groups=groups)
+        ok, msg = validate_csc_trace(trace, wpack, x, out_c, in_c, kh, kw, groups=groups)
+        assert ok, f"{shape['name']}: {msg}"
+        if value_check:
+            result = sim.conv_from_trace(trace, wpack, x, out_c, in_c, kh, kw)
+            expected = naive_conv(x, w, out_c, in_c, kh, kw, groups=groups)[0]
+            assert np.allclose(result, expected, atol=0.2), shape["name"]
+        return value_check
+
+    if weight_in_c != in_c:
+        if value_check:
+            w_group = rng.uniform(-1, 1, (out_c, weight_in_c, kh, kw)).astype(np.float16)
+        else:
+            w_group = np.zeros((out_c, weight_in_c, kh, kw), dtype=np.float16)
+        w_full = expand_grouped_weights(w_group, in_c, out_c, kh, kw, groups)
+    else:
+        if value_check:
+            w_full = rng.uniform(-1, 1, (out_c, in_c, kh, kw)).astype(np.float16)
+        else:
+            w_full = np.zeros((out_c, in_c, kh, kw), dtype=np.float16)
+
+    wpack = pack_weights_fp16(w_full, out_c, in_c, kh, kw, groups=1)
+    sim = CSCSim()
+    trace = sim.trace(wpack, x, out_c, in_c, kh, kw, groups=1)
+    ok, msg = validate_csc_trace(trace, wpack, x, out_c, in_c, kh, kw, groups=1)
+    assert ok, f"{shape['name']}: {msg}"
+    if value_check:
+        result = sim.conv_from_trace(trace, wpack, x, out_c, in_c, kh, kw)
+        expected = naive_conv(x, w_full, out_c, in_c, kh, kw, groups=1)[0]
+        assert np.allclose(result, expected, atol=0.2), shape["name"]
+    return value_check
+
+def test_trace_sweep_conv_legacy_shapes():
+    shapes = _conv_legacy_shapes()
+    assert shapes, "no conv_legacy.py shapes found"
+    value_checked = 0
+    for shape in shapes:
+        value_checked += int(_verify_conv_legacy_shape_fp16(shape))
+    print(f"    conv_legacy_shapes={len(shapes)} value_checked={value_checked} trace_only={len(shapes) - value_checked}")
+    return True
+
 
 if __name__ == "__main__":
     fp16_tests = [
@@ -1149,6 +1504,12 @@ if __name__ == "__main__":
         ("trace_depthwise_fp16",          test_trace_depthwise_fp16),
         ("trace_sweep_fp16_boundaries",   test_trace_sweep_fp16_boundaries),
         ("trace_sweep_int8_boundaries",   test_trace_sweep_int8_boundaries),
+        ("trace_sweep_fp16_spatial",      test_trace_sweep_fp16_spatial_matrix),
+        ("trace_sweep_int8_spatial",      test_trace_sweep_int8_spatial_matrix),
+        ("trace_sweep_depthwise",         test_trace_sweep_depthwise_matrix),
+        ("trace_sweep_group_fp16",        test_trace_sweep_expanded_group_fp16),
+        ("trace_sweep_conv_legacy",       test_trace_sweep_conv_legacy_shapes),
+        ("simple_conv_fp16_weight_pack",  test_simple_conv_fp16_weight_pack_parity),
     ]
     passed = failed = 0
     all_tests = fp16_tests + int8_tests + new_tests

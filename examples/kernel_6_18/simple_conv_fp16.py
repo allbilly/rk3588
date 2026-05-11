@@ -22,7 +22,6 @@ CBUF_BANK_SIZE = CBUF_ENTRIES_PER_BANK * CBUF_ENTRY_BYTES
 RK_MAX_CONV_FLAT_STRIDE = 992
 UNPACK_C2 = FP16_ATOM_ELEMENTS // FP16_BYTES
 PC_CHAIN_TAIL_QWORDS = 4  # enable_npu_units() returns 4 QWORDs: PC_BASE_ADDRESS, PC_REGISTER_AMOUNTS, VERSION, OPERATION_ENABLE
-
 class reg:
     # --- Stream/Target IDs (shifted into bits 48-63) ---
     CNA  = 0x0201   # CNA (Convolution/Matrix unit)
@@ -172,10 +171,6 @@ class RocketBO:
     def dma_addr(self):
         return self.dma_address
 
-    @property
-    def obj_addr(self):
-        return self.handle
-
 class struct_rknpu_task(ctypes.Structure):
     _fields_ = [
         ("flags", ctypes.c_uint32),
@@ -267,14 +262,6 @@ def E(target, reg_addr, value):
 def _is_depthwise(in_c, out_c, groups):
     return groups == in_c == out_c
 
-# Spatial (non-dw, non-grouped conv) uses KH-major weight layout: spatial loops
-# outermost, then OC, then aligned-IC innermost. This matches the CSC->CMAC
-# data sequencing for spatial convolutions on RK schedule.
-def _is_kh_major(out_c, in_c, kh, kw, groups):
-    is_spatial = (kh != 1 or kw != 1)
-    multi_input_group = groups > 1 and in_c != groups
-    return is_spatial and not _is_depthwise(in_c, out_c, groups) and not multi_input_group
-
 def _is_grouped_spatial(in_c, out_c, kh, kw, groups):
     is_spatial = (kh != 1 or kw != 1)
     multi_input_group = groups > 1 and in_c != groups
@@ -302,6 +289,8 @@ def _pointwise_split_add_chunks(in_c, out_c, in_h, in_w, kh, kw, groups):
     return None
 
 def should_use_nhwc_pack(channels, c2):
+    # Small-channel inputs use the RK pixel/NHWC path with CNA conversion bits.
+    # Larger feature tensors use the N(C/x)HWCx cube order below.
     return channels > 0 and (c2 // channels == 2 or (channels == 2 and c2 // channels == 4))
 
 def _conv_align_c(in_c, groups, out_c):
@@ -310,7 +299,9 @@ def _conv_align_c(in_c, groups, out_c):
     return max(8, min(1 << (max(1, in_c) - 1).bit_length(), 32 if is_depthwise else 16))
 
 def _conv_input_pack_c2(in_c, groups, out_c, align_c):
-    # C2 selection is RK packing layered on top of 16-value FP16 atoms.
+    # NVDLA/ONNC describe FP16 feature input as N(C/x)HWCx with zero-padded
+    # channel tails. RK uses the same channel-blocked memory order, with this
+    # schedule-specific lane count for the CNA DMA path.
     if in_c == 1: return 2
     if _is_depthwise(in_c, out_c, groups) or groups > 1 or in_c > 4: return 8
     return align_c
@@ -344,7 +335,7 @@ def _conv_params(batch, in_c, in_h, in_w, out_c, kh, kw, groups):
     use_nhwc = (not is_depthwise and not (groups > 1 and is_spatial)
                 and should_use_nhwc_pack(in_c, input_pack_c2))
     return {
-        "batch": batch, "in_c": in_c, "in_h": in_h, "in_w": in_w,
+        "in_c": in_c, "in_h": in_h, "in_w": in_w,
         "out_c": out_c, "kh": kh, "kw": kw, "groups": groups,
         "is_depthwise": is_depthwise, "out_h": out_h, "out_w": out_w,
         "align_c": align_c, "align_out_c": align_out_c,
@@ -364,76 +355,74 @@ def _expand_grouped_weights(weight, in_c, out_c, kh, kw, groups):
         expanded[oc, start:start + weight_in_c] = weight[oc]
     return expanded
 
-def _pack_kh_major(weight, out_c, in_c, kh, kw, c2_out):
-    aligned_in_c = c2_out * _ceil_div(in_c, c2_out)
-    padded = np.zeros((out_c, aligned_in_c, kh, kw), dtype=np.float16)
-    padded[:, :in_c] = weight
-    ic_group = 32 if aligned_in_c >= 32 and aligned_in_c % 32 == 0 else c2_out
+def _dense_weight_for_csc(weight, in_c, out_c, kh, kw, groups):
+    # CSC/CMAC consumes a dense OCxICxKHxKW stream.  Group/depthwise logical
+    # weights become zero-padded dense tensors before the stream packer runs.
+    if _is_depthwise(in_c, out_c, groups):
+        dense = np.zeros((out_c, in_c, kh, kw), dtype=np.float16)
+        for channel in range(min(out_c, in_c)):
+            dense[channel, channel] = weight[channel, 0]
+        return dense
+    return _expand_grouped_weights(weight, in_c, out_c, kh, kw, groups)
+
+def pack_conv_weights_for_shape(weight_full, out_c, in_c, kh, kw, align_c, groups):
+    is_depthwise = _is_depthwise(in_c, out_c, groups)
+    aligned_in_c = align_c * _ceil_div(in_c, align_c)
+
+    if is_depthwise:
+        if kh == 1 and kw == 1 and in_c == 32 and out_c == 32:
+            packed = np.zeros(kh * kw * aligned_in_c * out_c, dtype=np.float16)
+            for channel in range(out_c):
+                packed[channel] = weight_full[channel, channel, 0, 0]
+            return packed
+
+        packed = np.zeros((1, kh, kw, aligned_in_c), dtype=np.float16)
+        for channel in range(min(out_c, in_c)):
+            packed[0, :, :, channel] = weight_full[channel, channel]
+        return packed.ravel()
+
+    pack_out_c = out_c
+    if groups == 1 and kh == 1 and kw == 1 and in_c >= 64 and out_c >= 48:
+        pack_out_c = _align_up(out_c, 16)
+
+    ic_group = 32 if aligned_in_c >= 32 and aligned_in_c % 32 == 0 else align_c
+    padded = np.zeros((pack_out_c, aligned_in_c, kh, kw), dtype=np.float16)
+    padded[:out_c, :in_c] = weight_full[:out_c, :in_c]
+
     blocks = []
-    for oc in range(0, out_c, 16):
+    for oc in range(0, pack_out_c, 16):
         block = padded[oc:oc + 16]
         block_oc = block.shape[0]
         blocks.append(block.reshape(block_oc, aligned_in_c // ic_group, ic_group, kh, kw).transpose(1, 3, 4, 0, 2).ravel())
     return np.concatenate(blocks)
 
-def _pack_default(weight, out_c, in_c, kh, kw, c2_out):
-    aligned_in_c = c2_out * _ceil_div(in_c, c2_out)
-    padded = np.zeros((out_c, aligned_in_c, kh, kw), dtype=np.float16)
-    padded[:, :in_c] = weight
-    return padded.transpose(0, 2, 3, 1).ravel()
+def _pack_pixel_input_fp16(input_nchw, width_stride):
+    in_c, in_h, in_w = input_nchw.shape
+    out = np.zeros((in_h, width_stride, in_c), dtype=np.float16)
+    out[:, :in_w] = input_nchw.transpose(1, 2, 0)
+    return out.ravel()
 
-def _pack_pointwise_wide(weight, out_c, in_c):
-    aligned_in_c = max(32, _align_up(in_c, 32))
-    aligned_out_c = _align_up(out_c, 16) if out_c >= 48 else out_c
-    padded = np.zeros((aligned_out_c, aligned_in_c), dtype=np.float16)
-    padded[:out_c, :in_c] = weight[:, :in_c, 0, 0]
-    return np.concatenate([
-        padded[oc:oc + 16].reshape(-1, aligned_in_c // 32, 32).transpose(1, 0, 2).ravel()
-        for oc in range(0, aligned_out_c, 16)
-    ])
-
-def _pack_dw_spatial_major(weight, out_c, in_c, kh, kw, c2_out):
-    blocks = _ceil_div(out_c, c2_out)
-    packed = np.zeros((blocks, kh, kw, c2_out), dtype=np.float16)
-    for block in range(blocks):
-        start = block * c2_out
-        end = min(start + c2_out, out_c)
-        channels = np.arange(start, end)
-        packed[block, :, :, :end - start] = weight[channels, channels].transpose(1, 2, 0)
+def _pack_feature_input_fp16(input_nchw, width_stride, aligned_c, c2):
+    in_c, in_h, in_w = input_nchw.shape
+    c1 = _ceil_div(aligned_c, c2)
+    packed = np.zeros((c1, in_h, width_stride, c2), dtype=np.float16)
+    for channel in range(in_c):
+        packed[channel // c2, :, :in_w, channel % c2] = input_nchw[channel]
     return packed.ravel()
 
-def pack_conv_weights_for_shape(weight_full, out_c, in_c, kh, kw, align_c, groups):
-    is_depthwise = _is_depthwise(in_c, out_c, groups)
-    if is_depthwise and (kh != 1 or kw != 1):
-        return _pack_dw_spatial_major(weight_full, out_c, in_c, kh, kw, align_c)
-    if groups == 1 and kh == 1 and kw == 1 and in_c >= 64:
-        return _pack_pointwise_wide(weight_full, out_c, in_c)
-    if _is_kh_major(out_c, in_c, kh, kw, groups):
-        return _pack_kh_major(weight_full, out_c, in_c, kh, kw, align_c)
-    return _pack_default(weight_full, out_c, in_c, kh, kw, align_c)
-
 def _pack_conv_input_fp16(input_nchw, p):
-    in_c, in_h, in_w = input_nchw.shape
+    in_c, _, _ = input_nchw.shape
     if p["use_nhwc"]:
-        out = np.zeros((in_h, p["width_stride"], in_c), dtype=np.float16)
-        out[:, :in_w] = input_nchw.transpose(1, 2, 0)
-        return out.ravel()
+        return _pack_pixel_input_fp16(input_nchw, p["width_stride"])
 
     c2 = p["input_pack_c2"]
-    c1 = _ceil_div(_align_up(in_c, p["align_c"]), c2)
-    padded = np.zeros((c1 * c2, in_h, p["width_stride"]), dtype=np.float16)
-    padded[:in_c, :, :in_w] = input_nchw
-    return padded.reshape(c1, c2, in_h, p["width_stride"]).transpose(0, 2, 3, 1).ravel()
+    aligned_c = _align_up(in_c, p["align_c"])
+    return _pack_feature_input_fp16(input_nchw, p["width_stride"], aligned_c, c2)
 
 def _unpack_flat_1x1_output(out_raw, out_c, out_h, out_w, out_width_stride, c2):
     c1 = out_raw.size // (out_width_stride * c2)
     packed = out_raw.reshape(1, c1, 1, out_width_stride, c2)
     return packed[0, :, 0, :out_h * out_w, :].transpose(0, 2, 1).reshape(c1 * c2, out_h * out_w)[:out_c].reshape(out_c, out_h, out_w)
-
-def _unpack_nc1hwc2_output(out_raw, out_c, out_h, out_w, c2):
-    c1 = _ceil_div(out_c, c2)
-    packed = out_raw.reshape(1, c1, out_h, out_w, c2)
-    return packed[0].transpose(0, 3, 1, 2).reshape(c1 * c2, out_h, out_w)[:out_c]
 
 def _unpack_grouped_spatial_output(out_raw, out_c, out_h, out_w, c2, plane_stride):
     c1 = _ceil_div(out_c, c2)
@@ -443,22 +432,6 @@ def _unpack_grouped_spatial_output(out_raw, out_c, out_h, out_w, c2, plane_strid
         channels = min(c2, out_c - plane * c2)
         result[plane * c2:plane * c2 + channels] = plane_raw.reshape(out_h, out_w, c2).transpose(2, 0, 1)[:channels]
     return result
-
-def _reorder_grouped_spatial_weights_block16(weight_full, out_c, in_c, kh, kw):
-    block_size = 16
-    kernel_hw = kh * kw
-    reordered = np.empty_like(weight_full)
-    for block_start in range(0, out_c, block_size):
-        block_end = min(block_start + block_size, out_c)
-        block_channels = block_end - block_start
-        block = weight_full[block_start:block_end]
-
-        # Hardware consumes grouped spatial weights as kh/kw-major within each
-        # output-channel block; pack_default consumes oc-major. Pre-shuffle the
-        # logical tensor so pack_default serializes the hardware order.
-        pack_order = block.transpose(2, 3, 0, 1).reshape(block_channels, kernel_hw, in_c)
-        reordered[block_start:block_end] = pack_order.transpose(0, 2, 1).reshape(block_channels, in_c, kh, kw)
-    return reordered
 
 def _feature_grains(row_bytes, floor_grains, use_nhwc_pack=False, is_spatial=False, is_depthwise=False):
     if use_nhwc_pack and is_spatial:
@@ -726,19 +699,6 @@ def submit_conv_tasks(task_regs, repeat=1):
         write_regs_to_npu_task(task_regs)
         npu_submit(task_count=len(task_regs))
 
-def write_raw_npu_task(regs, op_idx, enable_mask, int_mask=(1 << 8) | (1 << 9)):
-    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), 0, task_map.size())
-    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), 0, regcmd_map.size())
-    assert len(regs) <= regcmd_mem_create.size // ctypes.sizeof(ctypes.c_uint64), "regcmd buffer too small"
-    for i, qword in enumerate(regs):
-        npu_regcmd[i] = qword
-    npu_tasks[0].regcmd_addr = regcmd_mem_create.dma_addr
-    npu_tasks[0].regcfg_amount = len(regs)
-    npu_tasks[0].op_idx = op_idx
-    npu_tasks[0].enable_mask = enable_mask
-    npu_tasks[0].int_mask = int_mask
-    npu_tasks[0].int_clear = 0x1ffff
-
 def write_eltwise_regs_to_npu_task(task_regs):
     ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), 0, task_map.size())
     ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), 0, regcmd_map.size())
@@ -941,7 +901,6 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
         stage_b_offset = 3 * 1024 * 1024
         assert stage_a_offset + raw_bytes <= input_mem_create.size, "input staging buffer too small"
         assert stage_b_offset + raw_bytes <= weight_mem_create.size, "weight staging buffer too small"
-        out_ptr = ctypes.addressof(ctypes.c_char.from_buffer(output_map))
         stage_a_ptr = ctypes.addressof(ctypes.c_char.from_buffer(input_map)) + stage_a_offset
         stage_b_ptr = ctypes.addressof(ctypes.c_char.from_buffer(weight_map)) + stage_b_offset
         stage_a_dma = input_mem_create.dma_addr + stage_a_offset
@@ -990,20 +949,8 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
             result = result[:, :, :out_h, :out_w]
         return result.astype(out_dtype), return_input_nchw, return_weight_nchw
 
-    if _is_depthwise(in_c, out_c, groups):
-        weight_full = np.zeros((out_c, in_c, kh, kw), dtype=np.float16)
-        for oc in range(out_c):
-            weight_full[oc, oc] = weight_nchw[oc, 0]
-    else:
-        weight_full = _expand_grouped_weights(weight_nchw, in_c, logical_out_c, kh, kw, groups)
-    if grouped_spatial:
-        weight_full = _reorder_grouped_spatial_weights_block16(weight_full, out_c, in_c, kh, kw)
-
-    if p["is_depthwise"] and in_c == 32 and out_c == 32 and not is_spatial:
-        wt_flat = np.zeros((kh * kw * _align_up(in_c, p["align_c"]) * out_c), dtype=np.float16)
-        wt_flat[:out_c] = weight_nchw[:, 0, 0, 0]
-    else:
-        wt_flat = pack_conv_weights_for_shape(weight_full, logical_out_c, in_c, kh, kw, p["align_c"], groups)
+    weight_full = _dense_weight_for_csc(weight_nchw, in_c, logical_out_c, kh, kw, groups)
+    wt_flat = pack_conv_weights_for_shape(weight_full, logical_out_c, in_c, kh, kw, p["align_c"], groups)
     wt_ptr = ctypes.addressof(ctypes.c_char.from_buffer(weight_map))
     ctypes.memmove(wt_ptr, wt_flat.ctypes.data, wt_flat.nbytes)
 
@@ -1056,9 +1003,11 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
                         block_input_flat = block_input_flat.tolist()
                         ct_inputs = (ctypes.c_uint16 * len(block_input_flat)).from_buffer(input_map)
                         ct_inputs[:] = block_input_flat
-                        block_weight_full = np.zeros((hw_ch_tile, hw_ch_tile, kh, kw), dtype=np.float16)
+                        block_weight_nchw = np.zeros((hw_ch_tile, 1, kh, kw), dtype=np.float16)
                         for local_c in range(ch_tile):
-                            block_weight_full[local_c, local_c] = weight_nchw[ch_start + local_c, 0]
+                            block_weight_nchw[local_c, 0] = weight_nchw[ch_start + local_c, 0]
+                        block_weight_full = _dense_weight_for_csc(
+                            block_weight_nchw, hw_ch_tile, hw_ch_tile, kh, kw, hw_ch_tile)
                         block_weight_flat = pack_conv_weights_for_shape(block_weight_full, hw_ch_tile, hw_ch_tile, kh, kw, block_p["align_c"], hw_ch_tile)
                         ctypes.memmove(wt_ptr, block_weight_flat.ctypes.data, block_weight_flat.nbytes)
                         ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_mem_create.size)
@@ -1194,6 +1143,7 @@ def load_conv_legacy_shapes():
 
 if __name__ == "__main__":
     out_fp16 = "--out" in sys.argv and sys.argv[sys.argv.index("--out") + 1] == "fp16"
+    keep_going = "--keep-going" in sys.argv
     shapes = load_conv_legacy_shapes()
     name_width = max(len(s["name"]) for s in shapes)
     in_shape_width = max(len(f"{s['in_c']}x{s['in_h']}x{s['in_w']}") for s in shapes)
@@ -1209,7 +1159,6 @@ if __name__ == "__main__":
             expected = expected.astype(np.float16)
         md = float(np.max(np.abs(result.astype(np.float64) - expected)))
         ok = np.allclose(result, expected, atol=0.2) and not np.any(np.isinf(result))
-        assert ok, f"{s["name"]} failed"
         out_h = in_h - kh + 1
         out_w = in_w - kw + 1
         in_shape = f"{in_c}x{in_h}x{in_w}"
@@ -1217,5 +1166,7 @@ if __name__ == "__main__":
         print(f"  {name:<{name_width}s} {in_shape:<{in_shape_width}s} -> {out_shape:<{out_shape_width}s} kh={kh} kw={kw} g={groups} out={'fp16' if out_fp16 else 'fp32'}  {'PASS' if ok else 'FAIL'}  (max_diff={md:.4f})")
         if not ok:
             failed += 1
+            if not keep_going:
+                raise AssertionError(f"{s["name"]} failed")
     print(f"\nsimple_conv_fp16 matrix: {'ALL PASS' if failed == 0 else f'{failed} FAILURES'}")
     os.close(fd)
