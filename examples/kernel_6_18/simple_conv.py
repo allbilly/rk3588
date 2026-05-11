@@ -359,6 +359,53 @@ def calc_weights_banks(weights_width, weights_height, input_channels, output_cha
         bytes_ *= output_channels
     return _ceil_div(_ceil_div(bytes_, CBUF_ENTRY_SIZE), CBUF_ENTRIES_PER_BANK) + 1
 
+def split_tasks():
+    entries_per_slice = calc_entries_per_slice(input_width, input_channels)
+    input_banks_required = calc_input_banks(input_width, input_height, input_channels)
+    weights_banks_required = calc_weights_banks(weights_width, weights_height, input_channels, output_channels)
+    available_input_banks = CBUF_BANKS - weights_banks_required
+    available_weights_banks = weights_banks_required
+
+    if input_banks_required <= available_input_banks:
+        return [dict(input_height=input_height, output_height=output_height,
+                     input_offset=0, output_offset=0, input_banks=input_banks_required,
+                     weight_banks=CBUF_BANKS - input_banks_required)]
+
+    if weights_banks_required + 1 >= CBUF_BANKS:
+        available_input_banks = 7
+        available_weights_banks = CBUF_BANKS - available_input_banks
+
+    available_slices = (CBUF_ENTRIES_PER_BANK * available_input_banks) // entries_per_slice
+    slices = [dict(top_slice=0, bottom_slice=available_slices - 1)]
+    s = weights_height - 1
+    while s < input_height:
+        prev = slices[-1]
+        while s <= prev["bottom_slice"]:
+            s += 1
+        if s > prev["bottom_slice"]:
+            s -= 1
+        top_slice = min(s, prev["bottom_slice"]) - (weights_height - 1) + 1
+        bottom_slice = top_slice + available_slices - 1
+        if bottom_slice >= input_height - 1:
+            slices.append(dict(top_slice=top_slice, bottom_slice=input_height - 1))
+            break
+        s = top_slice + weights_height - 1
+        slices.append(dict(top_slice=top_slice, bottom_slice=bottom_slice))
+
+    output_height_processed = 0
+    tasks_out = []
+    for sl in slices:
+        task_input_height = min(sl["bottom_slice"], input_height - 1) - sl["top_slice"] + 1
+        if task_input_height < weights_height:
+            continue
+        task_output_height = task_input_height - weights_height + 1
+        tasks_out.append(dict(input_height=task_input_height, output_height=task_output_height,
+                              input_offset=calc_line_stride(input_width) * sl["top_slice"],
+                              output_offset=calc_line_stride(output_width) * output_height_processed,
+                              input_banks=available_input_banks, weight_banks=available_weights_banks))
+        output_height_processed += task_output_height
+    return tasks_out
+
 def pack_input(input_nhwc):
     raw = np.zeros(calc_input_size(input_width, input_height, input_channels), dtype=np.uint8)
     if input_channels == 1:
@@ -422,7 +469,7 @@ def pack_biases(biases, weight_ohwi):
         packed[oc] = int(biases[oc]) - correction
     return packed
 
-def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
+def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma, task=None):
     input_width_real = globals()["input_width"]
     input_channels_real = globals()["input_channels"]
     output_channels_real = globals()["output_channels"]
@@ -434,6 +481,10 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
         output_channels *= 2
     if depthwise:
         output_channels = _align(output_channels, 64)
+    task_input_height = task["input_height"] if task is not None else input_height
+    task_output_height = task["output_height"] if task is not None else output_height
+    task_input_offset = task["input_offset"] if task is not None else 0
+    task_output_offset = task["output_offset"] if task is not None else 0
     output_surface_stride = calc_line_stride(output_width) * output_height // FEATURE_ATOMIC_SIZE
     
     input_width = input_width_real
@@ -442,25 +493,29 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
     if input_channels_real == 1 and (output_channels_real > 1 or ADDITION_INPUT or ADD_TENSOR != -1):
         input_width = max(input_width_real, FEATURE_ATOMIC_SIZE)
         input_line_stride = max(calc_line_stride(input_width_real) // FEATURE_ATOMIC_SIZE, FEATURE_ATOMIC_SIZE)
-        input_surface_stride = input_line_stride * (input_height - 1)
+        input_surface_stride = input_line_stride * (task_input_height - 1)
         if input_channels == 32 and op.input_width == 80:
             input_line_stride *= 4
-            input_surface_stride = int(input_line_stride * (input_height / 4 - 1))
+            input_surface_stride = int(input_line_stride * (task_input_height / 4 - 1))
         else:
-            input_surface_stride = int(input_line_stride * (input_height - 1))
+            input_surface_stride = int(input_line_stride * (task_input_height - 1))
     if input_width == 8 and (ADDITION_INPUT or ADD_TENSOR != -1):
         input_line_stride //= 2
         input_surface_stride = 112
     
     weights_kernels = 1 if depthwise else _align(output_channels_real, 2)
-    input_banks_required = calc_input_banks(input_width_real, input_height, input_channels_real)
-    weights_banks_required = calc_weights_banks(weights_width, weights_height, input_channels_real, output_channels_real)
-    input_banks = input_banks_required
-    weight_banks = CBUF_BANKS - input_banks
-    if input_banks_required + weights_banks_required > CBUF_BANKS:
-        input_banks = 7
+    if task is None:
+        input_banks_required = calc_input_banks(input_width_real, input_height, input_channels_real)
+        weights_banks_required = calc_weights_banks(weights_width, weights_height, input_channels_real, output_channels_real)
+        input_banks = input_banks_required
         weight_banks = CBUF_BANKS - input_banks
-    atomic_count = output_width * output_height
+        if input_banks_required + weights_banks_required > CBUF_BANKS:
+            input_banks = 7
+            weight_banks = CBUF_BANKS - input_banks
+    else:
+        input_banks = task["input_banks"]
+        weight_banks = task["weight_banks"]
+    atomic_count = output_width * task_output_height
     surfaces_per_row = output_width * output_height * 2
     if depthwise:
         surfaces_per_row *= 2
@@ -476,7 +531,7 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
         trunc = 15 if ADDITION_INPUT or ADD_TENSOR != -1 else 14
 
     if input_channels_real == 1:
-        input_data_entries = input_width * input_height
+        input_data_entries = input_width * task_input_height
     elif input_width == 40 and input_channels_real == 40:
         input_data_entries = 40
     else:
@@ -500,7 +555,7 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
           (3 if depthwise else 0)),                                     # CNA_CONV_CON1
         E(reg.TARGET_CNA, reg.CNA_CONV_CON2, (50 + 1 + 1) << 4),        # FEATURE_GRAINS
         E(reg.TARGET_CNA, reg.CNA_CONV_CON3, (1 << 3) | 1),             # stride Y/X
-        E(reg.TARGET_CNA, reg.CNA_DATA_SIZE0, (input_width << 16) | input_height),
+        E(reg.TARGET_CNA, reg.CNA_DATA_SIZE0, (input_width << 16) | task_input_height),
         E(reg.TARGET_CNA, reg.CNA_DATA_SIZE1, ((input_channels_real - 1) << 16) | input_channels),
         E(reg.TARGET_CNA, reg.CNA_DATA_SIZE2, output_width),
         E(reg.TARGET_CNA, reg.CNA_DATA_SIZE3, atomic_count),
@@ -518,26 +573,26 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
         E(reg.TARGET_CNA, reg.CNA_CVT_CON3, (scale << 16) | coff),
         E(reg.TARGET_CNA, reg.CNA_CVT_CON4, (scale << 16) | coff),
         E(reg.TARGET_CNA, reg.CNA_PAD_CON0, 0),
-        E(reg.TARGET_CNA, reg.CNA_FEATURE_DATA_ADDR, input_dma & 0xFFFFFFFF),
+        E(reg.TARGET_CNA, reg.CNA_FEATURE_DATA_ADDR, (input_dma + task_input_offset) & 0xFFFFFFFF),
         E(reg.TARGET_CNA, reg.CNA_DMA_CON0, (15 << 16) | 15),
         E(reg.TARGET_CNA, reg.CNA_DMA_CON1, input_line_stride),
         E(reg.TARGET_CNA, reg.CNA_DMA_CON2, input_surface_stride),
-        E(reg.TARGET_CNA, reg.CNA_FC_DATA_SIZE0, (input_width_real << 16) | input_height),
+        E(reg.TARGET_CNA, reg.CNA_FC_DATA_SIZE0, (input_width_real << 16) | task_input_height),
         E(reg.TARGET_CNA, reg.CNA_FC_DATA_SIZE1, input_channels),
         E(reg.TARGET_CNA, reg.CNA_DCOMP_ADDR0, weight_dma & 0xFFFFFFFF),
         E(reg.TARGET_CNA, reg.CNA_CVT_CON5, 0xffff if input_channels_real == 1 else 0),
         E(reg.TARGET_CNA, reg.CNA_PAD_CON1, pad_con1),
         E(reg.TARGET_CORE, reg.CORE_MISC_CFG, 1 | (2 if depthwise else 0)), # QD_EN, DW_EN
-        E(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_0, ((output_height - 1) << 16) | (output_width - 1)),
+        E(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_0, ((task_output_height - 1) << 16) | (output_width - 1)),
         E(reg.TARGET_CORE, reg.CORE_DATAOUT_SIZE_1, output_channels - 1),
         E(reg.TARGET_CORE, reg.CORE_CLIP_TRUNCATE, 0),
         E(reg.TARGET_CORE, reg.CORE_RESERVED_3030, 0),
         E(reg.TARGET_DPU, reg.FEATURE_MODE_CFG, (15 << 5) | ((3 if depthwise else 0) << 3) | (2 << 1)),  # burst len, output mode
         E(reg.TARGET_DPU, reg.DATA_FORMAT, 0),
-        E(reg.TARGET_DPU, reg.DST_BASE_ADDR, output_dma & 0xFFFFFFFF),
+        E(reg.TARGET_DPU, reg.DST_BASE_ADDR, (output_dma + task_output_offset) & 0xFFFFFFFF),
         E(reg.TARGET_DPU, reg.DST_SURF_STRIDE, output_surface_stride << 4),
         E(reg.TARGET_DPU, reg.DATA_CUBE_WIDTH, output_width - 1),
-        E(reg.TARGET_DPU, reg.DATA_CUBE_HEIGHT, output_height - 1),
+        E(reg.TARGET_DPU, reg.DATA_CUBE_HEIGHT, task_output_height - 1),
         E(reg.TARGET_DPU, reg.DATA_CUBE_NOTCH, 0),
         E(reg.TARGET_DPU, reg.DATA_CUBE_CHANNEL, ((output_channels_real - 1) << 16) | (output_channels - 1)),
         E(reg.TARGET_DPU, reg.BS_CFG, (2 << 16) | (1 << 8) | (1 << 6) | (1 << 4)),
@@ -548,7 +603,7 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
           ((3 if depthwise else 1) << 8) | ((3 if depthwise else 1) << 5) | ((3 if depthwise else 1) << 2)),
         E(reg.TARGET_DPU, reg.BS_OW_OP, 0x80 - WEIGHT_ZERO_POINT),
         E(reg.TARGET_DPU, reg.WDMA_SIZE_0, output_channels - 1),
-        E(reg.TARGET_DPU, reg.WDMA_SIZE_1, ((output_height - 1) << 16) | (output_width - 1)),
+        E(reg.TARGET_DPU, reg.WDMA_SIZE_1, ((task_output_height - 1) << 16) | (output_width - 1)),
         E(reg.TARGET_DPU, reg.BN_CFG, (1 << 6) | (1 << 4) | (1 << 1) | 1),
         E(reg.TARGET_DPU, reg.EW_CFG, (1 << 9) | (1 << 8) | (1 << 7) | (1 << 1) | 1),
         E(reg.TARGET_DPU, reg.EW_CVT_SCALE_VALUE, 1),
@@ -557,7 +612,7 @@ def build_conv_regs(input_dma, weight_dma, bias_dma, output_dma):
         E(reg.TARGET_DPU, reg.OUT_CVT_SHIFT, shift - 1),
         E(reg.TARGET_DPU, reg.SURFACE_ADD, surfaces_per_row << 4),
         E(reg.TARGET_RDMA, reg.RDMA_DATA_CUBE_WIDTH, output_width - 1),
-        E(reg.TARGET_RDMA, reg.RDMA_DATA_CUBE_HEIGHT, output_height - 1),
+        E(reg.TARGET_RDMA, reg.RDMA_DATA_CUBE_HEIGHT, task_output_height - 1),
         E(reg.TARGET_RDMA, reg.RDMA_DATA_CUBE_CHANNEL, output_channels - 1),
         E(reg.TARGET_RDMA, reg.RDMA_BRDMA_CFG, 1 << 1),
         E(reg.TARGET_RDMA, reg.RDMA_BS_BASE_ADDR, bias_dma & 0xFFFFFFFF),
@@ -726,31 +781,32 @@ def run_conv2d_shape(input_nhwc, weight_ohwi, biases):
     if (weights_width != 1 or weights_height != 1) and input_channels <= 3:
         return run_conv2d_im2col(input_nhwc, weight_ohwi, biases)
 
-    npu_regs = build_conv_regs(input_mem_create.dma_addr, weight_mem_create.dma_addr, bias_mem_create.dma_addr, output_mem_create.dma_addr)
-    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), 0, task_map.size())
-    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), 0, regcmd_map.size())
-    for i, qword in enumerate(npu_regs):
-        regcmd[i] = qword
-
     write_buffers(input_nhwc, weight_ohwi, biases)
 
-    tasks[0].flags  = 0;
-    tasks[0].op_idx = 1;
-    tasks[0].enable_mask = 0xd;
-    tasks[0].int_mask = 0x300;
-    tasks[0].int_clear = 0x1ffff;
-    tasks[0].int_status = 0;
-    tasks[0].regcfg_amount = len(npu_regs)
-    tasks[0].regcfg_offset = 0;
-    tasks[0].regcmd_addr = regcmd_mem_create.dma_addr
+    for task in split_tasks():
+        npu_regs = build_conv_regs(input_mem_create.dma_addr, weight_mem_create.dma_addr, bias_mem_create.dma_addr, output_mem_create.dma_addr, task)
+        ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), 0, task_map.size())
+        ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), 0, regcmd_map.size())
+        for i, qword in enumerate(npu_regs):
+            regcmd[i] = qword
 
-    for bo in (regcmd_mem_create, input_mem_create, weight_mem_create, bias_mem_create, output_mem_create):
-        ioctl(fd, DRM_IOCTL_ROCKET_FINI_BO, drm_rocket_fini_bo(handle=bo.handle))
-    ret = rocket_submit(fd, tasks, 1,
-        in_bos=[input_mem_create, regcmd_mem_create, weight_mem_create, bias_mem_create],
-        out_bos=[output_mem_create])
-    ioctl(fd, DRM_IOCTL_ROCKET_PREP_BO, drm_rocket_prep_bo(handle=output_mem_create.handle, timeout_ns=time.monotonic_ns() + 6000000000))
-    print(f"SUBMIT ret={ret}")
+        tasks[0].flags  = 0;
+        tasks[0].op_idx = 1;
+        tasks[0].enable_mask = 0xd;
+        tasks[0].int_mask = 0x300;
+        tasks[0].int_clear = 0x1ffff;
+        tasks[0].int_status = 0;
+        tasks[0].regcfg_amount = len(npu_regs)
+        tasks[0].regcfg_offset = 0;
+        tasks[0].regcmd_addr = regcmd_mem_create.dma_addr
+
+        for bo in (regcmd_mem_create, input_mem_create, weight_mem_create, bias_mem_create, output_mem_create):
+            ioctl(fd, DRM_IOCTL_ROCKET_FINI_BO, drm_rocket_fini_bo(handle=bo.handle))
+        ret = rocket_submit(fd, tasks, 1,
+            in_bos=[input_mem_create, regcmd_mem_create, weight_mem_create, bias_mem_create],
+            out_bos=[output_mem_create])
+        ioctl(fd, DRM_IOCTL_ROCKET_PREP_BO, drm_rocket_prep_bo(handle=output_mem_create.handle, timeout_ns=time.monotonic_ns() + 6000000000))
+        print(f"SUBMIT ret={ret}")
 
     return read_output()
 
@@ -784,6 +840,7 @@ if __name__ == "__main__":
         passed += 1 if ok else 0
         failed += 0 if ok else 1
         print(f"{'PASS' if ok else 'FAIL'} (max_diff={diff})")
+        assert ok, f"{shape['name']} failed (max_diff={diff})"
 
     print(f"conv_legacy-derived simple_conv matrix: {passed} PASS, {failed} FAIL, {skipped} SKIP")
     os.close(fd)
