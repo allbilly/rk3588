@@ -11,6 +11,7 @@ To prove the card userfule, or testing if NPU state is corruptued/polluted
 - or `python examples/kerenl_6_18/simple_add.py` if you are on kerenl 6.18 
 
 Use `deepwiki_ask_question` on these repos:
+- `nvdla/doc` — Detailed nvdla documentation
 - `nvdla/hw` — For C-model behavior (cmod/), register definitions, convolution pipeline details, weight/activation data flow. This is the **canonical hardware reference**. Key files:
   - `cmod/csc/NV_NVDLA_csc.cpp` — Convolution stream controller (data sequencing, Winograd)
   - `cmod/cmac/NV_NVDLA_cmac.cpp` — MAC array (weight loading, calculation)
