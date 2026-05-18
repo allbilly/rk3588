@@ -1311,11 +1311,63 @@ int update_pair_record(ctx, PairRecord *record, uint32_t value)
 }
 ```
 
+Focused helper recheck:
+
+- `fcn.002efd38` computes a command-vector slot from fields under `ctx+0x288`
+  and the caller-provided `index * 8`. It returns `-1` if the slot is the
+  invalid sentinel; otherwise it patches the encoded 64-bit entry and sets
+  `ctx+0x11 = 1`.
+- `fcn.002efce0` takes a two-pointer payload record. It optionally writes the
+  value to the first pointer's side integer at `+4`, requires the second pointer
+  to be non-null, then patches the encoded entry at the second pointer and sets
+  `ctx+0x11 = 1`.
+- `fcn.00100a40` is exactly `bfi x0, x1, #16, #32; ret`, so both helper paths
+  mutate only the middle 32-bit value field of an already encoded command.
+
 The important consequence is that RKNN reuse update is not equivalent to one
 visible `CNA_CBUF_CON0_WEIGHT_REUSE` bit. It patches selected pre-existing
 register commands through tile-list metadata. The remaining reverse task is to
 name which indexed register entries these vectors point to for each split
 family.
+
+Next route for naming those entries:
+
+- Hook or breakpoint `fcn.002efd38` and `fcn.002efce0` while running an RKNN
+  model that triggers the F2 ChannelTile path.
+- For each helper call, log the caller PC, helper value, command-vector index
+  or pair-record pointer, old encoded command, and new encoded command.
+- Decode old/new commands as the local Python driver does:
+  `target = entry >> 48`, `reg = entry & 0xffff`,
+  `value = (entry >> 16) & 0xffffffff`.
+- Compare the patched `(target, reg)` pairs against the Python register names
+  for CNA/DPU/PC. Static analysis has identified the patch mechanics, but a
+  runtime trace is the direct path to naming the semantic register destinations
+  for ChannelTile reuse/group state.
+
+Minimal GDB-style trace recipe:
+
+- Find the loaded `librknnrt.so` base in `/proc/<pid>/maps`; the helper offsets
+  are `0x002efd38`, `0x002efce0`, and `0x00100a40`.
+- Break at `base+0x002efd38`; log `x0`, `w1`, `w2`, `lr`, and the old/new
+  command at the computed vector slot.
+- Break at `base+0x002efce0`; log `x0`, `x1`, `w2`, `lr`, `pair_record[0]`,
+  `pair_record[1]`, and old/new `*pair_record[1]`.
+- Decode commands as `target = entry >> 48`, `reg = entry & 0xffff`,
+  `value = (entry >> 16) & 0xffffffff`. The `(target, reg)` pair is the missing
+  semantic destination.
+- A read-only local template for this trace now exists at
+  `experimental/trace_librknnrt_reuse.gdb`. It follows the same embedded-GDB-
+  Python style as `experimental/capture_rknpu_submit.gdb` and logs the two reuse
+  helper entry states. This host is not expected to run official RKNN or the
+  vendor rknpu stack; treat this as a later user-run experiment on a suitable
+  environment with an RKNN conv model that actually triggers the F2 ChannelTile
+  path.
+- Static TRM comparison candidates for that trace are now documented in
+  `conv_tile_result_and_cleanup_plan.md`: CNA/CORE/DPU/RDMA `S_POINTER`,
+  `CNA_CONV_CON2`, `CNA_CBUF_CON0`, `CNA_FEATURE_DATA_ADDR`,
+  `CNA_DCOMP_ADDR0`, `CNA_WEIGHT_SIZE*`, and `CNA_DCOMP_AMOUNT*`. These are not
+  proven RKNN destinations; they are the local register names to compare against
+  decoded `(target, reg)` trace output.
 
 Pseudo-code:
 
@@ -1610,6 +1662,7 @@ Prompt-to-artifact checklist:
 | Include bank/data estimators used by those predicates | `fcn.00384ed0`, `fcn.00387530`, `fcn.00383338`, `fcn.003873e8`, and selector-helper sections are documented. |
 | Include non-ChannelTile conv tiling functions | `fcn.005d4ac0`, `fcn.005f38f0`, and `fcn.005f51c0` now have planner pseudo-code and call/xref evidence. |
 | Include reuse/bank validation around the tile records | `fcn.00307198`, `fcn.00312328`, `fcn.005c6b50`, and `fcn.005f1cd0` sections document reuse updates, bank checks, and tile-table output. |
+| Identify remaining ChannelTile reuse/register gap | Reuse helper sections document patch mechanics and the runtime-trace route for `fcn.002efd38` / `fcn.002efce0`; `experimental/trace_librknnrt_reuse.gdb` is the local read-only template for that trace. The concrete typed-payload to `(target, reg)` destination mapping is still not known until a true F2 ChannelTile workload is traced. |
 | Cover all useful tiling strings found from the binary | The "Related tiling-string xrefs" table maps `min_weight_banks`, `MC K Tile Failed`, `failed to tile argb`, `illegal tiling method`, `X tile buffer overflow`, `Generate Y config crash`, `Illegal mc Y/K type`, reuse, bank, and tile-table strings to functions. |
 | Exclude non-tiling plumbing | The function inventory explicitly excludes stream/logging, allocation, memory copy, and STL vector plumbing. |
 
@@ -1635,3 +1688,10 @@ coverage is complete for the conv tiling functions discovered by the tiling
 string/xref pass. The remaining callees in the planner callgraphs are generic
 math/vector/allocation helpers with no tiling strings of their own, so they are
 treated as plumbing rather than separate conv tiling functions.
+
+Residual blocker for `conv_new_clean.py` strategy collapse: the binary notes now
+show how reuse updates patch encoded command values, but not which concrete
+CNA/DPU/PC register entries are patched for a true F2 ChannelTile workload. That
+requires the runtime helper trace described above before Python can safely
+replace software-stitched OC/im2col fallbacks with chained RKNN-style
+ChannelTile.
