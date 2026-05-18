@@ -1,13 +1,13 @@
 # librknnrt.so Conv ChannelTile decompilation
 
-Source binary: `ref/rknn/librknnrt.so`
+Source binary: `experimental/rknn/librknnrt.so`
 
 Command style used:
 
 ```sh
-rabin2 -zz ref/rknn/librknnrt.so | rg 'min_weight_banks|ChannelTile'
-r2 -q -e scr.color=false -e bin.relocs.apply=true -c 'aaa' -c 'axt @ 0x60f388' -c q ref/rknn/librknnrt.so
-r2 -q -e scr.color=false -e bin.relocs.apply=true -c aa -c 's 0x00387e3c' -c af -c pdf -c q ref/rknn/librknnrt.so
+rabin2 -zz experimental/rknn/librknnrt.so | rg 'min_weight_banks|ChannelTile'
+r2 -q -e scr.color=false -e bin.relocs.apply=true -c 'aaa' -c 'axt @ 0x60f388' -c q experimental/rknn/librknnrt.so
+r2 -q -e scr.color=false -e bin.relocs.apply=true -c aa -c 's 0x00387e3c' -c af -c pdf -c q experimental/rknn/librknnrt.so
 ```
 
 ## Target string and xrefs
@@ -56,20 +56,55 @@ diagnostic helpers. These are the useful xrefs:
 | `0x0062cc90` | `Invalid reuse strategy!` | `fcn.005c6b50` | Same workload config validator. |
 | `0x0062ce00` | `Conv min_weight_banks > 3, OutputName : %s` | `fcn.005d4ac0` | Layer-level conv tiler. This is the broader function that builds split/Y/K tile records and logs when a conv crosses the F2-style weight-bank threshold. |
 | `0x0062ce50` | `MC K Tile Failed, min kernel step %d, but get %d` | `fcn.005d4ac0` | Same layer-level conv tiler; reports failed multi-core K/kernel tiling. |
+| `0x0062ce30` | `failed to tile argb mode layer!` | `fcn.005d4ac0` | Same layer-level conv tiler; ARGB-mode tile generation failure path. |
 | `0x0062cf58` | `Unknown split Method -> %d` | `fcn.005f1998` | Abort helper for invalid split-method enum. |
 | `0x0062cf78` | tile-table header with `xstart`, `ystart`, `kstart`, `data reuse`, `weight reuse`, `mc_treat_by_*` | `fcn.005f1cd0` | Tile-table dump/formatter. Shows the actual per-tile fields RKNN uses after planning. |
-| `0x0062d040` | `illegal tiling method %d` | `fcn.005f38f0` | Fatal diagnostic for illegal tiling method. |
-| `0x0062d298` | `X tile buffer overflow!` | `fcn.005f51c0` | Fatal diagnostic for input-width/X tile overflow. |
+| `0x0062d040` | `illegal tiling method %d` | `fcn.005f38f0` | Conv K/X split composer. Emits fatal diagnostics when a split method cannot be represented. |
+| `0x0062d298` | `X tile buffer overflow!` | `fcn.005f51c0` | Top-level conv Y/K/multicore tiler. Builds nested tile vectors and emits X/Y/MC diagnostics. |
+| `0x0062d508` | `Generate Y config crash!` | `fcn.005f51c0` | Same top-level conv tiler; reports failed Y tile configuration. |
+| `0x0062d7b8` | `Illegal mc Y type` | `fcn.005f51c0` | Same top-level conv tiler; validates multi-core Y treatment. |
+| `0x0062d8e8` | `Illegal mc K type` | `fcn.005f51c0` | Same top-level conv tiler; validates multi-core K treatment. |
 
 The important separation is:
 
 - `fcn.00387e3c` and `fcn.00388a18` answer: should this conv switch to
   ChannelTile because bank pressure is too high?
-- `fcn.005d4ac0` answers: after a conv is being tiled, how are Y/K split
-  records chosen and checked?
+- `fcn.005d4ac0`, `fcn.005f38f0`, and `fcn.005f51c0` answer: after a
+  conv is being tiled, how are Y/K/X split records chosen, checked, nested,
+  and mapped to multi-core treatment?
 - `fcn.00307198`, `fcn.00312328`, `fcn.005c6b50`, and `fcn.005f1cd0` answer:
   how are data/weight reuse flags, bank counts, and tile records validated or
   printed?
+
+## Function inventory
+
+The stripped binary does not expose useful C++ names for the compiler internals,
+so the coverage set below is built from `rabin2 -zz` string xrefs and direct
+callee inspection around the conv tiling cluster. These are the functions that
+participate in conv tiling rather than generic logging, allocation, or vector
+bookkeeping:
+
+| Function | Size | Role | Decompilation status |
+| --- | ---: | --- | --- |
+| `fcn.00387e3c` | `1436` | Main ChannelTile predicate. Computes candidate channel/K tile, minimum data tile, minimum weight banks, then checks target thresholds. | Full pseudo-code below. |
+| `fcn.00388a18` | `1248` | Fixed-16 sibling ChannelTile predicate. Same threshold table with a narrower candidate setup. | Full pseudo-code below. |
+| `fcn.00384ed0` | `628` | Minimum weight-bank estimator used by both ChannelTile predicates and planner paths. | Full pseudo-code below. |
+| `fcn.00387530` | not separately sized in this note | Base tile-shape selector. Chooses atomic count/step pair from shape vectors and target limits. | Full pseudo-code below. |
+| `fcn.00383338` | not separately sized in this note | Minimum data-tile estimator. Converts spatial span and aligned channel count into CBUF data pressure. | Full pseudo-code below. |
+| `fcn.003873e8` | not separately sized in this note | Channel tile clamp/tuner. Rounds requested channel tiles and halves until legal. | Full pseudo-code below. |
+| `fcn.00385988` | `224` | Weight/K split feasibility helper. Converts spare banks and K groups into a legal K step or `-1`. | Full pseudo-code below. |
+| `fcn.00384ba0`, `fcn.00384d48`, `fcn.00389078`, `fcn.000e1100`, `fcn.000f4758` | small | Atomic-width limit selectors used by the estimators/tuners. | Selector pseudo-code below. |
+| `fcn.005d4ac0` | `11792` | Layer-level conv split planner. Builds Y/K tile records and logs F2 `min_weight_banks > 3`. | High-level pseudo-code below. |
+| `fcn.005f38f0` | `6344` | K/X split composer used from `fcn.005f51c0`. Produces per-split vectors and rejects illegal tiling methods. | High-level pseudo-code below. |
+| `fcn.005f51c0` | `18488` | Top-level conv Y/K/multicore tiler. Calls `fcn.005f38f0`, validates X/Y/MC split state, builds nested vectors. | High-level pseudo-code below. |
+| `fcn.00307198`, `fcn.00312328` | not separately sized in this note | Data/weight reuse update passes over finished tile lists. | Shared pseudo-code below. |
+| `fcn.005c6b50` | not separately sized in this note | Workload bank/reuse field validator and register-task config helper. | Relevant checks below. |
+| `fcn.005f1cd0` | not separately sized in this note | Tile-table dump helper for `xstart`, `ystart`, `kstart`, reuse, and MC fields. | Formatter pseudo-code below. |
+| `fcn.005f1998` | not separately sized in this note | Invalid split-method abort helper. | Small pseudo-code below. |
+
+Functions such as `fcn.000ff6e0`, `fcn.000dae38`, `fcn.000dfbd0`,
+`operator new/delete`, `memcpy`, `memmove`, and vector constructors/destructors
+appear in these functions but are plumbing, not conv tiling logic.
 
 ## Target tags
 
@@ -639,6 +674,68 @@ int tune_channel_tile(
 }
 ```
 
+## fcn.00385988: compute legal K/weight split step
+
+This helper is called from the layer-level planner paths before the
+`MC K Tile Failed` diagnostic:
+
+```text
+0x005d7178 call 0x00385988
+0x005f4bf4 call 0x00385988
+```
+
+It combines the selected bank budget, target bank granularity, and requested K
+work into a legal K step. The helper returns `-1` when the required split is
+below the minimum representable step.
+
+Inputs inferred from instruction use:
+
+```text
+x0 ctx
+w1 available_or_requested_k_units
+w2 divisor/spatial_or_group_scale
+w3 forced_units; if non-zero, atomic_step = forced_units * 8, else 4
+```
+
+Pseudo-code:
+
+```c
+int compute_legal_k_split_step(ConvTileCtx *ctx,
+                               int requested_units,
+                               int divisor,
+                               int forced_units)
+{
+    int atomic_step = forced_units ? forced_units * 8 : 4;
+
+    // Convert available bank units into the same scale used by the B-limit
+    // table. ctx->bank_granularity is +0x64; the following word is the
+    // hardware atomic value used by other estimators.
+    int scaled = ctx->bank_granularity * ctx->atomic_c_hw;
+    scaled = (scaled * requested_units) / divisor;
+
+    int limit = pick_limit_b_by_atomic(ctx, atomic_step, 0);
+
+    if (scaled >= limit) {
+        int groups = scaled / limit;
+        return groups * limit;
+    }
+
+    if (limit < scaled * 2) {
+        // The request fits only as a half-limit chunk. This is the branch that
+        // lets the planner repair K split sizes without dropping below the
+        // hardware minimum.
+        return (scaled / (limit / 2)) * (limit / 2);
+    }
+
+    return -1;
+}
+```
+
+In the large tilers this function is the bridge between a high-level K/output
+channel split request and the target's atomic-width limit table. A negative
+return is treated as an illegal or failed K tile and eventually reaches the MC K
+failure logging path.
+
 ## Small selector helpers
 
 ### fcn.00384ba0
@@ -852,7 +949,272 @@ the experiment result: simple per-submit OC slicing works for the small proxy,
 but the real `160->320 3x3` overflow likely needs the extra reuse/group
 programming from this layer-level planner.
 
+## fcn.005f38f0: K/X split vector composer
+
+This function is reached from `fcn.005f51c0`:
+
+```text
+0x005f5d54 call 0x005f38f0
+```
+
+It is also the xref owner for the fatal `illegal tiling method` diagnostic at
+`0x0062d040`. The function consumes candidate shape vectors, target limits, and
+multi-core mode flags, then emits split vectors used by the outer tiler. It is
+not a register emitter; it is a planner-side vector builder.
+
+Important calls and checks:
+
+```text
+0x005f3c08 call 0x00383338  ; data-tile pressure estimate
+0x005f4bf4 call 0x00385988  ; K split feasibility/repair helper
+0x005f4e0c log+abort        ; illegal tiling method
+0x005f5018 log path         ; extended layer-shape diagnostic
+```
+
+Pseudo-code:
+
+```c
+bool compose_kx_split_vectors(
+    ConvTileCtx *ctx,
+    ShapeVec *input_shape,
+    ShapeVec *kernel_shape,
+    vector<vector<int>> *out_split_vectors,
+    vector<vector<bool>> *out_reuse_masks,
+    int mc_y_type,
+    int mc_k_type,
+    int split_method,
+    TileLimits limits,
+    TileAttrs attrs)
+{
+    Shape4 in = normalize_shape4(input_shape);
+    Shape4 kernel = normalize_shape4(kernel_shape);
+
+    int y_span = input_span_for_candidate(in, attrs);
+    int data_need = estimate_min_data_tile(ctx, y_span,
+                                           attrs.aligned_channels,
+                                           attrs.atomic_step);
+
+    int bank_room_for_k = attrs.total_banks - data_need;
+    int k_step = compute_legal_k_split_step(ctx,
+                                            bank_room_for_k,
+                                            attrs.k_divisor,
+                                            attrs.forced_units);
+
+    if (k_step <= 0)
+        return false;
+
+    switch (split_method) {
+    case SPLIT_NONE:
+        append_single_tile(out_split_vectors, in, kernel);
+        break;
+    case SPLIT_BY_Y:
+        append_y_tiles(out_split_vectors, in, kernel, limits.y_step);
+        break;
+    case SPLIT_BY_K:
+        append_k_tiles(out_split_vectors, in, kernel, k_step);
+        break;
+    case SPLIT_BY_Y_AND_K:
+        append_yk_tiles(out_split_vectors, in, kernel, limits.y_step, k_step);
+        break;
+    default:
+        log("Failed to config layer: '%s', illegal tiling method %d", ...);
+        abort();
+    }
+
+    build_reuse_masks_for_adjacent_tiles(out_reuse_masks, *out_split_vectors,
+                                         mc_y_type, mc_k_type);
+    return true;
+}
+```
+
+This is one of the missing "not just ChannelTile" functions. It handles the
+generic Y/K/X split vector construction used by the top-level conv tiler. The
+specific split-method enum values are inferred from branch shape rather than
+symbol names, but the behavior is clear: choose a split method, build vectors,
+and reject impossible methods before register-task configuration.
+
+### Focused split-vector pass
+
+The `fcn.005f51c0` caller reaches this function at `0x005f5d54`. Immediately
+before the call it prepares stack-backed vector outputs at `x29+0x4a8`,
+`x29+0x4c0`, and `x29+0x4d8`, plus two byte result flags at `x29+0x31e` and
+`x29+0x31f`. This supports treating `fcn.005f38f0` as a tile-table composer,
+not a direct register emitter.
+
+Inside `fcn.005f38f0`, the repeated builder blocks around `0x005f4154` and
+`0x005f4d5c` use three important stack slots:
+
+| Stack slot | Current interpretation | Evidence |
+| --- | --- | --- |
+| `[x29+0x1188]` | Tiling-method value for this composer pass. | Loaded before comparisons with `3` and `2`; later loaded into the fatal `illegal tiling method %d` formatter at `0x005f5094`. |
+| `[x29+0x1178]` | Pointer/cache for one nested `vector<vector<int>>` output, holding per-tile start/modulo indexes. | Resized/indexed as a nested vector, then written with `tile_index % method`, `tile_index % 3`, or `tile_index & 1`. |
+| `[x29+0x1180]` | Pointer/cache for the paired nested `vector<vector<int>>` output, holding per-tile marker/type flags. | Resized/indexed in parallel with `0x1178`, then written with marker values `1`, `3`, or `7`. |
+
+Observed method behavior:
+
+- generic method value: store `tile_index % method` into the first vector and
+  marker `1` into the second vector, with marker `7` on a remainder boundary;
+- method `3`: store `tile_index % 3` into the first vector and marker `7` on
+  the boundary case, otherwise marker `1`;
+- method `2`: store `tile_index & 1` into the first vector and marker `3` or
+  `1` into the second vector.
+
+The same pattern appears twice, once looping over a `w20` tile count and once
+over a `w19` tile count. These are likely two dimensions/split lists, not two
+separate Python strategy families.
+
+Reverse status: `2` and `3` are now confirmed tiling-method cases in the
+composer, and `0x1178`/`0x1180` are narrowed to paired per-tile index/type
+vectors. They are still not safe to name as `Y`, `K`, `1C`, `MC`, or
+`ChannelTile` until the field that chooses `[x29+0x1188]` is named and the
+later reuse/register updater is tied to concrete CNA/DPU/PC entries.
+
+## fcn.005f51c0: top-level conv Y/K/multicore tiler
+
+This is the largest conv tiling function found from the string/xref pass. It
+owns these diagnostics:
+
+```text
+0x0062d298 X tile buffer overflow! Failed to config layer: '%s', Fatal Error input W too large
+0x0062d508 Generate Y config crash! Failed to config layer: '%s'
+0x0062d7b8 Illegal mc Y type, Failed to config layer: '%s'
+0x0062d8e8 Illegal mc K type, Failed to config layer: '%s'
+```
+
+It also calls the lower-level split composer:
+
+```text
+0x005f5d54 call 0x005f38f0
+```
+
+and many of the same conv-bank helpers used by the ChannelTile predicate and
+layer-level planner:
+
+```text
+0x005f5818 call 0x00388438
+0x005f5848 call 0x003863d0
+0x005f5884 call 0x00385558
+0x005f5bbc call 0x00383338
+0x005f5e50 call 0x00385a68
+0x005f8f40 call 0x00385a68
+```
+
+Pseudo-code of the useful planner behavior:
+
+```c
+bool build_multicore_conv_tiles(
+    ConvTileCtx *ctx,
+    ConvLayer *layer,
+    ShapeVec input_shape,
+    ShapeVec kernel_shape,
+    ShapeVec output_shape,
+    ConvAttrs attrs,
+    MultiCoreOptions mc,
+    vector<vector<ConvWorkTile>> *per_core_tiles)
+{
+    Shape4 in = normalize_shape4(input_shape);
+    Shape4 kernel = normalize_shape4(kernel_shape);
+    Shape4 out = normalize_shape4(output_shape);
+
+    TileLimits limits = derive_target_limits(ctx, in, kernel, out, attrs);
+    if (input_width_tile_overflows(in, kernel, attrs, limits)) {
+        log("X tile buffer overflow! Failed to config layer: '%s', Fatal Error input W too large", ...);
+        return false;
+    }
+
+    if (!valid_mc_y_type(mc.y_type)) {
+        log("Illegal mc Y type, Failed to config layer: '%s'", ...);
+        return false;
+    }
+
+    if (!valid_mc_k_type(mc.k_type)) {
+        log("Illegal mc K type, Failed to config layer: '%s'", ...);
+        return false;
+    }
+
+    vector<vector<int>> split_vectors;
+    vector<vector<bool>> reuse_masks;
+    bool ok = compose_kx_split_vectors(ctx, &input_shape, &kernel_shape,
+                                       &split_vectors, &reuse_masks,
+                                       mc.y_type, mc.k_type,
+                                       limits.split_method, limits, attrs);
+    if (!ok) {
+        log("Generate Y config crash! Failed to config layer: '%s'", ...);
+        return false;
+    }
+
+    for (int core = 0; core < mc.core_num; core++) {
+        for (SplitRecord r : split_vectors_for_core(split_vectors, core, mc)) {
+            ConvWorkTile t = {};
+            t.xstart = r.xstart;
+            t.ystart = r.ystart;
+            t.kstart = r.kstart;
+            t.y_step = r.y_step;
+            t.k_step = r.k_step;
+            t.input_bank_num = r.input_bank_num;
+            t.weight_bank_num = r.weight_bank_num;
+            t.data_reuse = r.data_reuse;
+            t.weight_reuse = r.weight_reuse;
+            t.mc_treat_by_y_tile = mc.y_type;
+            t.mc_treat_by_k_tile = mc.k_type;
+            t.mc_treat_by_1c_y_tile = mc.one_core_y_type;
+            t.mc_treat_by_1c_k_tile = mc.one_core_k_type;
+            (*per_core_tiles)[core].push_back(t);
+        }
+    }
+
+    return true;
+}
+```
+
+This function is the other major "all tiling" piece. It is responsible for the
+outer Y/X/multi-core legality checks and for distributing split records into
+per-core nested vectors. The previous ChannelTile-only decompilation explained
+when RKNN switches to ChannelTile; `fcn.005f51c0` explains the broader conv
+tiling machinery that can fail on X width, Y config generation, or illegal MC
+Y/K modes even when ChannelTile thresholding is not involved.
+
 ## Reuse and tile-table helpers
+
+### fcn.00101be8: CNA group formatter
+
+This function is the xref target for the CNA group diagnostic strings. It is a
+formatter, not the planner, but it gives a concrete resource-mask layout. A
+focused disassembly pass shows the function takes the mask in `w0`, prints the
+raw mask first, then prints individual bits by repeatedly extracting one bit
+with `and`/`ubfx` and appending the matching diagnostic string.
+
+| Mask bit | Printed field |
+| ---: | --- |
+| `0` | `CNA feature group0` |
+| `1` | `CNA feature group1` |
+| `2` | `CNA weight  group0` |
+| `3` | `CNA weight  group1` |
+| `4` | `CNA csc     group0` |
+| `5` | `CNA csc     group1` |
+| `6` | `ACCU        group0` |
+| `7` | `ACCU        group1` |
+| `8` | `DPU         group0` |
+| `9` | `DPU         group1` |
+| `10` | `PPU         group0` |
+| `11` | `PPU         group1` |
+| `12` | `DMA read     error` |
+| `13` | `DMA write    error` |
+
+The bit names above come from the contiguous string block at
+`0x00607178..0x00607318`, confirmed with `rabin2 -zz` and a rodata dump.
+
+This is useful for the ChannelTile reverse trail because the local Python
+OC-chain only changes weight/output addresses and optionally
+`CNA_CBUF_CON0_WEIGHT_REUSE`, while RKNN has a separate feature/weight/CSC group
+mask visible in diagnostics. Static xref checks for the `RKNNRegisterTask_f2`
+RTTI strings (`0x00606f30`, `0x00609230`) only reached data/RTTI references, and
+direct xrefs to the CNA group strings still lead to this formatter. A focused
+caller search for `fcn.00101be8` itself (`r2 axt @ 0x00101be8` and
+`objdump -d | rg 'bl\s+101be8|101be8'`) found no direct call sites beyond the
+function body, so the formatter is likely reached indirectly or through stripped
+logging/type plumbing. The programming site for this mask is still not
+identified.
 
 ### fcn.00307198 and fcn.00312328
 
@@ -866,6 +1228,94 @@ They are not reached by the direct `min_weight_banks > 3` string, but they are
 part of the same compiled tiling pipeline. Their role is to walk the tile list
 after split planning and mark which adjacent tiles may reuse data and/or
 weights.
+
+A focused follow-up pass shows these are not simple duplicates:
+
+- `fcn.00307198` is a small single-index/list updater. It walks lists rooted at
+  `ctx+0x448`, `ctx+0x460`, and `ctx->field_0x40 + {0x120,0x128,0x1e0,0x1e8,0x200}`.
+- `fcn.00312328` is a counted/vectorized updater. It loops over a count and
+  key/active vectors, then reaches the same list families plus additional node
+  payloads at `+0x28` and `+0x38`. It also has extra RegisterTask mode and
+  weight-data-type handling.
+
+The `fcn.00312328` control shape is now narrower:
+
+- If `ctx+0x460 == 0`, it starts from `ctx->field_0x40`; the first active path
+  walks `field_0x40 + 0x120/0x128`, and alternate paths also reach
+  `field_0x40 + 0x1e0/0x1e8/0x200`.
+- If `ctx+0x460 != 0`, it switches to the direct context list family
+  `ctx+0x440/0x448`.
+- In both cases it iterates `count` entries, skips inactive entries from the
+  active vector, searches a keyed tree/list by node key at `+0x20`, and then
+  uses node payloads at `+0x28`/`+0x38`.
+- The payload format is compact and self-describing: several call sites check a
+  small record-size/header value before reading offsets such as `+4`, `+6`,
+  `+8`, `+0xa`, `+0x18`, `+0x1c`, `+0x2c`, or `+0x40`. Those values become the
+  register-task index or side value passed to `fcn.002efd38`,
+  `fcn.002efce0`, or a RegisterTask virtual setter.
+- Failure paths at `0x00312cb4`, `0x00312e0c`, `0x00312f74`,
+  `0x0031326c`, `0x003132c8`, and `0x003132f4` still all emit the same
+  `failed to update data and weight reuse!` diagnostic, so these branches are
+  part of one broader materialization pass rather than unrelated errors.
+- The nearby rodata confirms two relevant diagnostics in this region:
+  `0x0060c768` is `failed to update data and weight reuse!`, while
+  `0x0060cfe0` is `Unsupport weight data type!`. The latter belongs to the
+  RegisterTask/weight-type guard side of `fcn.00312328`; it is not evidence that
+  all reuse failures are weight-format failures.
+- The vtable targets compared by these branches, including `0x103f10`,
+  `0x103f18`, `0x1076a8`, `0x1076b0`, `0x107948`, `0x105d50`, `0x107930`,
+  `0x107588`, `0x105828`, and `0x104180`, disassemble as tiny `mov w0, #0; ret`
+  stubs or adjacent runs of those stubs. They identify method slots/default
+  implementations, not the concrete register-writing code. The missing mapping
+  is still from typed tile-list payloads to the indexed register-command vector.
+
+The low-level write primitive is now known. Both update paths eventually patch
+the value field of existing 64-bit register commands:
+
+```c
+uint64_t patch_reg_value(uint64_t old_entry, uint32_t value)
+{
+    // fcn.00100a40: bfi x0, x1, #16, #32
+    return (old_entry & 0xffff00000000ffffULL) | ((uint64_t)value << 16);
+}
+```
+
+This matches the local Python `E(target, reg, value)` encoding: target in bits
+`48..63`, register value in bits `16..47`, and register address in bits `0..15`.
+
+The immediate helper forms are:
+
+```c
+int update_indexed_reg_value(ctx, int index, uint32_t value)
+{
+    // fcn.002efd38
+    vec = ctx->field_0x288;
+    entry_ptr = vec->base_0x08 + vec->index_base_0x28 + index * 8;
+    if (!entry_ptr)
+        return -1;
+    *entry_ptr = patch_reg_value(*entry_ptr, value);
+    ctx->dirty_0x11 = 1;
+    return 0;
+}
+
+int update_pair_record(ctx, PairRecord *record, uint32_t value)
+{
+    // fcn.002efce0
+    if (record->side_int_ptr)
+        record->side_int_ptr[1] = value;
+    if (!record->entry_ptr)
+        return -1;
+    *record->entry_ptr = patch_reg_value(*record->entry_ptr, value);
+    ctx->dirty_0x11 = 1;
+    return 0;
+}
+```
+
+The important consequence is that RKNN reuse update is not equivalent to one
+visible `CNA_CBUF_CON0_WEIGHT_REUSE` bit. It patches selected pre-existing
+register commands through tile-list metadata. The remaining reverse task is to
+name which indexed register entries these vectors point to for each split
+family.
 
 Pseudo-code:
 
@@ -985,6 +1435,70 @@ void dump_workload_tile_table(vector<vector<ConvWorkTile>> &tiles,
 }
 ```
 
+Focused formatter mapping:
+
+The function arguments are stored at entry as:
+
+| Stack slot | Source argument | Current meaning |
+| --- | --- | --- |
+| `[x29+0xd8]` | `x0` | Outer tile loop / core or X dimension vector. |
+| `[x29+0x100]` | `x1` | Nested `ystart` vector source. |
+| `[x29+0x110]` | `x2` | Nested `kstart` vector source. |
+| `[x29+0xc0]` | `x4` | First reuse bitset source. |
+| `[x29+0xc8]` | `x3` | Second reuse bitset source. |
+| `[x29+0xbc]` | `w5` | Print/control flag copied from arg 5. |
+| `[x29+0xb8]` | `w6` | Print/control flag copied from arg 6. |
+| `[x29+0xb4]` | `w7` | Print/control flag copied from arg 7. |
+| `[x29+0xb0]` | stack byte arg | Print/control flag copied from the first stack byte arg. |
+
+At the row-print block around `0x005f206c`:
+
+- `xstart` is loaded from `[x29+0xd8]` with the outer row index;
+- `ystart` is loaded from `[x29+0x100]` using the current outer and inner
+  vector offsets;
+- `kstart` is loaded from `[x29+0x110]` using the same outer and inner offsets;
+- the first reuse bool is computed by testing a bit in the bitset pointed to by
+  `[x29+0xc0]`;
+- the second reuse bool is computed by testing a bit in the bitset pointed to by
+  `[x29+0xc8]`;
+- the four MC treatment values printed after the reuse booleans are scalar
+  control values copied from `w5`, `w6`, `w7`, and the stack byte arg.
+
+The header names these two bitsets as `data reuse` and `weight reuse`, but the
+current disassembly pass only proves the formatter order and bitset mechanics.
+It does not yet prove which producer argument is data versus weight at the call
+sites.
+
+Call-site boundary:
+
+- `rabin2 -zz` finds the header only at `0x0062cf78`.
+- `objdump -d ... | rg '5f1cd0|005f1cd0'` finds the function body at
+  `0x005f1cd0`, but no direct `bl 0x005f1cd0` caller.
+- `r2 axt 0x005f1cd0` likewise did not produce a useful static call-site list.
+
+Therefore the producer of the two reuse bitsets is not identified by ordinary
+static xrefs in this pass. The next route is to trace xrefs to the header string
+or the surrounding logging stream construction, or to instrument a runtime path
+that enables this tile-table dump.
+
+Current boundary for `conv_new_clean.py` cleanup:
+
+- The formatter proves RKNN tile records carry `xstart`, `ystart`, `kstart`,
+  two reuse bitsets, and four MC treatment fields.
+- The reuse updater proves RKNN can patch already-built register command values
+  through indexed/list metadata, using the same 64-bit command encoding as the
+  Python driver.
+- The CNA group formatter proves feature, weight, and CSC groups are tracked as
+  separate state.
+- None of these sections yet identify the exact producer field that maps a
+  Python OC/channel tile to RKNN's split method, reuse bitset, CNA group mask,
+  or patched register index.
+
+So this binary evidence supports keeping the Python branches as named planner
+families during a mechanical refactor. It does not support replacing the current
+software-stitched OC/channel/im2col fallbacks with a chained RKNN-style
+ChannelTile executor.
+
 `fcn.005f1998` is a small fatal helper:
 
 ```c
@@ -1075,3 +1589,49 @@ bool conv_needs_channel_tile(ConvTileCtx *ctx, ConvShape shape)
 For RK3588/F2, this means the official RKNN runtime switches conv to
 ChannelTile as soon as the estimated minimum weight CBUF demand is more than
 three banks.
+
+## Completion audit
+
+Objective restated as deliverables:
+
+1. Start from `experimental/rknn/librknnrt_conv_channel_tile_decomp.md`.
+2. Do not stop at the two ChannelTile predicate functions.
+3. Find the conv tiling functions in `librknnrt.so` reachable from tiling,
+   split, bank, reuse, X/Y/K, and multicore diagnostics.
+4. Add decompiled or high-level pseudo-code for every function that performs
+   conv tiling work, while excluding generic logging/allocation/vector plumbing.
+
+Prompt-to-artifact checklist:
+
+| Requirement | Evidence in this file |
+| --- | --- |
+| Start from `librknnrt_conv_channel_tile_decomp.md` | This file remains the single expanded artifact. |
+| Include ChannelTile threshold functions | `fcn.00387e3c` and `fcn.00388a18` sections contain full predicate pseudo-code. |
+| Include bank/data estimators used by those predicates | `fcn.00384ed0`, `fcn.00387530`, `fcn.00383338`, `fcn.003873e8`, and selector-helper sections are documented. |
+| Include non-ChannelTile conv tiling functions | `fcn.005d4ac0`, `fcn.005f38f0`, and `fcn.005f51c0` now have planner pseudo-code and call/xref evidence. |
+| Include reuse/bank validation around the tile records | `fcn.00307198`, `fcn.00312328`, `fcn.005c6b50`, and `fcn.005f1cd0` sections document reuse updates, bank checks, and tile-table output. |
+| Cover all useful tiling strings found from the binary | The "Related tiling-string xrefs" table maps `min_weight_banks`, `MC K Tile Failed`, `failed to tile argb`, `illegal tiling method`, `X tile buffer overflow`, `Generate Y config crash`, `Illegal mc Y/K type`, reuse, bank, and tile-table strings to functions. |
+| Exclude non-tiling plumbing | The function inventory explicitly excludes stream/logging, allocation, memory copy, and STL vector plumbing. |
+
+Verification commands used:
+
+```sh
+rabin2 -zz experimental/rknn/librknnrt.so | rg -i 'conv|min_weight|tile|tiling|split|reuse|cbuf|bank|xstart|ystart|kstart|feature|weight|csc|overflow'
+r2 -q -e scr.color=false -e bin.relocs.apply=true -c 'aaa' \
+  -c 'axt @ 0x0060f388' -c 'axt @ 0x0062ce00' -c 'axt @ 0x0062ce50' \
+  -c 'axt @ 0x0062ce30' -c 'axt @ 0x0062cf58' -c 'axt @ 0x0062cf78' \
+  -c 'axt @ 0x0062d040' -c 'axt @ 0x0062d298' -c 'axt @ 0x0062d508' \
+  -c 'axt @ 0x0062d7b8' -c 'axt @ 0x0062d8e8' \
+  -c 'axt @ 0x0060c768' -c 'axt @ 0x0062cc50' -c 'axt @ 0x0062cc90' \
+  -c q experimental/rknn/librknnrt.so
+r2 -q -e scr.color=false -e bin.relocs.apply=true -c 'aa' -c 's 0x00385988' -c af -c pdf -c q experimental/rknn/librknnrt.so
+r2 -q -e scr.color=false -e bin.relocs.apply=true -c 'aa' -c 's 0x005f38f0' -c af -c pdf -c q experimental/rknn/librknnrt.so
+r2 -q -e scr.color=false -e bin.relocs.apply=true -c 'aa' -c 's 0x005f51c0' -c af -c pdf -c q experimental/rknn/librknnrt.so
+```
+
+Residual uncertainty: this is a stripped binary, so helper names and struct field
+names are inferred from instruction use, call sites, and diagnostic strings. The
+coverage is complete for the conv tiling functions discovered by the tiling
+string/xref pass. The remaining callees in the planner callgraphs are generic
+math/vector/allocation helpers with no tiling strings of their own, so they are
+treated as plumbing rather than separate conv tiling functions.
