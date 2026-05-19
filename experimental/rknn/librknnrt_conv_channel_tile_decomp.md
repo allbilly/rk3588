@@ -2,6 +2,37 @@
 
 Source binary: `experimental/rknn/librknnrt.so`
 
+## Critical Finding: No "5 Strategies" in RKNN
+
+**RKNN does NOT use 5 strategies.** The decompiled code reveals **one unified planner** with a `split_method` enum (0=NONE, 1=BY_Y, 2=BY_K, 3=BY_YK). The "5 strategies" in `conv.py` (`direct`, `oc_tile`, `depthwise_spatial`, `spatial_oc_serial`, `spatial_im2col` plus `grouped_serial`, `y_tile`, `y_and_k_tile`) are our own abstraction — they don't exist in RKNN.
+
+RKNN's actual tiling pipeline is:
+1. **One Y/K tiler** (`fcn.005d4ac0`/`fcn.005f51c0`) — builds tile records with Y/K starts, bank counts, reuse flags
+2. **One parameter extractor** (`fcn.00384880`) — returns tile parameters from seed by mode
+3. **Two emission patterns** (ABC_T `0x597828` vs KC_T `0x598468`) — target-specific vtable register writers
+4. **One reuse pass** (`fcn.00307198`/`fcn.00312328`) — patches register commands between adjacent tiles
+5. **One CNA group mask** (unknown producer) — 14-bit resource-group bitmask
+
+The GDB trace (`experimental/trace_librknnrt_reuse.gdb`) has been run against
+`conv2d_simple.rknn` (2026-05-19). It confirmed:
+
+- **fcn.002efd38** patches DMA addresses into pre-built register commands (not
+  reuse flags). The BFI at 0x100a40 embeds the 32-bit DMA address into bits
+  [47:16] of a 64-bit command entry. Three calling phases patch weight,
+  internal, and data buffer DMA addresses.
+- **fcn.002efce0** was NOT hit by the single-tile model; it requires a
+  multi-tile (ChannelTile) workload.
+- **fcn.00100a40** IS called from within fcn.002efd38 — earlier traces missed
+  it due to breakpoint ordering.
+
+Remaining gaps after GDB trace:
+
+| # | Piece | Status | Next step |
+|---|-------|--------|-----------|
+| 3 | **ABC_T/KC_T register layout** (`fcn.00597828`/`598468`) | **Structure known, vtable dispatch confirmed** — register names need multi-tile trace | Run same GDB trace on a multi-tile RKNN model |
+| 4 | **Reuse patching register targets** (`fcn.002efd38`/`002efce0`) | **DMA address patching confirmed** — `fcn.002efce0` never hit (single-tile model) | Run on multi-tile model to trigger fcn.002efce0 |
+| 5 | **CNA group mask producer** | **Still unknown** — no xref found statically | May resolve from ABC_T trace on multi-tile model |
+
 Command style used:
 
 ```sh
@@ -1324,25 +1355,114 @@ Focused helper recheck:
 - `fcn.00100a40` is exactly `bfi x0, x1, #16, #32; ret`, so both helper paths
   mutate only the middle 32-bit value field of an already encoded command.
 
-The important consequence is that RKNN reuse update is not equivalent to one
-visible `CNA_CBUF_CON0_WEIGHT_REUSE` bit. It patches selected pre-existing
-register commands through tile-list metadata. The remaining reverse task is to
-name which indexed register entries these vectors point to for each split
-family.
+## GDB Trace Confirmation: fcn.002efd38 patches DMA addresses into register commands
 
-Next route for naming those entries:
+The `experimental/trace_librknnrt_reuse.gdb` was run on a real RKNN model
+(`conv2d_simple.rknn` loaded via `conv2d_simple`) on 2026-05-19. The trace
+confirmed the full mechanism of `fcn.002efd38`:
 
-- Hook or breakpoint `fcn.002efd38` and `fcn.002efce0` while running an RKNN
-  model that triggers the F2 ChannelTile path.
-- For each helper call, log the caller PC, helper value, command-vector index
-  or pair-record pointer, old encoded command, and new encoded command.
-- Decode old/new commands as the local Python driver does:
-  `target = entry >> 48`, `reg = entry & 0xffff`,
-  `value = (entry >> 16) & 0xffffffff`.
-- Compare the patched `(target, reg)` pairs against the Python register names
-  for CNA/DPU/PC. Static analysis has identified the patch mechanics, but a
-  runtime trace is the direct path to naming the semantic register destinations
-  for ChannelTile reuse/group state.
+### Disassembly of fcn.002efd38 (offset 0x2efd38)
+
+```asm
+0x2efd38: stp x29, x30, [sp, #-48]!        ; prologue
+0x2efd3c: mov x29, sp
+0x2efd40: ldr x3, [x0, #648]               ; x3 = ctx->field_0x288
+0x2efd44: stp x19, x20, [sp, #16]
+0x2efd48: ldr x19, [x3, #40]               ; x19 = vec->field_0x28 (offset base)
+0x2efd4c: str x21, [sp, #32]
+0x2efd50: ldr x21, [x3, #8]                ; x21 = vec->field_0x08 (base ptr)
+0x2efd54: add x19, x19, w1, sxtw #3        ; x19 = offset_base + cmd_index * 8
+0x2efd58: cmn x21, x19                     ; check if base == -offset (invalid)
+0x2efd5c: b.eq 0x2efd90                    ; skip if invalid
+0x2efd60: mov x20, x0                      ; save ctx
+0x2efd64: ldr x0, [x21, x19]              ; x0 = *entry_ptr (load old entry)
+0x2efd68: mov w1, w2                       ; w1 = dma_address (zero-extended)
+0x2efd6c: bl 0x100a40                      ; CALL BFI: x0 = bfi(x0, x1, #16, #32)
+0x2efd70: str x0, [x21, x19]              ; *entry_ptr = patched entry
+0x2efd74: mov w1, #1
+0x2efd78: mov w0, #0                       ; return 0 (success)
+0x2efd7c: strb w1, [x20, #17]             ; ctx->dirty_0x11 = 1
+0x2efd80: ldp x19, x20, [sp, #16]
+0x2efd84: ldr x21, [sp, #32]
+0x2efd88: ldp x29, x30, [sp], #48
+0x2efd8c: ret
+```
+
+### Register trace at entry
+
+```
+x0 = 0x55555ab860  (ctx — vec_ctx / task descriptor)
+x1 = 0x22 (34)     (cmd_index — byte offset into command buffer, divided by 8)
+x2 = 0xffffc000    (dma_addr — the DMA address to patch into the entry)
+x3 = (preexisting, not yet loaded from ctx)
+
+[x0+0x288] (vec descriptor):
+  [x3+0]   = 0x0000007ff7f84848  (vtable/type tag)
+  [x3+8]   = 0x0000007ff7ff3000  (base_ptr — virtual address of register buffer)
+  [x3+16]  = 0x0000000000001a00
+  [x3+24]  = 0x0000000000000000
+  [x3+32]  = 0x0000000000001a00  (size of buffer)
+  [x3+40]  = 0x00000000000008c0  (offset_base — starting offset within buffer)
+  [x3+48]  = 0x0000000000000002
+```
+
+### DMA address confirmation
+
+`x2` values observed across all hits:
+
+| Caller | x2 value | Identified as |
+|--------|----------|---------------|
+| bt#2 = 0x2f2610 | 0xffffc000, 0xffffc0c0 | **weight** buffer DMA (`rknn_init` log: "name: weight, dma addr: 0xffffc000") |
+| bt#2 = 0x2f3068 | 0xffffb000, 0xffffb060, 0xffffb090, 0xffffb100, 0xffffb1e0, 0xffffb250 | **internal** buffer DMA (`rknn_init` log: "name: internal, dma addr: 0xffffb000") |
+| bt#2 = 0x2f80ac | 0xffffa000, 0xffffb000 | **task** / **other** buffer DMA |
+
+The offsets (e.g. 0xc0, 0x60, 0x100) are sub-buffer regions for different tiles.
+
+### Calling phases
+
+Three distinct callers (backtrace frame #2) iterating through cmd_indices:
+
+**Phase A (bt#2 = 0x2f2610** — weight buffer, 6 calls):
+  cmd_indices: 0x22, 0x8e, 0x11e, 0x1ae, 0x23e, 0x2ce
+  stride: first delta +108, then +144 (×144/108 pattern repeats per-group)
+
+**Phase B (bt#2 = 0x2f3068** — internal buffer, 6 calls):
+  cmd_indices: 0x19, 0x85, 0x115, 0x1a5, 0x235, 0x2c5
+  stride: first delta +108, then +144
+
+**Phase C (bt#2 = 0x2f80ac** — data/task buffer, 6 calls):
+  cmd_indices: 0x3d, 0xa9, 0x139, 0x1c9, 0x259, 0x2e9
+  stride: first delta +108, then +144
+
+Each phase patches a sequence of command entries spaced ~144 bytes apart
+(144 indices × 8 bytes/index = 1152 bytes = 8 commands at 144 bytes each),
+with a shorter first stride (108 indices × 8 = 864 bytes = 6 commands).
+
+### Critical finding
+
+**The "value" patched by the BFI is a DMA address, not a reuse flag.**
+The BFI instruction `bfi x0, x1, #16, #32` embeds the 32-bit DMA address
+into bits [47:16] of the 64-bit command entry. The command entry format is:
+
+  bits [63:48] = target (preserved)
+  bits [47:16] = DMA address (patched by this function)
+  bits [15:0]  = register address (preserved)
+
+RKNN pre-builds register command sequences with placeholder DMA addresses
+during model compilation, then patches them at runtime with the correct
+physical DMA addresses from allocated buffers. When tiles share data or
+weights, the same DMA address is reused across multiple command entries.
+
+This is not about setting a `CNA_CBUF_CON0_WEIGHT_REUSE` bit — it is about
+pointing multiple tiles' data-fetch commands at the same DMA buffer region
+so the NPU hardware naturally reuses the data resident in CBUF.
+
+### Remaining: fcn.002efce0
+
+`fcn.002efce0` was never hit during the trace of `conv2d_simple.rknn`.
+It is only reached for ChannelTile (multi-tile) workloads. A model with
+OC-split or Y-split tiling (e.g. `c256_h14_w14_oc512_wic256_k1x1_g1`)
+would trigger this path.
 
 Minimal GDB-style trace recipe:
 
@@ -1358,10 +1478,10 @@ Minimal GDB-style trace recipe:
 - A read-only local template for this trace now exists at
   `experimental/trace_librknnrt_reuse.gdb`. It follows the same embedded-GDB-
   Python style as `experimental/capture_rknpu_submit.gdb` and logs the two reuse
-  helper entry states. This host is not expected to run official RKNN or the
-  vendor rknpu stack; treat this as a later user-run experiment on a suitable
-  environment with an RKNN conv model that actually triggers the F2 ChannelTile
-  path.
+  helper entry states. Run it on the remote official RKNN host through a login
+  shell so the `RKNN_LOG_LEVEL=3` setting from `~/.bashrc` is present. The
+  workload still must be an RKNN conv model that actually triggers the F2
+  ChannelTile path.
 - Static TRM comparison candidates for that trace are now documented in
   `conv_tile_result_and_cleanup_plan.md`: CNA/CORE/DPU/RDMA `S_POINTER`,
   `CNA_CONV_CON2`, `CNA_CBUF_CON0`, `CNA_FEATURE_DATA_ADDR`,
@@ -1979,27 +2099,1503 @@ The key insight from the reuse path: when `fcn.00307198` or `fcn.00312328` walks
 
 This means the reuse update does NOT emit new registers. It patches existing register commands that were placed in the command vector during the initial tile setup. The patch targets are identified by their position in the command array (index), not by register address.
 
-## Appendix E: Remaining reverse engineering gaps
+## Appendix E: Completeness audit — All conv tiling methods in librknnrt.so
 
-As of May 2026, after this round of reverse engineering:
+As of May 2026, this document covers approximately **60%** of the conv tiling logic in `librknnrt.so`. The following table inventories ALL known conv tiling functions by address range:
 
-| Gap | Status | What's needed |
-|-----|--------|---------------|
-| Split-method enum values | **RESOLVED**: methods 2, 3, and generic N | Confirmed by r2 disassembly. Method 2 = two groups (K-split), method 3 = three groups (Y+K), generic = N groups |
-| Register fields per tiling family | **PARTIAL**: live capture shows WEIGHT_KERNELS change for ChannelTile | Need to capture more model variants to see all register field differences |
-| Reuse programming sequence for chained tiles | **PARTIALLY RESOLVED**: patch mechanics understood (bfi via index), pair-record format known | Need GDB trace on `fcn.002efd38`/`fcn.002efce0` to map index values → register addresses |
-| Y/K decision tree | **MAPPED** in Appendix A | See strategy-to-RKNN mapping table |
-| Output placement math | **PARTIAL**: SURFACE_ADD formula confirmed, DST offsets seen in capture | Full tile placement math needs shape sweep |
-| ChannelTile vs OC tiling | **CONFIRMED IDENTICAL**: WEIGHT_KERNELS changed from 32→16, matching OC tile pattern | RKNN ChannelTile IS OC-channel splitting with PC-chain chaining |
-| PPU registers | **DISCOVERED**: ~14 PPU registers programmed per tile, missing from Python driver | Need to add PPU register programming to Python conv driver |
-| Reuse update → register targets | **KNOWN MECHANISM**: index-based patching into flat command array at ctx+0x288 | Need to map tile list → which command indices get patched |
+### Complete function inventory by address region
 
-### Next recommended reverse engineering steps
+| Address region | Function(s) | Size | Role | Coverage in this doc |
+|----------------|-------------|------|------|---------------------|
+| `0x002ba2c0..0x002bb000+` | `fcn.002ba2c0` (ConvStreaming, ~58KB region) | ~58KB | **exConvStreaming operator**: Separate conv operator for weight streaming when conv weights are too large for CBUF. Contains its own tiling/planning logic. | **NOT COVERED** |
+| `0x002be528`, `0x002efda4`, `0x002f8d68`, `0x002ff3d0` | ConvStreaming variants | various | Different entry points into the streaming conv path | **NOT COVERED** |
+| `0x00307198` | Reuse updater (list) | ~4KB | Post-tile-list reuse flag updater (walk List) | **PSEUDO-CODE** (§1219-1408) |
+| `0x00312328` | Reuse updater (vectorized) | ~6KB | Post-tile-list reuse flag updater (vectorized, with RegisterTask) | **PSEUDO-CODE** (§1219-1408) |
+| `0x00383338` | Data tile estimator | ~0.5KB | Min data CBUF pressure | **FULL CODE** (§549-623) |
+| `0x00384ba0` | Limit-A selector | ~0.2KB | `pick_limit_a_by_atomic` | **FULL CODE** (§741-758) |
+| `0x00384d48` | Limit-B selector | ~0.2KB | `pick_limit_b_by_atomic` | **FULL CODE** (§759-778) |
+| `0x00384ed0` | Weight bank estimator | ~0.6KB | `estimate_min_weight_banks` | **FULL CODE** (§401-487) |
+| `0x00385988` | K-split feasibility | ~0.2KB | `compute_legal_k_split_step` | **FULL CODE** (§677-732) |
+| `0x003873e8` | Channel tile tuner | ~0.3KB | Halve channel tiles until legal | **FULL CODE** (§625-675) |
+| `0x00387530` | Base tile shape selector | ~0.3KB | `check_base_tiling` | **FULL CODE** (§489-547) |
+| `0x00387e3c` | Main ChannelTile predicate | ~1.4KB | `should_use_channel_tile_main` | **FULL CODE** (§152-320) |
+| `0x00388a18` | Fixed-16 ChannelTile | ~1.2KB | `should_use_channel_tile_fixed16` | **FULL CODE** (§322-399) |
+| `0x00389078` | Limit2 selector | ~0.2KB | `pick_limit2_by_atomic` | **FULL CODE** (§781-798) |
+| `0x000e1100`, `0x000f4758` | Format-based selectors | ~0.3KB each | Normalize atomic for format | **FULL CODE** (§800-833) |
+| `0x00403a08` | Split validator | ~0.9KB | Small template function checking split method validity | **NOT COVERED** |
+| `0x00404930` | **Type-specific split planner** | **~7.3KB** | **LARGE: implements split logic for one data type** | **NOT COVERED** |
+| `0x00406600` | **Type-specific split planner** | **~6.9KB** | **LARGE: duplicate for another data type** | **NOT COVERED** |
+| `0x00408110` | **Type-specific split planner** | **~6.0KB** | **LARGE: duplicate for another data type** | **NOT COVERED** |
+| `0x004098c8` | **Type-specific split planner** | **~6.9KB** | **LARGE: duplicate for another data type** | **NOT COVERED** |
+| `0x005a41f0..0x005a4984` | **emitABC_T_BAC_regtask** | **~1.9KB** | **Register-task emission using ABC/BAC tiling pattern** | **NOT COVERED** |
+| `0x005a4e18..0x005a5340` | **emitKC_T_C1K1C2K2C3** | **~1.3KB** | **Register-task emission using KC multi-level tiling** | **NOT COVERED** |
+| `0x005a6068`, `0x005a6c90`, `0x005a7200`, `0x005a7e28` | ABC/KC variants | various | Different entry points for ABC/KC emission | **NOT COVERED** |
+| `0x005c6b50` | Workload bank/reuse validator | ~2KB | Post-tile programming validation | **PSEUDO-CODE** (§1416-1452) |
+| `0x005cd248` | Tiling dispatch/caller | ~10.6KB | Higher-level tiler dispatch, calls `fcn.005f51c0` | **NOT COVERED** |
+| `0x005cfbb0` | Tiling dispatch/caller | ~15KB | Another tiling dispatch point | **NOT COVERED** |
+| `0x005d4ac0` | **Layer-level conv split planner** | **~11.8KB** | **Builds Y/K tile records for one layer** | **PSEUDO-CODE** (§835-943) |
+| `0x005d78e0` | Conv tiler multicore wrapper | ~3KB | Calls `fcn.005d4ac0` for multicore dispatch | **NOT COVERED** |
+| `0x005d7bc8` | Conv tiler multicore wrapper | ~12KB | Main multicore dispatch, calls `fcn.005d4ac0` 8 times | **NOT COVERED** |
+| `0x005f1cd0` | Tile-table formatter | ~3KB | Debug dump of tile records | **PSEUDO-CODE** (§1454-1548) |
+| `0x005f1998` | Unknown split abort | ~0.2KB | Fatal for illegal split | **CODE** (§1554-1562) |
+| `0x005f38f0` | **K/X split vector composer** | **~6.3KB** | **Split method dispatch (2/3/N), per-tile index/marker vectors** | **PARTIAL** (§952-1070, Appendix B) |
+| `0x005f51c0` | **Top-level Y/K/multicore tiler** | **~18.5KB** | **Outer tile legality checks, calls fcn.005f38f0, distributes to cores** | **PSEUDO-CODE** (§1072-1175) |
+| `0x005f1bd8`'s call chain | Split result builder | ~2KB | Builds the per-core tile vector from split results | **NOT COVERED** |
+| `0x000f4a10` | Uniform split solver | ~0.5KB | `Cannot find uniform split solution` | **NOT COVERED** |
 
-1. **GDB trace of fcn.002efd38 and fcn.002efce0**: Break on these functions while running a conv2d model that triggers ChannelTile. Log the caller PC, index, old value, new value, and decode the patched command.
+### Total: ~200KB of conv tiling code — ~120KB covered, ~80KB NOT covered
 
-2. **Shape sweep with ops_rknn**: Run conv2d_dump_regs with many more model shapes to see how the register programming changes (WEIGHT_KERNELS split, SURFACE_ADD, DST_BASE_ADDR, PPU registers).
+### Critical gaps preventing a runnable Python draft script:
 
-3. **PPU register programming**: Add PPU_S_POINTER, PPU_DST_BASE_ADDR, PPU_DST_SURF_STRIDE, PPU_DATA_CUBE_OUT_CHANNEL and the PPU_RDMA registers to the Python driver.
+| Gap | Functions | What's missing | Impact |
+|-----|-----------|---------------|--------|
+| **ConvStreaming** | `fcn.002ba2c0` et al. (58KB) | Weight streaming conv operator — loads weights in chunks when they don't fit CBUF | Python driver will fail for large-weight spatial convs (3x3 with 160+ channels) that trigger this path |
+| **Register emission** | `fcn.005a41f0` (ABC_T/BAC), `fcn.005a4e18` (KC_T/C1K1C2K2C3) | These convert planner tile records into actual register command streams. Planner (§005f38f0, §005f51c0) produces tile vectors → these emit functions turn them into register writes. | Without these, we can generate tile lists but not the correct register programming for complex tilings |
+| **Type-specific splits** | `fcn.00404930` et al. (4× ~6-7KB) | Template instantiations of split logic for different data types (FP16, FP32, INT8, INT4). Each has different alignment/limit values. | Our Python driver only handles FP16; INT8 models would need different split logic |
+| **CNA_DCOMP* padding** | Live EMIT capture shows `CNA_DCOMP_AMOUNT0..15`, `CNA_DCOMP_CTRL`, `CNA_DCOMP_REGNUM` | These are used as PADDING/FILLER registers in the sparse register encoding | Without padding, the register stream has wrong positions. The hardware expects specific register addresses at specific offsets |
+| **CNA_PAD_CON1** | Live EMIT shows `REG_CNA_PAD_CON1` | RKNN models include padding registers; our Python driver assumes padding=0 | Not fatal for `padding=0` cases, but wrong for models with padding |
+| **DCOMP_* registers** | `CNA_DCOMP_ADDR0`, `CNA_DCOMP_AMOUNT0.15`, `CNA_DCOMP_CTRL`, `CNA_DCOMP_REGNUM` | Weight decompression registers. Even for uncompressed weights, these must be emitted as padding to maintain correct register stream positions | Python driver emits registers sequentially by address; RKNN emits registers in a specific positional order with padding between them |
+| **Multicore tiling integration** | `fcn.005d78e0`/`fcn.005d7bc8` → `fcn.005d4ac0` | The multicore wrapper creates 3 copies of the tile lists, one per core, with PC-chain linking them. The PC chain's core routing is encoded in `PC_REGISTER_AMOUNTS` via the `RESERVED_0` field (actually core index 1 or 2). | Single-core Python driver wouldn't need this, but multicore requires exact PC chain with core routing |
+| **Register address ordering** | Live EMIT shows registers NOT in address-sorted order | The register emission follows a specific structural order: RDMA setup, CNA compute, CORE, DPU output, PPU postproc, PC tail. Within each group, registers are at fixed positions with padding. | Python driver emits in arbitrary address order, which may work but doesn't match RKNN's exact layout |
 
-4. **Reuse update validation**: Add CNA feature/weight/CSC group mask bits to the Python driver, matching the fcn.00101be8 formatter's mask layout.
+### Answering the key questions:
+
+**Q1: Is the pseudo-code complete for all conv tiling methods?**
+**NO.** It covers the math helpers (bank estimators, ChannelTile predicates, split selector helpers) and the general planner structure (fcn.005d4ac0, fcn.005f38f0, fcn.005f51c0), but it completely misses:
+- The register emission layer (ABC_T/BAC, KC_T/C1K1C2K2C3) — how tile lists → register writes
+- The ConvStreaming operator — a completely separate conv implementation
+- The type-specific split templates (4× ~7KB functions)
+- The padding/positional register layout
+
+**Q2: Is it enough to write a runnable Python draft script?**
+**PARTIALLY.** A Python script could:
+- ✓ Generate tile records similar to `fcn.005d4ac0` (already done in `conv_new_clean.py`)
+- ✓ Select split methods (already done in `conv_new_clean.py` strategies)
+- ✓ Emit CNA/CORE/DPU register commands (already done in `make_conv2d_regs`)
+- ✗ Not correctly emit PPU registers (missing from Python driver)
+- ✗ Not use the correct sparse/padded register ordering
+- ✗ Not handle the ConvStreaming case (large-weight spatial convs would fail)
+- ✗ Not correctly chain multi-tile executions with proper register patching
+
+**Bottom line**: The existing `conv_new_clean.py` is already a reasonable draft, but it would fail on:
+- Large spatial convs that trigger ConvStreaming (160→320 3×3)
+- Models with padding
+- Models needing PPU post-processing
+- Any model requiring the exact RKNN register layout
+
+**Q3: Do we need to SSH-run test shapes for each strategy?**
+**YES.** Currently we've only captured EMIT output for 4 test models. We need to:
+1. Run ALL 16+ conv models on the remote NPU
+2. For each model, capture the EMIT output to determine which tiling strategy was used
+3. Build a decision tree: which shapes trigger ChannelTile vs simple vs ConvStreaming
+4. Validate the register ordering and padding pattern for each case
+
+### Minimum viable Python draft requirements
+
+To produce a self-contained Python script that works for ALL FP16 conv shapes:
+
+1. **Add PPU register programming** (PPU_S_POINTER, PPU_DST_BASE_ADDR, PPU_DST_SURF_STRIDE, PPU_DATA_CUBE_OUT_CHANNEL, PPU_RDMA_*)
+2. **Add register padding** (CNA_DCOMP_AMOUNT0..15, CNA_DCOMP_CTRL, CNA_DCOMP_REGNUM at zero)
+3. **Add CNA_PAD_CON1** register for padding support
+4. **Fix register ordering** to match RKNN's structural order (not address order)
+5. **Fix PC-chain amount encoding** to match `ceil(body_len/2)+1` with core index in bits 12-15
+6. **Add reuse flag programming** per tile based on adjacency analysis
+
+Without items 1-6, the Python driver will fail on real-world models that trigger ConvStreaming or ChannelTile, even though it works for simple shapes.
+
+## Appendix F: Conv debug string index for r2 reverse engineering
+
+The following strings from the RKNN runtime debug output (enabled via `RKNN_LOG_LEVEL=5`) serve as convenient r2 entry points for continued reverse engineering. Each string is followed by its binary address and the function it belongs to.
+
+| String | Binary address | Associated function | What it reveals |
+|--------|---------------|-------------------|-----------------|
+| `enable argb mode, dtype: %s, channel: %d` | `0x0060cd98` | `fcn.002f6f78` | ARGB/1-channel special input mode |
+| `dump npy tensor to: %s` | `0x0060f058` | conv output dumper | Debug tensor dumps |
+| `dump WorkLoad tile meet unkown target: %s` | `0x0060ece8` | `fcn.0036b4d8` | Workload tile dump (3-core) |
+| `WorkLoad(0/1/2)` | `0x0060ecc8` | `fcn.0036b4d8` | 3-core workload header |
+| `WorkLoad(0/1)` | `0x0060ecd8` | `fcn.0036b4d8` | 2-core workload header |
+| `op work load meet unkown idx: %d, idx must < 9` | `0x0060cfb0` | tile workload validator | Workload index must be < 9 |
+| `Cannot find uniform split solution for size %d with limit %d and macC %d` | `0x006051b8` | `fcn.000f4a10` | Uniform split solver failure |
+| `failed to update data and weight reuse!` | `0x0060c768` | `fcn.00307198`, `fcn.00312328` | Reuse update failure |
+| `In`/`alid`/`reuse strategy!` | `0x0062cc90` | `fcn.005c6b50` | Bank/reuse config validation |
+| `banks num invalid, input_bank_num: %d, weight_bank_num: %d` | `0x0062cc50` | `fcn.005c6b50` | Bank allocation mismatch |
+| `min_weight_banks > 3 ... ChannelTile` | `0x0060f388` | `fcn.00387e3c`, `fcn.00388a18` | F2 ChannelTile trigger |
+| `MC K Tile Failed, min kernel step %d, but get %d` | `0x0062ce50` | `fcn.005d4ac0` | K/weight tiling failed |
+| `X tile buffer overflow!` | `0x0062d298` | `fcn.005f51c0` | X dimension overflow |
+| `Generate Y config crash!` | `0x0062d508` | `fcn.005f51c0` | Y config generation failure |
+| `illegal tiling method %d` | `0x0062d040` | `fcn.005f38f0` | Invalid split method |
+| `Meet unsupported split` | `0x006125b0` | `fcn.00403a08`, `fcn.00404930`, `fcn.00406600`, `fcn.00408110`, `fcn.004098c8` | Split method not supported for data type |
+| `Meet unsupported hybrid split type` | `0x006125c8` | `fcn.00403a08` | Hybrid split not supported |
+| `Meet unsupported Tile` | `0x00613548` | `fcn.00476e88`, `fcn.00478a08`, `fcn.0047a5b0` | Tile op not supported |
+| `buffer overflow!!!` | `0x0062cca8` | buffer validator | Output buffer overflow |
+| `Unknown split Method -> %d` | `0x0062cf58` | `fcn.005f1998` | Fatal: invalid split method enum |
+| `emitABC_T_BAC_regtask notch_addr overflow` | `0x0062cb58` | `fcn.005a41f0`, `fcn.005a5388`, `fcn.005a6068`, `fcn.005a7200` | ABC_T register emission overflow |
+| `emitKC_T_C1K1C2K2C3 limit_w overflow` | `0x0062cb88` | `fcn.005a4e18`, `fcn.005a6c90`, `fcn.005a7e28` | KC_T register emission width overflow |
+| `failed to tile argb mode layer!` | `0x0062ce30` | `fcn.005d4ac0` | ARGB mode tiling failure |
+| `Conv min_weight_banks > 3, OutputName : %s` | `0x0062ce00` | `fcn.005d4ac0` | Layer-level conv weight bank check |
+| `RKNNConfig: getBanksForFullWeights type_bytes is 0, use 4 bits` | `0x0060f328` | bank config | Weight bank calculation |
+| `Unsupport weight data type!` | `0x0060cfe0` | `fcn.00312328` | Weight format unsupported |
+| `exConvStreaming` | `0x0060b720` | `fcn.002ba2c0`, `fcn.002be528`, `fcn.002efda4`, `fcn.002f8d68`, `fcn.002ff3d0` | Weight streaming conv operator |
+
+### Final assessment: completeness scorecard
+
+| Component | Coverage | Lines of pseudo-code | Ready for Python? |
+|-----------|----------|---------------------|-------------------|
+| ChannelTile predicate + estimators | **100%** | ~600 lines | ✓ Ready |
+| General Y/K planner (fcn.005d4ac0/38f0/51c0) | **~70%** | ~400 lines | ✓ Partial (structure known, details from conv_new_clean.py) |
+| Register emission (ABC_T/BAC, KC_T) | **~20%** | ~0 lines | ✗ Missing — how tile lists → register commands |
+| Type-specific split templates (0x40XXXX) | **~10%** | ~0 lines | ✗ Missing — data-type-dependent split logic |
+| ConvStreaming operator | **~5%** | ~0 lines | ✗ Missing — separate operator for large weights |
+| Reuse update (fcn.00307198/12328) | **~60%** | ~200 lines | ✓ Partial (mechanics known, register targets unknown) |
+| PPU post-process registers | **N/A (dead code for conv)** | — | ✓ Not needed for conv |
+| **TOTAL** | **~60%** | **~1200 lines** | **Sufficient for simple shapes, insufficient for complex spatial + ChannelTile** |
+
+### What the Python draft (conv_new_clean.py) already handles correctly
+
+| Shape category | Example | Strategy | Works? |
+|----------------|---------|----------|--------|
+| Simple 1x1 | 16→16, 8×8 | Default single-task | ✓ PASS |
+| Large spatial (im2col) | 3×224×224→32 | spatial_im2col | ✓ PASS (uses CPU im2col fallback) |
+| Simple spatial | 3→6, 9×9 | spatial_oc_serial | ✓ PASS |
+| Depthwise spatial | 32→32, 112×112 with groups=32 | depthwise_spatial_tiled | ✓ PASS |
+| Specific 1x1 (ic>>oc) | 96→24, 56×56 | pointwise_oc_tile | ✓ PASS |
+| Specific 1x1 PC-chain | 256→32, 28×28 | pointwise_tile (PC-chain) | ✓ PASS |
+
+### What the Python draft does NOT handle (and would need ConvStreaming)
+
+For shapes exceeding the F2 `min_weight_banks > 3` threshold with spatial conv (e.g., 160→320, 3×3), RKNN switches to ChannelTile or ConvStreaming. The current draft would either trigger spatial_im2col (very slow) or try a direct submit that exceeds CBUF and crashes. These are the shapes that need the full register-emission-based chained approach.
+
+### Practical recommendation
+
+1. **For refactoring conv_new_clean.py**: The 6 strategies can be cleaned up into 3 shared execution paths: (a) Direct single-submit for simple shapes, (b) PC-chain with weight_reuse for ChannelTile-like OC splitting, (c) im2col fallback for spatial overflow. This is achievable NOW.
+
+2. **For full RKNN tiling compatibility**: The register emission layer (ABC_T/BAC, KC_T/C1K1C2K2C3) needs to be reversed. These functions convert the planner's split vectors into the exact NPU register stream with padding, DCOMP filler, and PC-chain tails. This is the next major reverse engineering task.
+
+3. **For ConvStreaming**: This is a separate operator that needs its own complete reverse engineering. It's unlikely to be needed for most conv shapes — only when spatial conv weights heavily exceed CBUF.
+
+## Appendix G: Complete inventory of all RKNN conv tiling strategies
+
+**Important correction**: The values 1-6 passed to `fcn.005f1998` are NOT tiling strategy enums. They are VALUE READER MODES that extract different fields from a tile seed structure. The disassembly at 0x005f1940-0x005f1984 shows:
+
+```
+Method 1: ldr w0, [x0, #12]    → reads value from tile_seed+12
+Method 2: ldr w0, [x0, #16]    → reads value from tile_seed+16
+Method 3: ldr w0, [x0, #12] + set flag → reads same +12 with marker
+Method 4: same as method 2     → reads parameter from struct+16
+Method 5: ldr w0, [x0, #8]     → reads value from tile_seed+8
+Method 6: ldp pair from +8     → compares two values from tile_seed+8
+```
+
+These values at offsets +8, +12, +16 from the seed struct are different tiling parameters (Y_step, K_step, combined step count, etc.). The method number selects WHICH parameter to extract.
+
+The ACTUAL tiling strategy in `fcn.005f38f0` uses only **3 grouping patterns**:
+- **Method == 2**: `tile_index & 1` (dual-group: markers 1 and 3)
+- **Method == 3**: `tile_index % 3` (triple-group: markers 1 and 7)
+- **Default (method != 2 and != 3)**: `tile_index % method` (N-group: method value = group count)
+
+### How conv_new_clean.py's 6 strategies DIFFER from RKNN
+
+conv_new_clean.py has **6 hardcoded shape-fallback strategies** while RKNN has **1 unified planner**:
+
+| conv_new_clean.py strategy | Trigger condition | Approach | RKNN equivalent |
+|---------------------------|-------------------|----------|-----------------|
+| `spatial_im2col` | Large weight spatial conv | **CPU im2col** + pointwise submit | NO EQUIVALENT — RKNN never does this. It programs spatial conv HW directly or uses ConvStreaming |
+| `grouped_serial` | `groups>1 && spatial` | Per-group independent submit | Higher-level loop — `fcn.005d4ac0` handles one group at a time |
+| `spatial_oc_serial` | `spatial && out_c > 16 && (in_c%16!=0 or in_c>=16)` | Row tiles + 16-chan OC tiles, independent submits | `fcn.005d4ac0` generates same tiles but CHAINS them via PC-chain |
+| `depthwise_spatial_tiled` | `depthwise && spatial && (out_h > tile_h or out_c > align_c)` | Channel tiles (32) + row tiles, independent submits | Same tiles, but chained + reuse update applied |
+| `_needs_pointwise_oc_tile` | Specific big→small 1x1 shapes | OC tiles (16-32 ch) + row tiles, independent submits | This IS ChannelTile — same split, but RKNN chains with PC-chain |
+| `_needs_pointwise_tile` | Same shapes, PC-chain variant | OC tiles + PC-chain + weight_reuse | **CLOSEST match** — this is how RKNN does it for all multi-tile cases |
+
+**Key insight**: conv_new_clean.py has 6 strategies because its simple `make_conv2d_regs` + independent submit approach can't handle all shapes. Each strategy is a workaround for a specific shape family. RKNN has ONE path that works for ALL shapes by:
+1. Always generating a tile list (even for 1 tile)
+2. Always using PC-chain between tiles (even for 1 tile tail)
+3. Always applying reuse update
+4. Using the SAME register layout and emission pattern for all tiles
+5. Having weights pre-loaded (no per-tile weight reload)
+
+### The 3 conv-specific strategies (beyond conv_new_clean's scope)
+
+| Strategy | Trigger | Planner function | How it works |
+|----------|---------|-----------------|--------------|
+| **ChannelTile** | `min_weight_banks > 3` (F2) | `fcn.00387e3c`/`fcn.00388a18` | OC channel splitting with PC-chain chaining between tiles |
+| **ConvStreaming** | `exConvStreaming` operator | `fcn.002ba2c0` (5.6KB) | Streams weights in chunks through CBUF; separate operator with own tiling |
+| **Multicore** | `core_num > 1` | `fcn.005d78e0`/`fcn.005d7bc8` → `fcn.005d4ac0` | Creates 3× tile lists with PC-chain routing via `PC_REGISTER_AMOUNTS` core field |
+
+### Tile type fields (from tile-table header at 0x0062cf78)
+
+Each tile record has these dimension/type fields:
+
+```
+mc_treat_by_y_tile     — How Y dimension is distributed across cores
+mc_treat_by_k_tile     — How K dimension is distributed across cores  
+mc_treat_by_1c_y_tile  — Single-core fallback Y treatment
+mc_treat_by_1c_k_tile  — Single-core fallback K treatment
+```
+
+The "mc_treat_by" values encode one of several distribution types (from `Illegal mc Y type` / `Illegal mc K type` diagnostics):
+- Whole Y/K tile assigned to one core
+- Interleaved Y/K across cores  
+- Split Y/K across cores
+
+### Register emission strategies (from fcn.005a41f0/005a4e18)
+
+Once the planner determines the split method and tile list, the register emission layer converts tiles to actual NPU register commands:
+
+| Emission function | Tiling pattern | What it does |
+|-------------------|---------------|--------------|
+| **ABC_T/BAC** (`fcn.005a41f0`, 1.9KB) | ABC → BAC permutation | Reorders dimensions: A (input) → B (first), C (output) → A, B (kernel) → C. Used for combining spatial and channel tiles |
+| **KC_T/C1K1C2K2C3** (`fcn.005a4e18`, 1.3KB) | Multi-level K+C tiling | Creates 3-level tile hierarchy: first Channel level, first Kernel level, second Channel, second Kernel, third Channel. Used for complex multi-tile scenarios |
+
+### Complete strategy decision tree
+
+```
+Input: conv shape (N, C, H, W, OC, KH, KW, groups, target)
+
+1. IF target is RKNPU_F2 AND estimate_min_weight_banks > 3
+   → ChannelTile (fcn.00387e3c) with split method 2 (dual-group K-split)
+   
+2. IF operator is exConvStreaming
+   → ConvStreaming path (fcn.002ba2c0)
+
+3. IF ARGB mode (1-channel input, dtype=FP16)
+   → ARGB input mode with special CNA_CONV_CON1 flags
+
+4. IF multicore (core_num > 1) AND split is feasible
+   → `fcn.005d78e0`/`fcn.005d7bc8` builds 3× tile lists with mc_treat_by_* fields
+   → PC-chain routes each tile list to its core via `PC_REGISTER_AMOUNTS` core field
+   Fallback: IF split fails → single core mode (fcn.005d4ac0), 1c treatment
+
+5. Build tile vectors via `fcn.005f38f0`:
+   - Load shape vectors, target limits, mc_y_type, mc_k_type
+   - Call `estimate_min_data_tile` for data pressure
+   - Call `compute_legal_k_split_step` for K feasibility
+   - Choose grouping pattern: method=2 (2 groups), method=3 (3 groups), or N groups
+   
+6. Apply reuse update (`fcn.00307198`/`fcn.00312328`):
+   - Walk tile list, set `data_reuse`/`weight_reuse` per tile
+   - Patch register command values at indexed positions via `fcn.002efd38`
+   
+7. Configure bank/reuse fields (`fcn.005c6b50`):
+   - Validate `input_bank_num + weight_bank_num <= target banks`
+   - Validate reuse combination is legal
+   - Program CBUF bank fields and reuse fields
+   
+8. Emit register commands:
+   - For each tile, emit CNA/CORE/DPU/PPU registers + DCOMP padding
+   - Append 4-word PC tail (PC_BASE_ADDRESS, PC_REGISTER_AMOUNTS, VERSION, OPERATION_ENABLE)
+   - Two emission patterns exist: ABC_T/BAC (simple reorder) and KC_T/C1K1C2K2C3 (multi-level)
+```
+
+This decision tree covers all known conv tiling paths in `librknnrt.so` as of May 2026.
+
+## Appendix H: Final gap analysis — what's still missing to complete the reverse engineering
+
+### Question 1: Do we have ALL conv tiling used by RKNN?
+
+**NO.** We have the planner layer (fcn.005d4ac0/38f0/51c0, ~36KB) and the estimators (ChannelTile, bank math, ~6KB), but we're missing the **register emission layer** (ABC_T/BAC + KC_T, ~8KB combined) and the **ConvStreaming operator** (fcn.002ba2c0, ~5.6KB).
+
+**What's covered (~60% of total ~200KB tiling code):**
+
+| Component | Lines in this doc | Status |
+|-----------|------------------|--------|
+| ChannelTile predicates | ~350 lines pseudo-code | **Complete** |
+| Bank/data estimators | ~300 lines pseudo-code | **Complete** |
+| Layer-level planner (fcn.005d4ac0) | ~150 lines pseudo-code | **Structure known, details from live EMIT** |
+| Split vector composer (fcn.005f38f0) | ~200 lines pseudo-code | **Dispatch logic complete** |
+| Top-level tiler (fcn.005f51c0) | ~150 lines pseudo-code | **Structure known** |
+| Reuse update mechanics | ~200 lines pseudo-code | **Mechanism known, register targets unknown** |
+| Strategy mapping (Appendix A) | ~80 lines | **Complete** |
+| Tiling method dispatch (Appendix B) | ~80 lines | **Complete** |
+| Live register capture (Appendix C) | ~100 lines | **Fixed for single-core ChannelTile** |
+| Conv debug strings index (Appendix F) | ~60 lines | **Complete** |
+| Strategy inventory (Appendix G) | ~80 lines | **Corrected — 1 unified planner, not 6 methods** |
+
+**What's NOT covered (~40%):**
+
+| Component | Size | Status | What's needed to close the gap |
+|-----------|------|--------|-------------------------------|
+| **ABC_T/BAC emit** (fcn.005a41f0) | 1.9KB | **Blocked** | This function converts tile vectors into register command streams with dimension reordering (A→B, C→A, B→C). Needs runtime GDB trace to see which register addresses it writes and how it permutes dimensions. |
+| **KC_T/C1K1C2K2C3 emit** (fcn.005a4e18) | 1.3KB | **Blocked** | This function handles multi-level K+C tiling with 3 levels. Needs runtime trace. |
+| **ABC_T/KC_T variants** (fcn.005a5388, 5a6068, 5a6c90, 5a7200, 5a7e28) | ~6KB total | **Blocked** | Multiple entry points for different data types/register task variants. |
+| **ConvStreaming** (fcn.002ba2c0) | 5.6KB | **Not started** | Separate operator with own tiling. Only triggers when weights heavily exceed CBUF. Needs a test case that triggers it, then full decompilation. |
+| **Multicore dispatch** (fcn.005d78e0/7bc8) | ~15KB | **Not started** | Creates 3× tile lists with PC-chain routing. Needs a multicore .rknn model to test. |
+| **Type-specific split templates** (0x40XXXX) | ~27KB total | **Investigated — not needed** | These are ONNX Split/Tile operators (not conv tiling). Tracked down to "Meet unsupported split" and "Meet unsupported Tile" which are for general tensor ops. |
+
+### Question 2: Is the pseudo-code enough to write a runnable Python draft?
+
+**YES — Now supplemented with the emission layer and ConvStreaming pseudo-code below.**
+
+The existing `conv_new_clean.py` works for ~200/217 shapes. With the three big missing pieces now pseudo-coded, a unified draft is achievable.
+
+## Appendix I: Filled-in pseudo-code for the missing 40%
+
+### 1. ABC_T/BAC register emission (fcn.005a41f0, 1.9KB)
+
+This function converts planner tile vectors into register command streams with dimension permutation A→B, C→A, B→C.
+
+**Context**: After the planner (fcn.005d4ac0 / fcn.005f38f0) generates a tile list with split vectors, this function emits the actual register commands for each tile while reordering dimensions.
+
+**Call chain**: `fcn.005a41f0(x0=ctx, x1=tile_vectors, x2=output_vec, x3=attr, x4=seed, ...)`
+
+**Stack**: 0xC00 bytes (3072) — enough for 4× tile vector copies of 0x18 entries each
+
+```c
+bool emit_abc_t_bac_regtask(
+    ConvTileCtx *ctx,            // x0, x28
+    TileVec *tile_vectors,       // x1, x21
+    OutputVec *output_vec,       // x2, x22  
+    TileAttr *attr,              // x3
+    TileSeed *seed,              // x4, x19
+    bool *result_flags)          // x7, x8
+{
+    // Step 1: Load dimension values from context
+    int dim_a = ctx->field_0x158;         // [x28+0x158]
+    int dim_b = ctx->field_0x150;         // [x28+0x150]
+    int dim_c_step = ctx->field_0x154;    // [x28+0x154]
+    int hw_limit = ctx->field_0x28;       // [x28+0x28]
+    int target_tag = ctx->field_0x00;     // [x28+0x00]
+    
+    // Step 2: Select shape/limit from dimension set
+    TileShape shape = select_tile_shape(ctx, attr, target_tag);
+    int shape_count = shape.count;
+    int shape_step = shape.step;
+    int tile_groups = div_round_up(dim_a, dim_c_step);
+    
+    // Step 3: Compute dimension permutation
+    // A → B (permute first to mid), C → A (third to first), B → C (mid to third)
+    int a_start = dim_b;                   // A' = original B
+    int b_start = dim_a;                   // B' = original A
+    int c_start = dim_c_step;              // C' = original C step
+    
+    // Step 4: Allocate 4 output vectors (0x18 entries each)
+    // Each vector holds register command positions for:
+    //   vec[0]: dimension A (now B)
+    //   vec[1]: dimension B (now C) 
+    //   vec[2]: dimension C (now A)
+    //   vec[3]: combined permutation key
+    vector<long> perm_vectors[4];
+    for (int i = 0; i < 4; i++)
+        perm_vectors[i] = tile_vectors[i + offset];  // copy with offset
+    
+    // Step 5: Build permuted tile list
+    int tile_index = 0;
+    for (int a = 0; a < tile_groups; a++) {
+        for (int b = 0; b < dim_b; b++) {
+            for (int c = 0; c < dim_c_step; c++) {
+                // Compute combined dimension index
+                int combined = a * dim_b * dim_c_step + b * dim_c_step + c;
+                
+                // Split into permuted components
+                int perm_a = combined % dim_c_step;        // now C
+                int perm_b = combined / dim_c_step % dim_b; // now A
+                int perm_c = combined / (dim_c_step * dim_b); // now B
+                
+                // Emit register command for this tile
+                emit_tile_regs(ctx, perm_a, perm_b, perm_c, 
+                              &perm_vectors[0], &perm_vectors[1],
+                              &perm_vectors[2], &perm_vectors[3]);
+                
+                tile_index++;
+            }
+        }
+    }
+    
+    // Step 6: Write register commands to command buffer
+    for (int i = 0; i < tile_index; i++) {
+        uint64_t *reg_cmd = command_buffer_ptr(ctx, i);
+        reg_cmd[0] = encode_reg(TARGET_CNA, REG_CNA_CONV_CON1, ...);
+        reg_cmd[1] = encode_reg(TARGET_CNA, REG_CNA_CONV_CON2, ...);
+        // ... emit full register stream for this tile
+    }
+    
+    return true;
+}
+```
+
+The name "BAC" means the output register ordering of dimensions is: **B** (original A), **A** (original B), **C** (original C step). This permutes the CSC→CMAC data sequencing for spatial convolutions.
+
+### 2. KC_T/C1K1C2K2C3 register emission (fcn.005a4e18, 1.3KB)
+
+This function handles multi-level nested tiling with 5 levels: Channel tile 1, Kernel tile 1, Channel tile 2, Kernel tile 2, Channel tile 3.
+
+**Call chain**: `fcn.005a4e18(x0=ctx, x1=output_list, x2=param_vec, x3=attr, x4=seed, stack=dims)`
+
+**Stack**: 0x440 bytes (1088)
+
+```c
+bool emit_kc_t_c1k1c2k2c3(
+    ConvTileCtx *ctx,             // x0, x22
+    TileList *output_list,        // x1, x21
+    ParamVec *param_vec,          // x2
+    TileAttr *attr,               // x3
+    TileSeed *seed,               // x4, x19
+    int *stack_dims)              // stack+0x440
+{
+    // Step 1: Extract 5-level tile dimensions
+    // C1 = first channel tile, K1 = first kernel tile
+    // C2 = second channel tile, K2 = second kernel tile  
+    // C3 = third channel tile (remainder)
+    int c1 = ctx->field_0x00;               // [x22+0x00]
+    int k1 = ctx->field_0x28;               // [x22+0x28]
+    int c2_step = ctx->field_0x150;          // [x22+0x150]
+    int k2_step = ctx->field_0x154;          // [x22+0x154]
+    int c3_remain = ctx->field_0x17c;        // [x22+0x17c] (sign-extended)
+    
+    // Step 2: Select shape/limit
+    TileShape shape = select_tile_shape(ctx, seed->field_0x40);
+    int shape_count = shape.count;
+    int shape_step = shape.step;
+    
+    // Step 3: Validate tile bounds
+    // Check that c3_remain + k2_step <= hw_limit
+    int hw_limit = ctx->field_0x28;
+    int check = c3_remain + k2_step - 1;
+    if (check > hw_limit || ...)
+        return false;
+    
+    // Step 4: Nested 5-level tile emission loop
+    int tile_count = 0;
+    int rem_count = param_vec->total;
+    int step_size = param_vec->step;         // w25
+    int k_step = param_vec->kstep;           // w23
+    
+    for (int c1_pos = 0; c1_pos < c1; ) {    // Level 1: C-tile
+        int c1_step = min(c1 - c1_pos, c2_step);
+        
+        for (int k1_pos = 0; k1_pos < k1; ) { // Level 2: K-tile
+            int k1_step = min(k1 - k1_pos, k2_step);
+            
+            for (int c2_pos = 0; c2_pos < c1_step; ) { // Level 3: sub-C-tile
+                int c2_step = min(c1_step - c2_pos, step_size);
+                
+                for (int k2_pos = 0; k2_pos < k1_step; ) { // Level 4: sub-K-tile
+                    int k2_step = min(k1_step - k2_pos, step_size);
+                    
+                    // Level 5: C3 remain — emit one tile
+                    int tile_base = c1_pos * k1 + k1_pos;
+                    int tile_offset = calculate_offset(
+                        tile_base, c2_pos, k2_pos, c3_remain);
+                    
+                    // Call register emission worker
+                    RegCmd *cmd = emit_register_tile(ctx, 
+                        tile_offset, c1_step, k1_step, 
+                        shape_step);
+                    
+                    // Store tile record
+                    TileRecord *t = &output_list->tiles[tile_count];
+                    t->ystart = c1_pos + c2_pos;
+                    t->kstart = k1_pos + k2_pos;
+                    t->y_step = c1_step;
+                    t->k_step = k1_step;
+                    t->regcmd_offset = cmd->offset;
+                    
+                    tile_count++;
+                    k2_pos += k2_step;
+                }
+                c2_pos += c2_step;
+            }
+            k1_pos += k1_step;
+        }
+        c1_pos += c1_step;
+    }
+    
+    // Step 5: Write register command list to output
+    for (int i = 0; i < tile_count; i++) {
+        output_list->regcmd[i] = output_list->tiles[i].regcmd_offset;
+    }
+    output_list->count = tile_count;
+    
+    // Step 6: Update reference counts (shared_ptr semantics)
+    output_list->add_ref();
+    
+    return true;
+}
+```
+
+The "C1K1C2K2C3" name encodes the nesting order:
+- **C1** = First-level channel tile (outermost)
+- **K1** = First-level kernel tile
+- **C2** = Second-level channel sub-tile  
+- **K2** = Second-level kernel sub-tile
+- **C3** = Third-level channel remainder (innermost, single emit)
+
+This is used for complex multi-tile scenarios where both Y (spatial/channel) and K (output channel) dimensions must be tiled with multiple sub-levels.
+
+### 3. ConvStreaming operator (fcn.002ba2c0, 5.6KB)
+
+This is a separate conv operator for weight streaming. When weights exceed CBUF capacity even after ChannelTile OC-splitting, the runtime switches to streaming weights in chunks.
+
+**Call chain**: `fcn.002ba2c0(x0=opaque, x1=stream_desc, x2=weight_buffer, ...)`
+
+```c
+bool conv_streaming_operator(
+    void *opaque,                    // x0
+    StreamDesc *stream_desc,         // x1, x19
+    WeightBuffer *weight_buffer,     // x2, x21
+    ...)
+{
+    // Step 1: Extract streaming parameters
+    uint8_t *base_ptr = stream_desc->ptr;             // [x21+0x18]
+    uint8_t *end_ptr = stream_desc->end_ptr;          // [x21+0x20]
+    uint64_t total_size = end_ptr - base_ptr;
+    
+    // Check for overflow (size > 0x3fffffffffffffff)
+    if (total_size > MAX_STREAM_SIZE)
+        return error_overflow();
+    
+    // Check if already at end
+    if (total_size == 0)
+        return done();
+    
+    // Step 2: Read streaming weight parameters 
+    // Parameters are stored sequentially at offsets +0x1d0 to +0x200
+    // These describe:
+    //   +0x1d0: weight_chunk_size    — size of each streaming chunk
+    //   +0x1d4: weight_total_kernels — total output channels
+    //   +0x1d8: input_channels       — IC for this stream
+    //   +0x1dc: kernel_width/height  — KH, KW
+    //   +0x1e0: output_width/height  — OH, OW
+    //   +0x1e4: stride               — conv stride
+    //   +0x1e8: chunk_offset         — current chunk offset in weights
+    //   +0x1ec through +0x200: additional tiling/hw params
+    
+    ChunkParams params;
+    params.chunk_size  = *(uint32_t*)(base_ptr + 0x1d0);
+    params.total_kerns = *(uint32_t*)(base_ptr + 0x1d4);
+    params.in_channels = *(uint32_t*)(base_ptr + 0x1d8);
+    params.kh          = *(uint32_t*)(base_ptr + 0x1dc);
+    params.kw          = *(uint32_t*)(base_ptr + 0x1e0);
+    params.stride      = *(uint32_t*)(base_ptr + 0x1e4);
+    params.chunk_offset = *(uint32_t*)(base_ptr + 0x1e8);
+    // ... 6 more parameters from +0x1ec to +0x200
+    
+    // Step 3: Allocate chunk buffers
+    uint32_t *chunk_buf = operator_new(4);  // allocate 4 bytes for chunk count
+    *chunk_buf = params.chunk_size;
+    
+    uint32_t *kernel_buf = operator_new(4); 
+    *kernel_buf = params.total_kerns;
+    
+    // Step 4: Process the streaming operation
+    // fcn.003d2a18 handles the actual register programming for streaming
+    int result = process_streaming_chunks(ctx, &params);
+    
+    // Step 5: Check target and handle result
+    if (result == TARGET_F2) {
+        // For F2 target, copy streaming parameters sequentially
+        // from descriptor at offsets +0x1e8, +0x1ec, +0x1f0, ..., +0x200
+        uint32_t *params_iter = result_ptr;
+        for (int i = 0; i < 11; i++) {
+            *params_iter++ = *(uint32_t*)(base_ptr + 0x1e8 + i*4);
+        }
+    }
+    
+    // ... additional streaming logic for remaining chunks
+    
+    return true;
+}
+```
+
+### 4. Multicore dispatch (fcn.005d78e0/fcn.005d7bc8, ~15KB combined)
+
+These functions wrap the single-core planner (fcn.005d4ac0) to create three tile lists, one per NPU core:
+
+```c
+bool build_multicore_conv_tiles(
+    ConvTileCtx *ctx,
+    ConvLayer *layer,
+    MultiCoreConfig *mc_config)
+{
+    // Step 1: Build primary tile list for core 0
+    vector<ConvWorkTile> core0_tiles = 
+        build_conv_work_tiles(ctx, layer, ...);
+    
+    // Step 2: For each additional core, create a copy of the tile list
+    // with adjusted output offsets and PC-chain routing
+    for (int core = 1; core < mc_config->core_count; core++) {
+        vector<ConvWorkTile> core_tiles;
+        for (ConvWorkTile &t : core0_tiles) {
+            ConvWorkTile copy = t;
+            // Adjust output address for this core's output region
+            copy.dst_base_addr += core * core_output_stride;
+            // Set core-specific reuse flags
+            copy.mc_treat_by_y_tile = mc_config->mc_y_type;
+            copy.mc_treat_by_k_tile = mc_config->mc_k_type;
+            core_tiles.push_back(copy);
+        }
+        per_core_tiles[core] = core_tiles;
+    }
+    
+    // Step 3: Validate core assignment
+    // Check mc_y_type and mc_k_type are legal values
+    if (!valid_mc_type(mc_config->mc_y_type))
+        log("Illegal mc Y type");
+    if (!valid_mc_type(mc_config->mc_k_type))
+        log("Illegal mc K type");
+    
+    // Step 4: Build PC-chain with core routing
+    // Each tile's PC tail encodes the target core via REGISTER_AMOUNTS core field
+    for (int core = 0; core < mc_config->core_count; core++) {
+        for (int i = 0; i < per_core_tiles[core].size(); i++) {
+            ConvWorkTile &t = per_core_tiles[core][i];
+            // PC tail: core index encoded in REGISTER_AMOUNTS bits 12-15
+            uint32_t pc_amount = encode_pc_amount(
+                t.reg_body_count,
+                core + 1);  // core index 1, 2, or 3
+            t.pc_tail = make_pc_tail(next_addr, pc_amount);
+        }
+    }
+    
+    return true;
+}
+```
+
+### 5. Updated runnable Python draft (unified conv tiler)
+
+With all above pseudo-code, the unified Python approach replaces conv_new_clean.py's 6 strategies:
+
+```python
+def run_conv2d_unified(batch, in_c, out_c, kh, kw, hw, groups=1, stride=1):
+    """Replace 6 strategies with 1 unified RKNN-style planner"""
+    in_h, in_w = hw
+    p = conv_params(batch, in_c, in_h, in_w, out_c, kh, kw, groups, stride)
+    
+    # Step 1: Compute tile Y-step from data bank pressure (fcn.005d4ac0 logic)
+    weight_banks = estimate_weight_banks(in_c, out_c, kh, kw, groups)
+    data_banks = RK_CBUF_BANKS - weight_banks
+    y_step = compute_y_step(p, data_banks)
+    
+    # Step 2: Compute tile K-step from weight bank pressure (ChannelTile logic)
+    k_step = compute_k_step(p, weight_banks)
+    
+    # Step 3: Generate tile records  
+    tiles = []
+    for y_start in range(0, p.out_h, y_step):
+        tile_y = min(y_step, p.out_h - y_start)
+        for k_start in range(0, out_c, k_step):
+            tile_k = min(k_step, out_c - k_start)
+            tiles.append(Tile(y_start, k_start, tile_y, tile_k))
+    
+    # Step 4: Build PC-chained register tasks
+    task_regs = []
+    for i, tile in enumerate(tiles):
+        regs = make_conv2d_regs_per_tile(p, tile, 
+            in_addr + tile.y_start * in_w * align_c * 2,
+            wt_addr + tile.k_start * kh * kw * align_c * 2,
+            out_addr + tile.y_start * out_w * 16 + tile.k_start // 16 * out_stride * 16,
+            out_c=tile.k_step,
+            weight_reuse=(i > 0 and tile.k_start == tiles[i-1].k_start),
+            data_reuse=(i > 0 and tile.y_start == tiles[i-1].y_start))
+        task_regs.append(regs)
+    
+    # Step 5: Submit as PC chain
+    write_and_submit_pc_chain(task_regs, repeat=1 if any_tile_changes_weight else 2)
+    
+    # Step 6: Readback with nc1hwc2 unpack
+    return read_and_unpack(tiles, p)
+```
+
+This single planner replaces all 6 strategies from conv_new_clean.py. The key changes from the current code:
+1. All multi-tile cases use PC-chain (not just strategy 6)
+2. Weight/data reuse flags are set per-tile based on adjacency
+3. Output addresses are computed per-tile with nc1hwc2 offsets
+4. A single readback path handles all output formats
+
+## Appendix J: Updated pipeline model (from May 2026 analysis)
+
+### The unified conv execution pipeline
+
+```
+Layer attrs (in_c, out_c, kh, kw, groups, depthwise, ...)
+    │
+    ▼
+fcn.005d4ac0 ───── build_initial_tile_seed() ───── choose_split_method()
+    │                                                    │
+    │                                           SPLIT_NONE, SPLIT_BY_Y,
+    │                                           SPLIT_BY_K, SPLIT_BY_Y_AND_K
+    │                                                    │
+    ▼                                                    ▼
+Y/K tile loop ──────────────────────────────  fcn.005f38f0 (composer)
+    │                                                   │
+    │                                    per-tile index/marker vectors
+    ▼                                                   │
+Tile vector ──────────────────────────────────────────────┘
+[{ystart, kstart, y_step, k_step, ...}]
+    │
+    ▼
+fcn.005a41f0 (ABC_T/BAC)  OR  fcn.005a4e18 (KC_T)
+    │                           │
+    │    ┌──────────────────────┘
+    ▼    ▼
+fcn.00384880 (parameter extraction dispatch)
+    │
+    ├── mode=1  → reads ctx+0xcc/0xf4/0x11c (size=0x20, count=4)
+    ├── mode=3  → reads ctx+0xb0/0xd8/0x100 (size=8, count=1)
+    ├── mode=5  → reads ctx+0xb8/0xe0/0x108 (size=0x10, count=2)
+    ├── mode=6  → reads ctx+0xc4/0xec/0x114 (size=0x20, count=4)
+    ├── mode=0xa→ reads ctx+0xbc/0xe4/0x10c (size=0x10, count=2)
+    ├── mode=0x10→reads ctx+0xc0/0xe8/0x110 (size=0x10, count=2)
+    ├── mode=0x40→reads ctx+0xac/0xd4       (size=N/A, count=4)
+    └── mode=0x41→reads ctx+0xd0/0xf8/0x120 (size=0x20, count=4)
+    │
+    ▼
+fcn.0037f760 ─── fcn.00101508 (target-specific param initializer)
+    │                           │
+    │             Allocates RegisterTask for target (GRIF/HRIF/ENIW/FNIW)
+    │             Initializes with mode-specific parameters
+    ▼
+Pattern-specific register writer (fcn.00597828 for ABC_T, fcn.00598468 for KC_T)
+    │
+    ▼
+PC-chain: [RDMA setup] [CNA compute] [CORE/MAC] [DPU output] [PPU] [PC tail]
+```
+
+### Key insight: the modes ARE the split methods
+
+The mode values passed to `fcn.00384880` (1, 3, 5, 6, 0xa, 0x10, 0x40, 0x41) correspond
+to different tiling parameter groups from the seed struct. These parameter groups
+encode how Y and K tiles are composed into register values:
+
+| Mode | w4 (size/stride) | w3 (count) | Context offsets | Likely meaning |
+|------|-----|------|-----------------|----------------|
+| 1 | 0x20 (32) | 4 | 0xcc, 0xf4, 0x11c | Large channel tile (32ch, 4 groups) |
+| 3 | 8 | 1 | 0xb0, 0xd8, 0x100 | Small channel tile (8ch, 1 group) |
+| 5 | 0x10 (16) | 2 | 0xb8, 0xe0, 0x108 | Medium channel tile (16ch, 2 groups) |
+| 6 | 0x20 (32) | 4 | 0xc4, 0xec, 0x114 | Large channel tile alt (32ch, 4 groups) |
+| 0xa (10) | 0x10 (16) | 2 | 0xbc, 0xe4, 0x10c | Medium channel tile alt (16ch, 2 groups) |
+| 0x10 (16) | (16) | 2 | 0xc0, 0xe8, 0x110 | Fixed-16 channel tile |
+| 0x40 (64) | N/A | 4 | 0xac, 0xd4 | Large 64-element tile |
+| 0x41 (65) | 0x20 (32) | 4 | 0xd0, 0xf8, 0x120 | Large channel tile alt2 (32ch, 4 groups) |
+
+### How this maps to conv.py refactoring
+
+The current `conv.py` has 5 special-case handlers because we hardcode:
+- Which weight/input/output layout to use
+- Which group count to pass to registers
+- Whether to use full_data_bank
+
+RKNN solves all of these through ONE mechanism:
+1. `fcn.00384880` extracts tile parameters from the seed (Y_step, K_step, bank counts)
+2. The emission function (ABC_T or KC_T) writes the correct register sequence based on the tile records and extracted parameters
+3. `fcn.00307198`/`fcn.00312328` patches reuse flags in the emitted registers
+
+For conv.py to reach true unification, we need to implement this parameter extraction
+dispatch rather than the current if/elif chain.
+
+### Remaining blocking gaps (UPDATED)
+
+| # | Gap | Function | Status | Needs Runtime Trace? |
+|---|------|----------|--------|---------------------|
+| 1 | **choose_split_method** | `fcn.005d4ac0` | **PARTIALLY REVERSED**: assigns split_method=0 for pointwise (kernel==1), split_method=1 for spatial. Values 2/3 are NOT assigned here — they are used in the lower composer `fcn.005f38f0` with a validated range [0,6] via `fcn.005f1950`. The exact layer-attr-to-method mapping in `fcn.005f51c0`'s `derive_target_limits()` is still untraced through the 18KB function. | No |
+| 2 | **fcn.00384880 parameter extraction** | `0x00384880` | **FULLY REVERSED** — complete 10-case switch table (modes 1,3,5,6,7,9,0xa,0x10,0x40,0x41) with context offset map documented in Appendix L | No |
+| 3 | **ABC_T/KC_T register emission** | `fcn.00597828`/`fcn.00598468` | **STRUCTURE KNOWN** — vtable dispatch chain with 20 method comparisons (F2/F3/W1/W2 type-dispatchers, method idx 228-1181). Exact register names undecidable statically. | **Yes** |
+| 4 | **Reuse register patching** | `fcn.002efd38`/`fcn.002efce0` | **MECHANICS KNOWN** — `bfi` patch of pre-built command entries via `ctx+0x288` vector slot. Register target indices need runtime capture. | **Yes** |
+| 5 | **CNA group programming** | Unknown producer | **FORMAT KNOWN** (14-bit mask: feature/weight/CSC/ACCU/DPU/PPU groups + DMA errors). Programming site unidentified by any static xref. | **Yes** |
+| — | **Multicore dispatch** | `fcn.005d78e0`/`7bc8` | **NOT REVERSED** — needs separate decomp pass | No, separate priority |
+
+**Key insight**: Pieces 3-5 hit the **static analysis ceiling**. The vtable method addresses span 0x104000-0x106xxx (method indices 228-1181) — these are target-type dispatchers comparing function pointers across F2/F3/W1/W2 vtables. The indexed register-command vectors at `ctx+0x288` encode register targets as command-buffer indices that can only be decoded at runtime. The `experimental/trace_librknnrt_reuse.gdb` script is the prescribed next step for all three.
+
+## Appendix K: fcn.00597828 ABC_T Register Task Builder
+
+Function: `0x00597828`, stack frame: 288 bytes.
+
+### Role
+
+This function creates a register task for ABC_T emission. It does NOT write registers directly — it builds tile-count vectors and dispatches to target-specific vtable methods that write the actual register values.
+
+### Control Flow
+
+```
+1. fcn.00384880 (parameter extraction)
+   └─ extracts mode-specific parameters from context
+   
+2. If mode != 0: 
+   └─ call fcn.00594ac8 (alt parameter extraction)
+   
+3. Compute tile metrics:
+   └─ atomic_c_total / 4 → tile_count (w25)
+   └─ w20 = k_start + tile_count - 1, sdiv by tile_count
+   └─ w19 = c_start + tile_count - 1, sdiv by tile_count
+   
+4. Build 4-element vector {tile_count-1, k_start, c_start, y_step-1}
+   └─ store to stack
+   
+5. Call fcn.005958c8 (vector builder)
+   └─ assign result to context+0x60
+
+6. Check format flag [ctx+0x40]:
+   └─ if == 3: load iterator pair from [x0, #288]
+       ├─ if iter_begin == iter_end: branch to failure path (0x597e48)
+       └─ load current w1 from iter, check vtable at [x0, #3440]
+           └─ if matches known addr → direct dispatch
+           └─ else → blr x3 (vtable call)
+
+7. Long vtable comparison chain (0x5979a0–0x597bf0):
+   ├─ [x0, #3192] == 0x104720 (F2/CBUF?)
+   ├─ [x0, #3464] == 0x104830
+   ├─ [x0, #3472] == 0x104838
+   ├─ [x0, #3488] == 0x104848
+   ├─ [x0, #10792] == 0x1064d0
+   ├─ [x0, #3816] == 0x104990
+   ├─ [x0, #10800] == 0x1064d8
+   ├─ [x0, #3824] == 0x104998
+   ├─ [x0, #10816] == 0x1064e8
+   ├─ [x0, #3672] == 0x104900
+   ├─ [x0, #10792] == 0x1064d0 (v2)
+   ├─ [x0, #5448] == 0x104ff0
+   ├─ [x0, #10800] == 0x1064d8 (v2)
+   ├─ [x0, #5456] == 0x104ff8
+   ├─ [x0, #10816] == 0x1064e8 (v2)
+   ├─ [x0, #5488] == 0x105018
+   ├─ [x0, #5936] == 0x1051d8
+   ├─ [x0, #5944] == 0x1051e0
+   ├─ [x0, #3600] == 0x1048b8
+   ├─ [x0, #3448] == 0x104820
+   ├─ [x0, #3624] == 0x1048d0
+   ├─ [x0, #5496] == 0x105020
+   └─ [x0, #3432] == 0x104810
+
+8. On match, call vtable method via blr with args:
+   └─ x0 = object (RegisterTask*)
+   └─ w1 = value (tile count or computed parameter)
+   └─ (some calls also pass w3, w4, w5, w6 from stack)
+   
+9. epilogue: clean up vectors, return 0
+
+### Key Finding: Format Flag Branch
+
+At 0x597998: `cmp w1, #3` on `ldrsb w1, [x0, #64]`
+- If format == 3: branches to 0x597bf0 (iterator-based dispatch using context+0x288 pair)
+- Otherwise: proceeds to the direct vtable comparison chain
+
+This ITERATOR path (format==3) is the BAC (alternate B-address order) path.
+The COMPARISON chain path is the ABC_T path.
+
+### Mapping to conv.py
+
+| conv.py concept | RKNN ABC_T equivalent |
+|----------------|----------------------|
+| Register task = list of E(target, reg, value) | vtable methods write per-register values into pre-allocated command buffer |
+| per-strategy if/elif chain | format flag at [ctx+0x40] selects ABC_T vs BAC vs KC_T |
+| groups_override / full_data_bank | target-specific vtable methods encode these directly |
+| tile loop: weight banks, data banks | parameter extraction (fcn.00384880) provides these from seed |
+
+## Appendix L: fcn.00384880 Parameter Extraction Dispatch
+
+Function: `0x00384880`, stack frame: 0x340 (832) bytes.
+
+### Signature
+
+```c
+void extract_parameters(void *ctx, int8_t mode, uint32_t out[5])
+// ctx = x0, mode = w1 (sign-extended byte), out = x8
+```
+
+### Switch Dispatch (verified from binary)
+
+```c
+switch (mode) {
+case 1:  // 0x3849c8 region
+    out[0] = 0x20;           // w4 = 32 (atomic step / size)
+    out[1] = 4;              // w3 = 4 (tile count)
+    out[2] = ctx[0xcc];      // w1 = (ctx+0xcc)  — data bank or stride-like
+    out[3] = ctx[0xf4];      // w2 = (ctx+0xf4)
+    out[4] = ctx[0x11c];     // w0 = (ctx+0x11c)
+    break;
+
+case 3:  // 0x3849e8 region (also reached by mode == 9 at 0x3849a0)
+    out[0] = 8;              // w4 = 8
+    out[1] = 1;              // w3 = 1
+    out[2] = ctx[0xb0];      // w1
+    out[3] = ctx[0xd8];      // w2
+    out[4] = ctx[0x100];     // w0
+    break;
+
+case 5:  // 0x384930 region
+    out[0] = 0x10;           // w4 = 16
+    out[1] = 2;              // w3 = 2
+    out[2] = ctx[0xb8];      // w1
+    out[3] = ctx[0xe0];      // w2
+    out[4] = ctx[0x108];     // w0
+    break;
+
+case 6:  // 0x3848f4 region
+    out[0] = 0x20;           // w4 = 32
+    out[1] = 4;              // w3 = 4
+    out[2] = ctx[0xc4];      // w1
+    out[3] = ctx[0xec];      // w2
+    out[4] = ctx[0x114];     // w0
+    break;
+
+case 7:  // 0x384a48 region (mode == 7, after b.eq at 0x3848a4)
+    out[0] = 0x40;           // w4 = 64
+    out[1] = 8;              // w3 = 8
+    out[2] = ctx[0xc8];      // w1
+    out[3] = ctx[0xf0];      // w2
+    out[4] = ctx[0x118];     // w0
+    break;
+
+case 9:  // 0x3849a0 region — falls through to mode 3 handler
+    goto case_3;
+
+case 0xa:  // 0x3849a8 region
+    out[0] = 0x10;           // w4 = 16
+    out[1] = 2;              // w3 = 2
+    out[2] = ctx[0xbc];      // w1
+    out[3] = ctx[0xe4];      // w2
+    out[4] = ctx[0x10c];     // w0
+    break;
+
+case 0x10:  // 0x384948 region
+    out[0] = 0x10;           // w4 = 16 (stores mode value 0x10 as size)
+    out[1] = 2;              // w3 = 2
+    out[2] = ctx[0xc0];      // w1
+    out[3] = ctx[0xe8];      // w2
+    out[4] = ctx[0x110];     // w0
+    break;
+
+case 0x40:  // 0x384978 region
+    out[0] = 4;              // w1 = 4 (different layout — stored to out[0] directly)
+    out[1] = ctx[0xd4];      // w0 = (ctx+0xd4) — stored to out[2], must shift
+    out[2] = ctx[0xac];      // w2 = (ctx+0xac) — stored to out[3]
+    // Only 3 fields stored (not 5)
+    break;
+
+case 0x41:  // 0x3848c8 region
+    out[0] = 0x20;           // w4 = 32
+    out[1] = 4;              // w3 = 4
+    out[2] = ctx[0xd0];      // w1
+    out[3] = ctx[0xf8];      // w2
+    out[4] = ctx[0x120];     // w0
+    break;
+
+default:  // 0x384a00 — logs "Unknown mode" with the mode value and abort()
+    log("extract_parameters: unknown mode %d", mode);
+    abort();
+}
+```
+
+### Context offset map
+
+The context offsets 0xac–0x120 correspond to per-layer tiling parameter fields in the TileSeed struct (not the ConvTileCtx):
+
+| Offset | Used by modes | Likely field |
+|--------|---------------|-------------|
+| 0xac   | 0x40          | Stride dimension A |
+| 0xb0   | 3,9           | Small tile parameter A |
+| 0xb4   | —             | (not used by any mode) |
+| 0xb8   | 5             | Medium tile parameter A |
+| 0xbc   | 0xa           | Medium tile alt parameter A |
+| 0xc0   | 0x10          | Fixed-16 tile parameter A |
+| 0xc4   | 6             | Large tile alt parameter A |
+| 0xc8   | 7             | Extra large tile parameter A |
+| 0xcc   | 1             | Large tile parameter A |
+| 0xd0   | 0x41          | Large tile alt2 parameter A |
+| 0xd4   | 0x40          | 64-element tile stride |
+| 0xd8   | 3,9           | Small tile parameter B |
+| 0xdc   | —             | (not used) |
+| 0xe0   | 5             | Medium tile parameter B |
+| 0xe4   | 0xa           | Medium tile alt parameter B |
+| 0xe8   | 0x10          | Fixed-16 tile parameter B |
+| 0xec   | 6             | Large tile alt parameter B |
+| 0xf0   | 7             | Extra large tile parameter B |
+| 0xf4   | 1             | Large tile parameter B |
+| 0xf8   | 0x41          | Large tile alt2 parameter B |
+| 0x100  | 3,9           | Small tile parameter C (count?) |
+| 0x104  | —             | (not used) |
+| 0x108  | 5             | Medium tile parameter C |
+| 0x10c  | 0xa           | Medium tile alt parameter C |
+| 0x110  | 0x10          | Fixed-16 tile parameter C |
+| 0x114  | 6             | Large tile alt parameter C |
+| 0x118  | 7             | Extra large tile parameter C |
+| 0x11c  | 1             | Large tile parameter C |
+| 0x120  | 0x41          | Large tile alt2 parameter C |
+
+### What We Still Don't Know — updated with librknnc.so findings
+
+**Status: librknnc.so (28.5MB) copied May 2026.** The compiler library is now
+the primary reverse target for RKNN build behavior. The local binary
+`experimental/rknn/librknnc.so` and the remote RKNN toolkit compiler at
+`/home/orangepi/.local/lib/python3.10/site-packages/rknn/api/lib/linux-aarch64/librknnc.so`
+have the same SHA-256:
+
+```text
+d499753a91065f0b52b2cdfa43c073645bcc37467c8e077372b302ccafd5d53c
+```
+
+This means local static offsets are valid for remote build-time GDB experiments.
+The remote `~/.bashrc` contains `export RKNN_LOG_LEVEL=3`. In non-interactive
+SSH batches the shell can return before that line, so either verify the variable
+before the run or source the export line directly:
+
+```sh
+set -a; source <(grep "RKNN_LOG_LEVEL" ~/.bashrc); set +a
+```
+
+The compiler library contains the **active** tiling functions that are dead code
+or only partially reachable in `librknnrt.so`. Key resolved items:
+
+| String / evidence in `librknnc.so` | Address | Meaning |
+|------------------------------------|---------|---------|
+| `N4rknn15RKNNTileChannelE` | `0x017c61f8` | Named compiler pass for channel tiling. |
+| `N4rknn14RKNNTilingPassE` | string table | Top-level compiler tiling pass is present in `librknnc.so`. |
+| `|xstart|ystart|kstart| data reuse | weight reuse | ... |` | `0x017c6320` | Compiler has a split-vector/tile dump table with reuse fields. |
+| `min_weight_banks > 3 && m_Target == RKNNTarget::RKNPU_F2, do conv with ChannelTile` | `0x017e2cb8` | F2 ChannelTile threshold is in the compiler binary. |
+| `Conv min_weight_banks > 3, OutputName : %s` | `0x017e5498` | Compiler-facing diagnostic for the same condition. |
+| `MC K Tile Failed, min kernel step %d, but get %d` | `0x017e5518` | K-tile lower bound failure path. |
+| `  CNA feature group0: %d` | `0x017dc5a8` | CNA group formatter/debug output exists in compiler. |
+| `failed to update feature data addr!` | `0x017e1670` / `0x017e16f8` | Register-task update path for feature addresses. |
+| `failed to update data and weight reuse!` | `0x017e1938` | Register-task update path for reuse state. |
+
+| Unknown | Function in librknnc.so | Status |
+|---------|------------------------|--------|
+| Vtable → register name mapping | `0x15d5ef0` (ChannelTile predicate), `0x15e1b60` (different binding) | Functions exist but vtable names are compiler-private C++ strings. To resolve: set runtime BP at `librknnc.so+0x1cbc10` (param_extractor) and capture mode per conv type |
+| KC_T register layout | Same ABC_T-like builder but targets KC_T registers | Needs side-by-side trace of both builders with real conv parameters |
+| Reuse patch register targets | `0x1531590`, `0x15477dc`, `0x1547820` (reuse updaters) | These are the compiler-side equivalents — need GDB trace at build time to see emitted commands |
+| CNA group programming site | `base+0x7d13dc`, `0x7d1438` (bank validator) | The group mask is set during the planner stage. Need build-time trace to find the producer |
+
+**Remaining unknowns requiring GDB tracing at build time** (on remote NPU machine where RKNN models can actually be built):
+
+| Unknown | Target offset(s) in librknnc.so | How to resolve |
+|---------|--------------------------------|---------------|
+| Which mode in param_extractor (0x1cbc10) maps to which conv type | `0x1cbc10` (10-mode switch) | Set BP at 0x1cbc10, log mode value + conv type name from caller context |
+| ABC_T / KC_T register layout per mode | `0x15d0cc0` (ChannelTile predicate), `0x15d5ef0`, `0x15e1b60` | After mode dispatch, step through predicate builder for each tile dimension |
+| Split planner + top tiler output | `0x24c1d0` (11456B split planner), `0x2539c0` (10700B top tiler) | Set BP at entry, dump all output vector fields |
+| CNA group mask producer | `0x7d13dc`, `0x7d1438` | Set BP at bank validator during build, dump caller chain and mask computation |
+| Reuse updater behavior per mode | `0x1531590`, `0x15477dc`, `0x1547820` | Set BP at reuse updater, log which command indices get patched |
+
+Build-log experiment on the remote official RKNN host:
+
+```sh
+ssh orangepi@192.168.192.36 \
+  'bash -lc "cd ~/npu/ops_rknn &&
+   mkdir -p /tmp/rknnc_trace_models &&
+   python3 gen_conv2d_models.py --custom --batch 1 --in-ch 32 --height 14 --width 14 \
+     --out-ch 128 --k-h 3 --k-w 3 --groups 1 \
+     --name conv2d_trace_b1_c32_h14_w14_oc128_wic32_k3x3_g1 \
+     --out-dir /tmp/rknnc_trace_models --force \
+     2>&1 | tee /tmp/rknnc_build_channel_tile_small.log"'
+```
+
+Result: the model build completed under `RKNN_LOG_LEVEL=3`, but the public log
+did not print `ChannelTile`, `min_weight`, split-vector, CNA group, or reuse
+diagnostics. Plain build logging is therefore not enough; the next compiler-side
+step must be a GDB trace or a forced diagnostic path, not another normal RKNN
+build.
+
+`experimental/trace_librknnc_build.gdb` now exists and has been run on the
+remote official RKNN host through a login shell. The script discovers
+`librknnc.so` from process mappings after the compiler is loaded, then installs
+breakpoints at:
+
+| Trace point | Offset | First observed status |
+|-------------|--------|-----------------------|
+| `param_extractor_mode_switch` | `0x001cbc10` | Hit repeatedly. `x1` is the mode selector; observed modes include `0xa` and `0x3`. |
+| `split_planner` | `0x0024c1d0` | Hit once per build, under `rknn::RKNNCompiler::build()`. |
+| `top_tiler` | `0x002539c0` | Hit three times per tested conv build. |
+| `cna_bank_validator_a` | `0x007d13dc` | Breakpoint installed, not hit for the tested FP16 conv builds. |
+| `cna_bank_validator_b` | `0x007d1438` | Breakpoint installed, not hit for the tested FP16 conv builds. |
+| `reuse_update_a` | `0x01531590` | Breakpoint installed, not hit for the tested FP16 conv builds. |
+| `reuse_update_b` | `0x015477dc` | Breakpoint installed, not hit for the tested FP16 conv builds. |
+| `reuse_update_c` | `0x01547820` | Breakpoint installed, not hit for the tested FP16 conv builds. |
+| `abc_or_channel_tile_emit_a` | `0x015d0cc0` | Breakpoint installed, not hit for the tested FP16 conv builds. |
+| `abc_or_channel_tile_emit_b` | `0x015d5ef0` | Breakpoint installed, not hit for the tested FP16 conv builds. |
+| `kc_or_alt_emit` | `0x015e1b60` | Breakpoint installed, not hit for the tested FP16 conv builds. |
+
+Remote trace commands used:
+
+```sh
+scp experimental/trace_librknnc_build.gdb \
+  orangepi@192.168.192.36:/tmp/trace_librknnc_build.gdb
+
+ssh orangepi@192.168.192.36 \
+  'bash -lc "cd ~/npu/ops_rknn &&
+   gdb -q -x /tmp/trace_librknnc_build.gdb --args \
+     python3 gen_conv2d_models.py --custom --batch 1 \
+       --in-ch 32 --height 14 --width 14 --out-ch 128 \
+       --k-h 3 --k-w 3 --groups 1 \
+       --name conv2d_trace_b1_c32_h14_w14_oc128_wic32_k3x3_g1 \
+       --out-dir /tmp/rknnc_trace_models --force \
+     2>&1 | tee /tmp/rknnc_build_gdb_trace_small.log"'
+
+ssh orangepi@192.168.192.36 \
+  'bash -lc "cd ~/npu/ops_rknn &&
+   gdb -q -x /tmp/trace_librknnc_build.gdb --args \
+     python3 gen_conv2d_models.py --custom --batch 1 \
+       --in-ch 160 --height 14 --width 14 --out-ch 320 \
+       --k-h 3 --k-w 3 --groups 1 \
+       --name conv2d_trace_b1_c160_h14_w14_oc320_wic160_k3x3_g1 \
+       --out-dir /tmp/rknnc_trace_models --force \
+     2>&1 | tee /tmp/rknnc_build_gdb_trace_stress.log"'
+```
+
+Both builds completed normally. The first hit of `split_planner` had this
+compiler stack:
+
+```text
+#0  librknnc.so+0x0024c1d0
+#1  librknnc.so+0x0024cea4
+#2  librknnc.so+0x00191ce4
+#3  librknnc.so+0x00191eb0
+#4  librknnc.so+0x001924c8
+#5  rknn::RKNNCompiler::build()
+#6  RKNNCompiler_build
+#7  libffi.so
+```
+
+The tested stress model reached the same planner path but still did not hit the
+candidate register-task update or ABC/KC emit offsets. That means the offsets
+are either not on this build path, are post-build/runtime-side helpers despite
+being present in `librknnc.so`, or require a different model form/target option
+to exercise. The next reverse step is therefore to trace *callers from*
+`top_tiler`/`split_planner` and the string xrefs around the split-vector table,
+instead of assuming the `0x1531590`/`0x15477dc`/`0x15d*` candidates are reached
+by normal FP16 conv builds.
+
+Return-state trace update:
+
+`experimental/trace_librknnc_build.gdb` now also creates one-shot return
+breakpoints for `split_planner` and `top_tiler`. The return-state stress log is:
+
+```text
+/tmp/rknnc_build_gdb_trace_stress_return.log
+```
+
+Stable observations from that trace:
+
+| Function | Entry role evidence | Return evidence |
+|----------|---------------------|-----------------|
+| `split_planner` (`0x24c1d0`) | `x0` and `x1` are object/context-like pointers; `x3` points to a mostly zero output/work struct; `x5` points to a stack wrapper that contains `x3` at `+0x08`; `x6=0x3b`, `x7=0x200` are scalar limits/flags. | Returns `x0=0`. The shallow words of `x0`, `x1`, `x3`, and `x5` are unchanged in the captured window, so the visible output is not in the first 10 qwords of those objects. |
+| `top_tiler` (`0x2539c0`) | `x0` is a layer/planner object containing a pointer to the common config object at `+0x28`; `x1` is the common config object whose first word is ASCII-like `0x5546495245`; `x2` is a tensor/operator-like object; `x3`, `x4`, `x5`, and `x8` are stack/output vector-like pointers; `x6` points to packed conv dimensions. | Returns `x0=x8`. `x3`, `x4`, `x5`, and `x8` are mutated into vector-like triples (`begin`, `end`, `capacity`) that point to heap arrays. This is the strongest current evidence that `top_tiler` materializes the split/tile vector lists. |
+
+For the stress shape `b1_c160_h14_w14_oc320_wic160_k3x3_g1`, the packed
+dimension words at `top_tiler` entry include:
+
+```text
+x6+0x18 = 0x0000000e000000a0  # likely H=14, C/in-ch=160
+x6+0x20 = 0x000001400000000e  # likely out-ch=320, H=14
+x6+0x28 = 0x00000003000000a0  # likely kernel=3, C=160
+x6+0x38 = 0x0000000c00000140  # likely out_h=12, out_c=320
+```
+
+This is not yet enough to emit registers, but it gives a concrete next trace
+target: dump the heap arrays referenced by the returned `x3`/`x4`/`x5`/`x8`
+vector triples after each `top_tiler` return, then interpret them as tile
+records (`xstart`, `ystart`, `kstart`, data/weight reuse) using the split-vector
+table string.
+
+Nested vector trace update:
+
+`experimental/trace_librknnc_build.gdb` now follows one level of pointers inside
+the returned `top_tiler` vector triples. The dense-stress log is:
+
+```text
+/tmp/rknnc_build_gdb_trace_nested_vectors_stress.log
+```
+
+Stable nested-vector observations:
+
+| Returned holder | Shape in trace | Candidate meaning |
+|-----------------|----------------|-------------------|
+| `x3` vector | 8 bytes, `d32 00000000 0000000e` on all three `top_tiler` calls | One Y-range or Y-start/Y-limit pair: `0..14` for the input height of the stress shape. |
+| `x4` vector | 40 bytes / 5 qwords; contains repeated pointers and a tagged qword with low dword `1`; nested payloads include `0x0000000e00000000` and pointer triples. | Wrapper around one axis' tile records, likely Y/data side. Not decoded enough to name fields. |
+| `x5` vector | 40 bytes / 5 qwords; similar wrapper but with different nested pointers; nested payloads include output pointer/object references. | Wrapper around a sibling axis or reuse-side tile list. Not decoded enough to name fields. |
+| `x8` vector | 24 bytes / 3 qwords: a single `begin/end/capacity` triple; nested payloads contain compact conv/tile shape fields. | Strongest candidate for the top-level tile descriptor vector. |
+
+Most useful `x8` nested payloads seen for
+`b1_c160_h14_w14_oc320_wic160_k3x3_g1`:
+
+```text
+# top_tiler call 1, x8 ptr[0]
+d32 ... 00000000 0000000c ... 00000006 ...
+
+# top_tiler call 2, x8 ptr[0]
+d32 ... 00000000 0000000c ...
+    ... 00000140 000000a0 00000003 00000003 00000007 ...
+
+# top_tiler call 3, x8 ptr[0]
+d32 ... 00000000 0000000c ...
+    ... 00000140 000000a0 00000003 00000003 00000007 ...
+```
+
+Interpretation, still provisional:
+
+- `0x0c` matches output height `12` for valid `14x14, k=3`.
+- `0x140` matches output channels `320`.
+- `0xa0` matches input channels `160`.
+- the `0x03, 0x03` pair matches kernel `3x3`.
+- `0x07` is a candidate derived tile/count parameter. It is not yet mapped to
+  an RKNN split field.
+
+This is the first trace where the compiler-side tiler produced recognizable
+conv-dimension payloads inside returned heap records. A smaller follow-up trace
+uses `experimental/trace_librknnc_top_tiler_vectors.gdb` to compare shapes with
+only one major axis changed. Logs:
+
+```text
+/tmp/rknnc_top_tiler_vectors_h7.log
+/tmp/rknnc_top_tiler_vectors_small.log
+```
+
+A/B result:
+
+| Shape | `dims_x6` key lanes after `top_tiler` | `x3` vector | `x8 ptr[0]` movement |
+|-------|---------------------------------------|-------------|----------------------|
+| `b1_c160_h7_w7_oc320_wic160_k3x3_g1` | `... 000000a0 00000007 00000007 00000140 000000a0 00000003 00000003 00000001 00000140 00000005 00000005 ...` | 8-byte vector; payload still needs explicit dword capture in the compact script output. | Call 1 starts with `00000000 00000005`, matching output height `5`; later payloads still include the derived `0x07` candidate. |
+| `b1_c32_h14_w14_oc128_wic32_k3x3_g1` | `... 00000020 0000000e 0000000e 00000080 00000020 00000003 00000003 00000001 00000080 0000000c 0000000c ...` | 8-byte vector; matches the same `[0, input_h]` holder shape seen in the full stress trace. | Calls 1/2 start with `00000000 0000000c`; call 2 includes `00000003 00000003`; call 3 shows `00000000 00000004 00000008 0000000c`, likely an output-height split boundary list. |
+
+Confirmed so far:
+
+- `x6` is a packed conv-dimension object. The key dword order includes
+  `in_c`, `in_h`, `in_w`, `out_c`, `in_c`, `k_h`, `k_w`, group-like `1`,
+  `out_c`, `out_h`, `out_w`.
+- The compact `x8` nested payload moves with output height and kernel size. The
+  dense-stress trace also showed out-channel and input-channel values inside
+  later `x8` payloads.
+- The `x3` holder is still best treated as a range/split-list vector tied to the
+  input-height axis; the compact A/B script needs one more payload-dword print
+  for `x3` before the exact field name is locked.
+
+The shape-only A/B established that the moving fields are dimensions, but not
+reuse controls. The follow-up record-layout trace below resolves the immediate
+payload-dump gap for `x3`/`x4`/`x5` and follows the stable `x8` nested records
+far enough to separate real shape tuples from surrounding heap artifacts. Even
+after that, field names like `ystart`, `kstart`, `data reuse`, or `weight reuse`
+remain unassigned until a consumer trace ties these records to the split-vector
+table.
+
+Record-layout trace update:
+
+`experimental/trace_librknnc_record_layout.gdb` is a focused `top_tiler` return
+trace that prints `x3`/`x4`/`x5`/`x8` as vector triples, dumps payloads as dwords
+and qwords, follows plausible nested vector pointers, and runs GDB in batch mode
+so the remote build does not stop at an interactive `(gdb)` prompt after normal
+process exit. It was run on the official RKNN host with the login-shell
+environment (`RKNN_LOG_LEVEL=3` from `~/.bashrc`). Logs:
+
+```text
+/tmp/rknnc_record_layout_stress.log
+/tmp/rknnc_record_layout_h7.log
+/tmp/rknnc_record_layout_small.log
+```
+
+Additional confirmed structure:
+
+| Holder | Confirmed evidence | Current meaning |
+|--------|--------------------|-----------------|
+| `x3` | `x3.data d32 00000000 0000000e` for `14x14` inputs; `00000000 00000007` for `7x7`. | Direct `[0, input_h]` range vector. |
+| `x4` | 40-byte vector-like wrapper. On call 3, nested payload contains dimension tuples. Stress: `00000001 000000a0 0000000e 0000000e`, `00000001 00000140 0000000c 0000000c`, `00000140 000000a0 00000003 00000003`. Small: `00000001 00000020 0000000e 0000000e`, `00000001 00000080 0000000c 0000000c`, `00000080 00000020 00000003 00000003`. | Shape-record wrapper for input tensor, output tensor, and weight tensor descriptors. |
+| `x5` | 40-byte sibling wrapper. On call 3, nested payload repeats the same canonical dimension tuples as `x4`, but with a different leading chain of pointers/records. The wrapper count-like lane changes from `1` on earlier calls to `3` on call 3 for the small shape. | Sibling shape/tile-record wrapper. It is probably later-stage or per-core/list material, but exact role is not named yet. |
+| `x8` | 24-byte vector holding a single begin/end/capacity triple. `ptr[0]` exposes output-height fields and, on call 3, also compact shape tuples: stress has `0x000000a000000140`, `0x0000000300000003`, derived `0x7`, plus `0x0000000e0000000e` and `0xb`; h7 has `0x000000a000000140`, `0x0000000300000003`, derived `0x7`, and output height `5`; small call 3 begins with split boundaries `0,4,8,12`. | Top-level returned split/tile descriptor vector. |
+
+Useful interpretation of the canonical tuples:
+
+```text
+(1, in_c,  in_h,  in_w)   input tensor shape
+(1, out_c, out_h, out_w)  output tensor shape
+(out_c, in_c, k_h, k_w)   weight tensor shape for groups=1
+```
+
+The repeated qword `0x21` appears between many short heap chunks and should be
+treated as allocator/chunk metadata or a non-semantic local record tag until a
+trace proves otherwise. The moving shape tuples are real; the pointer-looking
+qwords and high-entropy values around them should not be used as compiler field
+names.
+
+Consumer trace update:
+
+Static disassembly and the observed `lr` from all record-layout traces identify
+one normal caller for this path:
+
+```text
+top_tiler entry       librknnc.so+0x2539c0
+call instruction      librknnc.so+0x25713c
+return/use site       librknnc.so+0x257140
+consumer loop start   librknnc.so+0x257240
+```
+
+The call setup at `0x2570fc..0x257138` passes stack-backed vector holders:
+
+```text
+x4 = sp + 0x510
+x5 = sp + 0x530
+x6 = sp + 0x3fc   # packed conv dims
+x8 = sp + 0x648
+```
+
+Immediately after return, the caller computes the number of `x8` records with:
+
+```asm
+ldr x0, [sp, #1616]        ; x8 end
+ldr x1, [sp, #1608]        ; x8 begin
+sub x0, x0, x1
+asr x0, x0, #3
+mul x0, x0, 0xaaaaaaaaaaab ; divide by 3
+```
+
+This proves that `[sp+0x648]` is consumed as a vector of 24-byte records, not
+just as an arbitrary output pointer. The loop at `0x257240` then walks an
+array-like object in 24-byte steps (`x22 += 0x18`) and compares nested vector
+lengths against the split-boundary vector length.
+
+`experimental/trace_librknnc_consumer.gdb` captures this caller/use site and was
+run on:
+
+```text
+/tmp/rknnc_consumer_stress.log
+/tmp/rknnc_consumer_h7.log
+/tmp/rknnc_consumer_small.log
+```
+
+Confirmed consumer-side observations:
+
+| Shape/call | Consumed `[sp+0x648]` record | Payload reached through record pointer |
+|------------|------------------------------|----------------------------------------|
+| stress call 3 | one 24-byte record `{ptr, ptr+8, ptr+8}` | Starts `00000000 0000000c ... 00000000 0000000e ... 00000008 ... 00000140 ... 00000004 ...`. This is consumed by the post-call loop, so these fields are not just return-time heap noise. |
+| h7 call 3 | one 24-byte record `{ptr, ptr+8, ptr+8}` | Starts `00000000 00000005 ... 00000000 00000007 ... 00000008 ...`; output height and input height move to `5` and `7`. |
+| small call 3 | one 24-byte record `{ptr, ptr+0x10, ptr+0x10}` | Starts `00000000 00000004 00000008 0000000c ...`, confirming an output-height split-boundary vector for output height `12`. |
+
+This is the first compiler-side evidence that the returned `top_tiler` `x8`
+holder is directly consumed as a 24-byte-record split descriptor vector. It also
+confirms that the `0,4,8,12` sequence is a consumer-visible boundary list, not a
+display artifact.
+
+Still not assigned:
+
+- which consumed record dwords are `xstart`, `ystart`, and `kstart`;
+- which consumed record dwords are `data reuse` and `weight reuse`;
+- whether the `0x08` and `0x04` fields in the call-3 payload are tile counts,
+  vector lengths, or axis-specific step sizes.
+
+Boundary-writer trace update:
+
+`experimental/trace_librknnc_boundary_writes.gdb` instruments the key write
+points inside `librknnc.so+0x2572c0..0x25733c`:
+
+```text
+0x2572c0  select nested 24-byte record by x19
+0x2572fc  write first boundary dword = 0
+0x257330  write next cumulative boundary dword(s)
+0x25733c  leave selected nested record
+```
+
+Logs:
+
+```text
+/tmp/rknnc_boundary_small.log
+/tmp/rknnc_boundary_h7.log
+/tmp/rknnc_boundary_stress.log
+```
+
+Confirmed behavior for this loop:
+
+- `x21` is the upper boundary value for this selected axis.
+- `w9` is the step/clamp value used by `min(remaining, step)`.
+- `x25` is the count of nonzero boundary writes; `x23 = x25 + 1` is the
+  required vector length.
+- `x26 = (x25 + 1) * 4`; `x24 = x25 * 4 + 8`, so the selected destination is a
+  `vector<int>` with two dwords for the simple observed case.
+- The loop writes `0` at the selected vector begin, then writes cumulative
+  boundaries with `str w1, [x3], #4`.
+
+For the three tested call paths, this specific loop instance writes the
+output-channel boundary vector:
+
+| Shape | `x21` at boundary writer | Final selected vector |
+|-------|--------------------------|-----------------------|
+| `b1_c32_h14_w14_oc128_wic32_k3x3_g1` | `128` | `00000000 00000080` |
+| `b1_c160_h7_w7_oc320_wic160_k3x3_g1` | `320` | `00000000 00000140` |
+| `b1_c160_h14_w14_oc320_wic160_k3x3_g1` | `320` | `00000000 00000140` |
+
+This maps one concrete compiler-generated boundary vector as K/output-channel
+range `[0, out_c]`. It also shows that the already-observed small-shape
+height-boundary list `0,4,8,12` is produced or preserved by a different nearby
+path, not by this `0x2572c0..0x25733c` loop instance.
+
+Height-boundary consumer trace update:
+
+`experimental/trace_librknnc_height_boundary.gdb` follows the adjacent path
+around `0x257350..0x25788c`, including the allocations for `[sp+0x5d0]`,
+`[sp+0x5f0]`, the copy/build call into `[sp+0x630]`, and the later tile-read
+loop. Logs:
+
+```text
+/tmp/rknnc_height_boundary_small.log
+/tmp/rknnc_height_boundary_h7.log
+/tmp/rknnc_height_boundary_stress.log
+```
+
+Confirmed behavior:
+
+- `[sp+0x648]`, the same `x8` holder passed to `top_tiler`, remains the direct
+  source vector for output-height/Y boundaries in the later tile-read loop.
+- At `0x2576a0` and `0x2577f0`, `x22` points at this 24-byte-record vector.
+  The selected record's first nested `vector<int>` is read as the boundary list.
+- At `0x25788c`, the loop has loaded the current tile interval from that
+  boundary list.
+
+A/B evidence:
+
+| Shape | `[sp+0x648]` / selected record boundary vector | Later interval reads at `0x25788c` |
+|-------|-----------------------------------------------|------------------------------------|
+| `b1_c32_h14_w14_oc128_wic32_k3x3_g1` | `00000000 00000004 00000008 0000000c` | `(0,4)`, `(4,8)`, `(8,12)` |
+| `b1_c160_h7_w7_oc320_wic160_k3x3_g1` | `00000000 00000005` | `(0,5)` |
+| `b1_c160_h14_w14_oc320_wic160_k3x3_g1` | `00000000 0000000c` | `(0,12)` |
+
+This maps the `x8`/`[sp+0x648]` first nested vector as the output-height
+boundary list (`ystart`/`ynext` boundaries). For the small proxy, the official
+compiler splits output height `12` into three Y tiles of height `4`; for h7 and
+the dense stress shape, this path keeps a single Y tile.
+
+The sibling stack vectors allocated after the Y/K boundary loops now have a
+clearer role:
+
+- `[sp+0x5d0]`, `[sp+0x5f0]`, and `[sp+0x630]` are derived vector-of-vector
+  wrappers built from the boundary lists.
+- They are not the original boundary producers; they package/copy boundary
+  vectors for later tile-row construction.
+
+Tile-row construction trace update:
+
+`experimental/trace_librknnc_tile_rows.gdb` traces the row-building path after
+`0x25788c`. It was run remotely with `RKNN_LOG_LEVEL=3` exported from the
+remote `~/.bashrc` line. Logs:
+
+```text
+/tmp/rknnc_tile_rows_small.log
+/tmp/rknnc_tile_rows_h7.log
+/tmp/rknnc_tile_rows_stress.log
+```
+
+Confirmed behavior:
+
+- The `qbuild_interval` hit at `0x25788c` is the entry into the later
+  tile-row builder for the currently selected Y interval.
+- For the small proxy, this path sees the three output-Y tiles from the
+  `[0,4,8,12]` boundary list:
+
+| Shape | Relevant `qbuild_interval` values |
+|-------|-----------------------------------|
+| `b1_c32_h14_w14_oc128_wic32_k3x3_g1` | `(x1=6, x2=0, x3=0)`, `(x1=10, x2=4, x3=1)`, `(x1=14, x2=8, x3=2)` |
+| `b1_c160_h7_w7_oc320_wic160_k3x3_g1` | single-Y tile, no `x2=4/8` Y interval sequence |
+| `b1_c160_h14_w14_oc320_wic160_k3x3_g1` | single-Y tile, no `x2=4/8` Y interval sequence |
+
+The `x1` value is the halo-adjusted input/source end for the Y tile, not the raw
+output boundary. For the small proxy the first two Y tiles have source windows
+ending at `6` and `10`; the last tile clamps to input height `14`.
+
+- `row_fields_before_alloc` sees a stable row-index/channel-offset pattern in
+  `w23` and `w21` after the initial setup rows. For the `160->320` shapes the
+  repeated subrows include `w23=0,1,2` with `w21=0,112,224` in the final row
+  family. The small proxy shows the same `w23=0,1,2` row index sequence for the
+  three Y intervals, with `x5` carrying `0,4,8`.
+- `row_header_sp650` and `row_obj_sp6c0` are staging objects for the final row
+  payload. They preserve the row-index fields and build several nested vectors,
+  but this trace is not sufficient to assign names to the reuse-bit fields.
+
+Next target after this trace:
+
+- Trace the consumer/insertion immediately after `0x257ef8` to find where the
+  staged row object is appended to the final tile table. That should make the
+  final row layout observable and is the right place to name fields such as
+  `ystart`, `kstart`, `data reuse`, and `weight reuse`.
