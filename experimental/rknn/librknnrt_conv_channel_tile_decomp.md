@@ -1695,3 +1695,311 @@ CNA/DPU/PC register entries are patched for a true F2 ChannelTile workload. That
 requires the runtime helper trace described above before Python can safely
 replace software-stitched OC/im2col fallbacks with chained RKNN-style
 ChannelTile.
+
+## Appendix: Mapping conv_new_clean.py 6 strategies to RKNN planner states
+
+Source: `examples/kernel_6_18/conv_new_clean.py`, function `run_conv2d` (line 746).
+
+### Decision tree (lines 757-762)
+
+```python
+grouped_serial          = is_spatial and groups > 1 and not depthwise
+spatial_im2col          = is_spatial and groups == 1 and not depthwise and
+                          (weight_banks > RK_CBUF_BANKS//3 or output_bytes > buffer)
+spatial_oc_serial       = is_spatial and groups == 1 and not depthwise and
+                          out_c > 16 and (in_c % 16 != 0 or in_c >= 16)
+depthwise_spatial_tiled = depthwise and is_spatial and
+                          (out_h > depthwise_tile_h or out_c > align_c)
+```
+
+When none of the above match, the general path checks:
+
+```python
+if _needs_pointwise_oc_tile_schedule(...):  # Strategy 5: OC-tiled pointwise
+elif _needs_pointwise_tile_schedule(...):    # Strategy 6: PC-chain pointwise
+else:                                         # Default: simple direct submit
+```
+
+### Precise 1:1 mapping
+
+| # | Python strategy | Trigger summary | RKNN planner function | Split method | Notes |
+|---|-----------------|-----------------|----------------------|--------------|-------|
+| 1 | `spatial_im2col` | Large weight spatial conv that exceeds CBUF budget | `fcn.005d4ac0` (layer-level) would use ChannelTile | `SPLIT_BY_K` (via implicit im2col→1x1) | **No direct HW equivalent** – Python converts to pointwise via software im2col. RKNN programs hardware spatial conv with channel tiling instead. This is the **biggest divergence** between Python and RKNN. |
+| 2 | `grouped_serial` | Grouped spatial (groups>1, spatial) | Higher-level subgraph loop, not in tiling planner | `SPLIT_NONE` per group | Groups handled above `fcn.005d4ac0` level. The planner functions (fcn.005d4ac0/fcn.005f51c0) show no group iteration. |
+| 3 | `spatial_oc_serial` | Spatial, moderate weight, out_c>16, in_c odd | `fcn.00388a18` (fixed-16 ChannelTile) + `fcn.005d4ac0` | `SPLIT_BY_Y_AND_K` with c_step=16 | Row tile=32 matches `out_h_tile_requirement()` in decomp. OC tile=16 matches `c_step=16`. Independent submit, not chained. |
+| 4 | `depthwise_spatial_tiled` | Depthwise spatial, large H or C | `fcn.005d4ac0` depthwise path + `fcn.00384ed0` with `mode=1` | `SPLIT_BY_Y_AND_K` (depthwise) | Channel tile=32 matches HW depthwise bank limit. `mode=1` forces `k_tile=2, tile_count=2`. |
+| 5 | `_needs_pointwise_oc_tile_schedule` | Specific 1x1 shapes (96→24, 144→24/32, 192→32/16, 256→32 at known resolutions) | `fcn.00387e3c` (main ChannelTile predicate) | `SPLIT_BY_K` (ChannelTile OC-slicing) | Hardcoded shapes == F2 min_weight_banks>3 cases. OC tile size (=32 for in_c>=192, =16 for smaller) matches `tile_count * 8`. **Closest to RKNN ChannelTile**. |
+| 6 | `_needs_pointwise_tile_schedule` | Same shapes as #5 but with PC-chain | `fcn.005d4ac0` + `fcn.00307198`/`fcn.00312328` (reuse update) | `SPLIT_BY_Y` with weight_reuse | **Only strategy using PC-chain + weight_reuse**. The weight_reuse flag matches `CNA_CBUF_CON0_WEIGHT_REUSE`. Output offset calculation mimics `kstart`/`ys tart` in tile records. |
+| 7 | Default | Everything else (small, simple shapes) | `fcn.005f38f0` / `fcn.005f51c0` | `SPLIT_NONE` | Single-tile path. Straightforward register programming. |
+
+### Key observations for refactor
+
+1. **im2col (strategy 1) is the outlier**: It's the only strategy that fundamentally changes the operation type (spatial → pointwise via software). RKNN never does this – the hardware spatial path works with proper register programming.
+
+2. **OC/Channel tiling (strategies 3, 5) share structure**: Both do row tiles + OC/Channel tiles with a tile stride of 16 or 32. The difference is output format (nc1hwc2 vs flat) and whether they use PC-chain. They could share a loop structure.
+
+3. **PC-chain (strategy 6) is the model for chaining**: This is the closest Python strategy to RKNN's actual execution model. The weight_reuse flag, output offset accumulation, and input offset tracking match the tile record fields in `fcn.005d4ac0`.
+
+4. **Output format divergence**: The code uses 3 output readback formats:
+   - `_unpack_flat_1x1_output` (for 1x1, strategies 5-7)
+   - `_unpack_nc1hwc2_output` (for spatial)
+   - `_unpack_grouped_spatial_output` (for grouped)
+    
+   RKNN tile-table dumps show all tiles share the same `xstart/ystart/kstart` fields regardless of format. A unified NC1HWC2 format should work for all.
+
+5. **Missing RKNN state not replicated**:
+   - `data_reuse` / `weight_reuse` per-tile flags (only weight_reuse used, and only as bool)
+   - CNA feature/weight/CSC group mask (decomp §1187-1198)
+   - `mc_treat_by_y_tile` / `mc_treat_by_k_tile` / `mc_treat_by_1c_*` fields
+   - Per-tile `input_bank_num` / `weight_bank_num` (global data_bank only)
+
+6. **PC-chain tails**: Only strategy 6 uses the 4-QWORD PC tail properly. The other multi-tile strategies (3, 4, 5) submit each tile independently, which is less efficient than RKNN's chained approach.
+
+## Appendix B: Tiling method dispatch (r2 static analysis of fcn.005f38f0)
+
+Confirmed by r2 disassembly of `fcn.005f38f0` at address `0x005f4d54..0x005f4f94`:
+
+### Method comparison at the builder blocks
+
+The tiling method value is loaded from `[x29+0x1188]` into `w0`/`w9`. The dispatch:
+
+```asm
+0x005f4d54: ldr w0, [x29, 0x1188]    ; load tiling method
+0x005f4d5c: cmp w0, 3                ; method == 3?
+0x005f4d64: sdiv w4, w19, w0         ; w4 = tile_count / method
+0x005f4d6c: mul  w4, w4, w0          ; w4 = (tile_count / method) * method
+0x005f4d80: b.eq 0x5f4eb4            ; if method == 3, METHOD_3 path
+0x005f4d84: ldr w2, [x29, 0x1188]
+0x005f4d88: cmp w2, 2                ; method == 2?
+0x005f4d8c: b.eq 0x5f4f34            ; if method == 2, METHOD_2 path
+                                      ; else DEFAULT path
+```
+
+### Method behaviors
+
+| Method | Index calculation | Boundary marker | Inner marker | Notes |
+|--------|-------------------|-----------------|--------------|-------|
+| 2 | `tile_index & 1` | 3 | 1 | Two groups (even/odd). Used for K/OC-split: tile_count=2 means 2 groups of OC. |
+| 3 | `tile_index % 3` | 7 | 1 | Three groups. Used for Y+K combined split |
+| other | `tile_index % method` | 7 for remainder==3, 3 for remainder==1/2 | 1 | N groups, N = method value |
+
+### Default path details
+
+```asm
+w5 = tile_count - w4       ; remainder = tile_count % method
+w8 = 3                     ; marker for remainder==2
+w7 = 7                     ; marker for remainder==3
+w6 = 1                     ; marker for normal tiles
+w9 = tiling_method         ; stored for use in loop
+
+loop:
+    w3 = loop_index / w9       ; quotient
+    w3 = w3 * w9               ; (quotient * method)
+    w3 = loop_index - w3       ; loop_index % method
+    str w3, [x1]               ; store index % method in first vector
+    
+    if loop_index < w4:        ; tiles before boundary
+        str 0, [x1]            ; clear in first vector
+        str 1, [x2]            ; store marker 1 in second vector
+    elif w5 == 3:
+        str 7, [x2]            ; boundary marker 7
+    elif w5 == 2:
+        str 3, [x2]            ; boundary marker 3  
+    elif w5 == 1:
+        ; also stores boundary marker
+```
+
+## Appendix C: Live RKNN register capture from ops_rknn (dynamic analysis)
+
+Captured from `~/npu/ops_rknn/conv2d_dump_regs` (source: `conv2d_dump_regs.cpp`) running under GDB on the remote NPU host (192.168.192.36). The GDB script `rknn.gdb` breaks at `rknn_destroy` and runs `python3 dump.py 2` to decode the register command buffer.
+
+### Models tested
+
+The test program runs 4 RKNN models:
+1. `conv2d_fail_1x6_3x1_5x7.rknn` (in_c=1, out_c=6, kh=3, kw=1, H=5, W=7)
+2. `conv2d_fail_2x4_3x3_6x6.rknn` (in_c=2, out_c=4, 3x3, 6x6)
+3. `conv2d_fail_2x4_2x2_5x5.rknn` (in_c=2, out_c=4, 2x2, 5x5)
+4. `conv2d_fail_1x32_5x5_10x10.rknn` (in_c=1, out_c=32, 5x5, 10x10)
+
+### Key finding: ChannelTile register pattern for model 4 (1→32, 5x5)
+
+The `conv2d_fail_1x32_5x5_10x10` model generates **5 chained tasks** via PC-chain:
+
+| Tile | WEIGHT_KERNELS | DST_BASE_ADDR | DATA_CUBE_CHANNEL | SURFACE_ADD | PC core | Notes |
+|------|---------------|---------------|-------------------|-------------|---------|-------|
+| 0 | 32 | 0xfffe6000 | 31 (32 ch) | 72 | main | Full conv, base output |
+| 1 | **16** | 0xfffe6000 | **15 (16 ch)** | 72 | core 1 | **ChannelTile**: half OC, same output base |
+| 2 | 32 | **0xfffe6480** | 31 (32 ch) | 72 | core 2 | Multicore copy, offset output |
+| 3 | 32 | **0xfffe60c0** | 31 (32 ch) | 72 | core 2 | Multicore, diff output |
+| 4 | 32 | **0xfffe6180** | 31 (32 ch) | 72 | core 2 | Multicore, diff output |
+
+### Critical observations from the register capture
+
+1. **WEIGHT_KERNELS=16 in tile 1** confirms ChannelTile is OC-splitting (16 channels instead of 32). This IS the RKNN ChannelTile.
+
+2. **DST_BASE_ADDR** is SAME for tiles 0-1 (0xfffe6000), different for tiles 2-4. Tiles 0 and 1 write to the same output buffer -> OC channels are at different offsets within the surface. Tiles 2-4 are multicore copies writing to separate output regions.
+
+3. **PC_REGISTER_AMOUNTS** contains:
+   - `RESERVED_0`: actually **CORE INDEX** (1 or 2). Not reserved!
+   - `PC_DATA_AMOUNT`: 14 register words per tile body
+   So the PC tail is: `PC_BASE_ADDRESS | (core<<12) | register_amount`
+
+4. **SURFACE_ADD is constant (72)** across all tiles → same output format
+   - `72 >> 4 = 4.5` → This is `out_width_stride * ceil(align_out_c / 16)`
+   - For the 1→32 5x5 model: width_stride=10 (aligned), out_atoms = 6*6=36, out_width_stride=36
+   - SURF_ADD = 36 * (32/16) << 4 = 36 * 2 << 4 = 72 << 4... wait
+   - 72 >> 4 = 4, at `out_width_stride=36`, out_c=32 → `max(2, 32/16) = 2`, so `36*2*16=1152`, shifted >>4 = 72. **Confirmed**.
+
+5. **PPU registers** are programmed alongside CNA/CORE/DPU for every conv tile. The captured register set includes:
+   - `REG_PPU_S_POINTER`, `REG_PPU_DATA_CUBE_IN_CHANNEL`, `REG_PPU_DATA_CUBE_OUT_CHANNEL`
+   - `REG_PPU_DATA_FORMAT`, `REG_PPU_DST_BASE_ADDR`, `REG_PPU_DST_SURF_STRIDE`
+   - `REG_PPU_MISC_CTRL`, `REG_PPU_OPERATION_MODE_CFG`
+   - `REG_PPU_RDMA_RDMA_*` (S_POINTER, SRC_BASE_ADDR, DATA_FORMAT, CUBE_IN_CHANNEL, LINE_STRIDE, SURF_STRIDE)
+   
+   **Our Python driver sets NONE of these PPU registers.** This is a significant omission.
+   Note: i dont think PPU is needed. just dead code
+
+6. **PC_VERSION** values seen: `0x00020000`, `0x00010000`, `0x00000100`, `0x00550000` — these are version/doorbell handshake values.
+
+7. **DPU_RDMA_RDMA_OPERATION_ENABLE**: value `1777180458` = `0x69e000aa` — This is an RDMA configuration value. The Python driver doesn't program this register at all.
+
+### Complete register set per tile (14 body words + 4 PC tail)
+
+RKNN emits these registers for each conv tile (in order):
+```
+1.  DPU_RDMA_OPERATION_ENABLE     (RDMA setup)
+2.  PC_VERSION                     (version doorbell)
+3.  CNA_CBUF_CON0                  (bank config)
+4.  CNA_CONV_CON1                  (conv control 1)
+5.  DPU_S_POINTER                  (ping-pong config)
+6.  CNA_CONV_CON1                  (may repeat with different fields)
+7.  CNA_CONV_CON2                  (feature grains)
+8.  CNA_CONV_CON3                  (stride)
+9.  CNA_DATA_SIZE0                 (input H/W)
+10. CNA_DATA_SIZE1                 (input channels)
+11. CNA_DATA_SIZE2                 (output width)
+12. CNA_DATA_SIZE3                 (output atomics)
+13. CNA_WEIGHT_SIZE0               (weight total)
+14. CNA_WEIGHT_SIZE1               (weight per kernel)
+15. CNA_WEIGHT_SIZE2               (kernel dims + count)
+16. CNA_CBUF_CON0                  (may repeat bank config)
+17. CNA_CBUF_CON1                  (data entries)
+18-22. CNA_CVT_CON0..4             (convert scales)
+23. CNA_FEATURE_DATA_ADDR          (input address)
+24. CNA_DMA_CON0                   (burst length)
+25. CNA_DMA_CON1                   (line stride)
+26. CNA_DMA_CON2                   (surface stride)
+27. CNA_FC_DATA_SIZE0              (DMA H/W)
+28. CNA_FC_DATA_SIZE1              (DMA channels)
+29. CNA_DCOMP_ADDR0                (weight address)
+30. CNA_CVT_CON5                   (per-channel cvt mask)
+31. CORE_MISC_CFG                  (misc: precision, dw, op_en)
+32. CORE_DATAOUT_SIZE_0            (output H/W)
+33. CORE_DATAOUT_SIZE_1            (output channel)
+34. DPU_FEATURE_MODE_CFG           (burst, mode)
+35. DPU_DATA_FORMAT                (precision)
+36. DPU_DST_BASE_ADDR              (output address)
+37. DPU_DST_SURF_STRIDE            (output stride)
+38. DPU_DATA_CUBE_WIDTH            (width-1)
+39. DPU_DATA_CUBE_HEIGHT           (height-1)
+40. DPU_DATA_CUBE_CHANNEL          (channels)
+41. DPU_BS_CFG                     (batch/norm bypass)
+42. DPU_BS_OW_CFG                  (output width cfg)
+43. DPU_WDMA_SIZE_0                (WDMA channel)
+44. DPU_WDMA_SIZE_1                (WDMA H/W)
+45. DPU_BN_CFG                     (bn bypass)
+46. DPU_EW_CFG                     (ew bypass)
+47. DPU_EW_CVT_SCALE_VALUE         (scale)
+48. DPU_OUT_CVT_SCALE              (fp32tofp16)
+49. DPU_SURFACE_ADD                (surface offset)
+50-53. PPU_S_POINTER, PPU_DATA_CUBE_IN_CHANNEL, PPU_DATA_CUBE_OUT_CHANNEL,
+      PPU_DATA_FORMAT, PPU_DST_BASE_ADDR, PPU_DST_SURF_STRIDE,
+      PPU_MISC_CTRL, PPU_OPERATION_MODE_CFG,
+      PPU_RDMA_RDMA_S_POINTER, PPU_RDMA_RDMA_SRC_BASE_ADDR,
+      PPU_RDMA_RDMA_DATA_FORMAT, PPU_RDMA_RDMA_CUBE_IN_CHANNEL,
+      PPU_RDMA_RDMA_SRC_LINE_STRIDE, PPU_RDMA_RDMA_SRC_SURF_STRIDE
+54. PC_BASE_ADDRESS                 (next segment address)
+55. PC_REGISTER_AMOUNTS             (next amount + core)
+56. PC_VERSION                      (version doorbell)
+57. PC_OPERATION_ENABLE             (enable + core mask)
+```
+
+Note: The tile bodies seen in the capture have exactly 14 register WORDS (qwords). The Python driver emits ~50+ registers. This difference is because RKNN uses a **sparse encoding**: it only emits registers whose values differ from the hardware default or the previous tile. The broadcast/common registers are programmed once and reused.
+
+## Appendix D: Reuse update mechanics (static analysis)
+
+### fcn.002efd38 (register value patcher by index)
+
+```
+Inputs: ctx(x0), index(x1), value(x2)
+x3  = ctx.field_0x288      ; command vector struct
+x19 = x3[0x28]             ; index base (offset array)
+x21 = x3[0x08]             ; base pointer (command entry array)
+x19 = x19 + index * 8      ; compute entry address
+if x21 + x19 == 0:         ; sentinel check
+    return -1
+x0  = x21[x19]             ; load old command entry
+w1  = w2                   ; new value
+x0  = patch_reg_value(x0, w1) ; bfi x0, x1, #16, #32 (bits 16-47)
+x21[x19] = x0              ; store back
+ctx[0x11] = 1              ; set dirty flag
+return 0
+```
+
+### fcn.002efce0 (pair-record updater)
+
+```
+Inputs: ctx(x0), pair_record(x1), value(x2)
+x19 = pair_record[8]       ; entry_ptr
+x1  = pair_record[0]       ; side_int_ptr
+if x19 == 0: return;       ; no entry
+if x1 != 0: side_int_ptr[4] = value  ; write side value
+x20 = ctx
+x0  = *entry_ptr           ; load old command
+w1  = w2                   ; new value
+x0  = patch_reg_value(x0, w1) ; bfi bits 16-47
+*entry_ptr = x0            ; store back
+ctx[0x11] = 1              ; set dirty flag
+return 0
+```
+
+### fcn.00100a40 (low-level patch primitive)
+
+```asm
+bfi x0, x1, #16, #32      ; replace bits 16-47 of x0 with x1
+ret
+```
+
+This matches the Python `E(target, reg, value)` encoding:
+- Bits 48-63: target
+- Bits 16-47: value (what gets patched)
+- Bits 0-15: register address
+
+The key insight from the reuse path: when `fcn.00307198` or `fcn.00312328` walks the tile list and sets `data_reuse`/`weight_reuse`, it calls `fcn.002efd38(ctx, index, new_value)` for each register that needs updating. The **index** identifies which register position in the flat command array (at ctx+0x288) needs patching.
+
+This means the reuse update does NOT emit new registers. It patches existing register commands that were placed in the command vector during the initial tile setup. The patch targets are identified by their position in the command array (index), not by register address.
+
+## Appendix E: Remaining reverse engineering gaps
+
+As of May 2026, after this round of reverse engineering:
+
+| Gap | Status | What's needed |
+|-----|--------|---------------|
+| Split-method enum values | **RESOLVED**: methods 2, 3, and generic N | Confirmed by r2 disassembly. Method 2 = two groups (K-split), method 3 = three groups (Y+K), generic = N groups |
+| Register fields per tiling family | **PARTIAL**: live capture shows WEIGHT_KERNELS change for ChannelTile | Need to capture more model variants to see all register field differences |
+| Reuse programming sequence for chained tiles | **PARTIALLY RESOLVED**: patch mechanics understood (bfi via index), pair-record format known | Need GDB trace on `fcn.002efd38`/`fcn.002efce0` to map index values → register addresses |
+| Y/K decision tree | **MAPPED** in Appendix A | See strategy-to-RKNN mapping table |
+| Output placement math | **PARTIAL**: SURFACE_ADD formula confirmed, DST offsets seen in capture | Full tile placement math needs shape sweep |
+| ChannelTile vs OC tiling | **CONFIRMED IDENTICAL**: WEIGHT_KERNELS changed from 32→16, matching OC tile pattern | RKNN ChannelTile IS OC-channel splitting with PC-chain chaining |
+| PPU registers | **DISCOVERED**: ~14 PPU registers programmed per tile, missing from Python driver | Need to add PPU register programming to Python conv driver |
+| Reuse update → register targets | **KNOWN MECHANISM**: index-based patching into flat command array at ctx+0x288 | Need to map tile list → which command indices get patched |
+
+### Next recommended reverse engineering steps
+
+1. **GDB trace of fcn.002efd38 and fcn.002efce0**: Break on these functions while running a conv2d model that triggers ChannelTile. Log the caller PC, index, old value, new value, and decode the patched command.
+
+2. **Shape sweep with ops_rknn**: Run conv2d_dump_regs with many more model shapes to see how the register programming changes (WEIGHT_KERNELS split, SURFACE_ADD, DST_BASE_ADDR, PPU registers).
+
+3. **PPU register programming**: Add PPU_S_POINTER, PPU_DST_BASE_ADDR, PPU_DST_SURF_STRIDE, PPU_DATA_CUBE_OUT_CHANNEL and the PPU_RDMA registers to the Python driver.
+
+4. **Reuse update validation**: Add CNA feature/weight/CSC group mask bits to the Python driver, matching the fcn.00101be8 formatter's mask layout.
