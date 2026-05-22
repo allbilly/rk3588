@@ -1,0 +1,2320 @@
+"""
+Mesa-Rocket-equivalent convolution compiler in one Python file.
+
+Port of ref/mesa/src/gallium/drivers/rocket/ rkt_ml.c, rkt_coefs.c,
+rkt_task.c, rkt_regcmd.c, and rkt_ml.h into Python with NHWC uint8
+quantized semantics matching the Teflon/TFLite contract.
+
+Byte-for-byte BO and regcmd dumps against Mesa are the validation
+strategy before any numerical comparison.
+"""
+
+import argparse, ast, ctypes, glob, mmap, os, struct, sys, time
+from dataclasses import dataclass, field
+from fcntl import ioctl
+from math import ceil, log, fabs
+import numpy as np
+
+# ---------------------------------------------------------------------------
+# Hardware constants
+# ---------------------------------------------------------------------------
+CBUF_BANK_SIZE = 32768
+CBUF_BANKS = 12
+CBUF_ENTRIES_PER_BANK = 256
+CBUF_ENTRY_SIZE = CBUF_BANK_SIZE // CBUF_ENTRIES_PER_BANK
+FEATURE_ATOMIC_SIZE = 16
+WEIGHT_ATOMIC_SIZE = 32
+ATOMIC_K_SIZE = 16
+BPE = 1                     # bytes per element for uint8
+
+# ---------------------------------------------------------------------------
+# Register targets and addresses (conv.py-style)
+# ---------------------------------------------------------------------------
+class reg:
+    # --- Stream/Target IDs (shifted into bits 48-63) ---
+    PC                        = 0x0081   # PC (Program Control / operation enable)
+    PC_REG                    = 0x0101   # PC chain registers
+    CNA                       = 0x0201   # CNA (Convolution/Matrix unit)
+    CORE                      = 0x0801   # CORE (Matrix compute engine)
+    DPU                       = 0x1001   # DPU (Elementwise/DPU unit)
+    RDMA                      = 0x2001   # RDMA (Read DMA for DPU inputs)
+    VERSION                   = 0x0041   # Version/readback target
+
+    # --- PC (0x0000) ---
+    OPERATION_ENABLE          = 0x0008   # PC operation enable
+    PC_BASE_ADDRESS           = 0x0010   # next regcmd DMA address for PC chain
+    PC_REGISTER_AMOUNTS       = 0x0014   # next regcmd fetch amount for PC chain
+
+    # --- CNA (0x1000) ---
+    CNA_CONV_CON1             = 0x100c   # CNA convolution control 1
+    CNA_CONV_CON2             = 0x1010   # CNA convolution control 2 (grains)
+    CNA_CONV_CON3             = 0x1014   # CNA convolution control 3 (stride)
+    CNA_DATA_SIZE0            = 0x1020   # CNA input data size 0
+    CNA_DATA_SIZE1            = 0x1024   # CNA input data size 1 (channel)
+    CNA_DATA_SIZE2            = 0x1028   # CNA output data size 2
+    CNA_DATA_SIZE3            = 0x102c   # CNA output data size 3 (atomics)
+    CNA_WEIGHT_SIZE0          = 0x1030   # CNA weight total size
+    CNA_WEIGHT_SIZE1          = 0x1034   # CNA weight per-kernel size
+    CNA_WEIGHT_SIZE2          = 0x1038   # CNA weight dims (width/height/kernels)
+    CNA_CBUF_CON0             = 0x1040   # CNA CBUF config 0 (banks)
+    CNA_CBUF_CON1             = 0x1044   # CNA CBUF config 1 (entries)
+    CNA_CVT_CON0              = 0x104c   # CNA convert config 0
+    CNA_CVT_CON1              = 0x1050   # CNA convert config 1 (scale/offset 0)
+    CNA_CVT_CON2              = 0x1054   # CNA convert config 2 (scale/offset 1)
+    CNA_CVT_CON3              = 0x1058   # CNA convert config 3 (scale/offset 2)
+    CNA_CVT_CON4              = 0x105c   # CNA convert config 4 (scale/offset 3)
+    CNA_FC_CON0               = 0x1060   # CNA FC control 0
+    CNA_FC_CON1               = 0x1064   # CNA FC control 1
+    CNA_PAD_CON0              = 0x1068   # CNA padding config 0 (left/top)
+    CNA_FEATURE_DATA_ADDR     = 0x1070   # CNA feature data base address
+    CNA_FC_CON2               = 0x1074   # CNA FC control 2
+    CNA_DMA_CON0              = 0x1078   # CNA DMA control 0 (burst)
+    CNA_DMA_CON1              = 0x107c   # CNA DMA control 1 (line stride)
+    CNA_DMA_CON2              = 0x1080   # CNA DMA control 2 (surface stride)
+    CNA_FC_DATA_SIZE0         = 0x1084   # CNA FC data size 0
+    CNA_FC_DATA_SIZE1         = 0x1088   # CNA FC data size 1 (channel)
+    CNA_DCOMP_CTRL            = 0x1100   # CNA weight decompress control
+    CNA_DCOMP_REGNUM          = 0x1104   # CNA weight decompress register count
+    CNA_DCOMP_ADDR0           = 0x1110   # CNA weight decompress address 0
+    CNA_DCOMP_AMOUNT0         = 0x1140   # CNA weight decompress amount 0
+    CNA_DCOMP_AMOUNT1         = 0x1144   # CNA weight decompress amount 1
+    CNA_DCOMP_AMOUNT2         = 0x1148   # CNA weight decompress amount 2
+    CNA_DCOMP_AMOUNT3         = 0x114c   # CNA weight decompress amount 3
+    CNA_DCOMP_AMOUNT4         = 0x1150   # CNA weight decompress amount 4
+    CNA_DCOMP_AMOUNT5         = 0x1154   # CNA weight decompress amount 5
+    CNA_DCOMP_AMOUNT6         = 0x1158   # CNA weight decompress amount 6
+    CNA_DCOMP_AMOUNT7         = 0x115c   # CNA weight decompress amount 7
+    CNA_DCOMP_AMOUNT8         = 0x1160   # CNA weight decompress amount 8
+    CNA_DCOMP_AMOUNT9         = 0x1164   # CNA weight decompress amount 9
+    CNA_DCOMP_AMOUNT10        = 0x1168   # CNA weight decompress amount 10
+    CNA_DCOMP_AMOUNT11        = 0x116c   # CNA weight decompress amount 11
+    CNA_DCOMP_AMOUNT12        = 0x1170   # CNA weight decompress amount 12
+    CNA_DCOMP_AMOUNT13        = 0x1174   # CNA weight decompress amount 13
+    CNA_DCOMP_AMOUNT14        = 0x1178   # CNA weight decompress amount 14
+    CNA_DCOMP_AMOUNT15        = 0x117c   # CNA weight decompress amount 15
+    CNA_CVT_CON5              = 0x1180   # CNA convert config 5 (mask)
+    CNA_PAD_CON1              = 0x1184   # CNA padding config 1 (pad value)
+
+    # --- CORE (0x3000) ---
+    CORE_MISC_CFG             = 0x3010   # CORE misc config
+    CORE_DATAOUT_SIZE_0       = 0x3014   # CORE dataout size 0 (height/width)
+    CORE_DATAOUT_SIZE_1       = 0x3018   # CORE dataout size 1 (channel)
+    CORE_CLIP_TRUNCATE        = 0x301c   # CORE clip truncate config
+    CORE_RESERVED_3030        = 0x3030   # CORE reserved (write 0 to clear stale state)
+
+    # --- DPU (0x4000) ---
+    S_POINTER                 = 0x4004   # DPU S pointer config (pp/exec)
+    FEATURE_MODE_CFG          = 0x400c   # DPU feature mode config
+    DATA_FORMAT               = 0x4010   # DPU data format config
+    OFFSET_PEND               = 0x4014   # DPU offset pending config
+    DST_BASE_ADDR             = 0x4020   # DPU destination base address
+    DST_SURF_STRIDE           = 0x4024   # DPU destination surface stride
+    DATA_CUBE_WIDTH           = 0x4030   # DPU data cube width
+    DATA_CUBE_HEIGHT          = 0x4034   # DPU data cube height
+    DATA_CUBE_NOTCH_ADDR      = 0x4038   # DPU data cube notch address
+    DATA_CUBE_CHANNEL         = 0x403c   # DPU data cube channel
+    BS_CFG                    = 0x4040   # DPU batch/scale config
+    BS_ALU_CFG                = 0x4044   # DPU batch/scale ALU config
+    BS_MUL_CFG                = 0x4048   # DPU batch/scale multiply config
+    BS_RELUX_CMP_VALUE        = 0x404c   # DPU batch/scale ReLU-X compare value
+    BS_OW_CFG                 = 0x4050   # DPU batch/scale OW config
+    BS_OW_OP                  = 0x4054   # DPU batch/scale OW operation
+    WDMA_SIZE_0               = 0x4058   # DPU write DMA size 0
+    WDMA_SIZE_1               = 0x405c   # DPU write DMA size 1
+    BN_CFG                    = 0x4060   # DPU batch norm config
+    BN_ALU_CFG                = 0x4064   # DPU batch norm ALU config
+    BN_MUL_CFG                = 0x4068   # DPU batch norm multiply config
+    BN_RELUX_CMP_VALUE        = 0x406c   # DPU batch norm ReLU-X compare value
+    EW_CFG                    = 0x4070   # DPU elementwise config
+    EW_CVT_OFFSET_VALUE       = 0x4074   # DPU EW convert offset value
+    EW_CVT_SCALE_VALUE        = 0x4078   # DPU EW convert scale value
+    EW_RELUX_CMP_VALUE        = 0x407c   # DPU EW ReLU-X compare value
+    OUT_CVT_OFFSET            = 0x4080   # DPU output conversion offset
+    OUT_CVT_SCALE             = 0x4084   # DPU output conversion scale
+    OUT_CVT_SHIFT             = 0x4088   # DPU output conversion shift
+    EW_OP_VALUE_0             = 0x4090   # DPU EW operation value 0
+    EW_OP_VALUE_1             = 0x4094   # DPU EW operation value 1
+    EW_OP_VALUE_2             = 0x4098   # DPU EW operation value 2
+    EW_OP_VALUE_3             = 0x409c   # DPU EW operation value 3
+    EW_OP_VALUE_4             = 0x40a0   # DPU EW operation value 4
+    EW_OP_VALUE_5             = 0x40a4   # DPU EW operation value 5
+    EW_OP_VALUE_6             = 0x40a8   # DPU EW operation value 6
+    EW_OP_VALUE_7             = 0x40ac   # DPU EW operation value 7
+    SURFACE_ADD               = 0x40c0   # DPU surface add
+    LUT_ACCESS_CFG            = 0x40d0   # DPU LUT access config
+    LUT_ACCESS_DATA           = 0x40d4   # DPU LUT access data
+    LUT_CFG                   = 0x40d8   # DPU LUT config
+    LUT_INFO                  = 0x40dc   # DPU LUT info
+    LUT_LE_START              = 0x40e0   # DPU LUT LE start
+    LUT_LE_END                = 0x40e4   # DPU LUT LE end
+    LUT_LO_START              = 0x40e8   # DPU LUT LO start
+    LUT_LO_END                = 0x40ec   # DPU LUT LO end
+    LUT_LE_SLOPE_SCALE        = 0x40f0   # DPU LUT LE slope scale
+    LUT_LE_SLOPE_SHIFT        = 0x40f4   # DPU LUT LE slope shift
+    LUT_LO_SLOPE_SCALE        = 0x40f8   # DPU LUT LO slope scale
+    LUT_LO_SLOPE_SHIFT        = 0x40fc   # DPU LUT LO slope shift
+
+    # --- DPU RDMA (0x5000) ---
+    RDMA_S_POINTER            = 0x5004   # DPU RDMA S pointer config
+    RDMA_DATA_CUBE_WIDTH      = 0x500c   # RDMA data cube width
+    RDMA_DATA_CUBE_HEIGHT     = 0x5010   # RDMA data cube height
+    RDMA_DATA_CUBE_CHANNEL    = 0x5014   # RDMA data cube channel
+    RDMA_SRC_BASE_ADDR        = 0x5018   # RDMA source base address
+    RDMA_BRDMA_CFG            = 0x501c   # RDMA BRDMA config
+    RDMA_BS_BASE_ADDR         = 0x5020   # RDMA batch/scale base address
+    RDMA_NRDMA_CFG            = 0x5028   # RDMA NRDMA config
+    RDMA_BN_BASE_ADDR         = 0x502c   # RDMA batch norm base address
+    RDMA_ERDMA_CFG            = 0x5034   # RDMA ERDMA config
+    RDMA_EW_BASE_ADDR         = 0x5038   # RDMA EW base address
+    RDMA_EW_SURF_STRIDE       = 0x5040   # RDMA EW surface stride
+    RDMA_FEATURE_MODE_CFG     = 0x5044   # RDMA feature mode config
+    RDMA_SRC_DMA_CFG          = 0x5048   # RDMA source DMA config
+    RDMA_SURF_NOTCH           = 0x504c   # RDMA surface notch
+    RDMA_PAD_CFG              = 0x5064   # RDMA padding config
+    RDMA_WEIGHT               = 0x5068   # RDMA weight config
+    RDMA_EW_SURF_NOTCH        = 0x506c   # RDMA EW surface notch
+
+# ---------------------------------------------------------------------------
+# Register field macro helpers (transliterated from rkt_registers.h)
+# ---------------------------------------------------------------------------
+def _field(mask, shift, val):
+    return ((val) << shift) & mask
+
+def _mask_hi_lo(hi, lo):
+    return ((1 << (hi - lo + 1)) - 1) << lo
+
+def _set_bit(pos, val):
+    return (val & 1) << pos
+
+# --- PC ---
+PC_OPERATION_ENABLE_RESERVED_0 = lambda v: _field(0xfffffffe, 1, v)
+PC_OPERATION_ENABLE_OP_EN      = lambda v: _field(0x00000001, 0, v)
+PC_BASE_ADDRESS_PC_SOURCE_ADDR = lambda v: _field(0xfffffff0, 4, v)
+PC_REGISTER_AMOUNTS_PC_DATA_AMOUNT = lambda v: _field(0x0000ffff, 0, v)
+PC_TASK_CON_TASK_COUNT_CLEAR   = lambda v: _field(0x00002000, 13, v)
+PC_TASK_CON_TASK_NUMBER        = lambda v: _field(0x00000fff, 0, v)
+
+# --- CNA ---
+CNA_CONV_CON1_NONALIGN_DMA     = lambda v: _field(0x40000000, 30, v)
+CNA_CONV_CON1_GROUP_LINE_OFF   = lambda v: _field(0x20000000, 29, v)
+CNA_CONV_CON1_ARGB_IN          = lambda v: _field(0x0000f000, 12, v)
+CNA_CONV_CON1_PROC_PRECISION   = lambda v: _field(0x00000380, 7, v)
+CNA_CONV_CON1_IN_PRECISION     = lambda v: _field(0x00000070, 4, v)
+CNA_CONV_CON1_CONV_MODE        = lambda v: _field(0x0000000f, 0, v)
+CNA_CONV_CON2_FEATURE_GRAINS   = lambda v: _field(0x00003ff0, 4, v)
+CNA_CONV_CON3_CONV_X_STRIDE    = lambda v: _field(0x00000007, 0, v)
+CNA_CONV_CON3_CONV_Y_STRIDE    = lambda v: _field(0x00000038, 3, v)
+CNA_DATA_SIZE0_DATAIN_WIDTH    = lambda v: _field(0x07ff0000, 16, v)
+CNA_DATA_SIZE0_DATAIN_HEIGHT   = lambda v: _field(0x000007ff, 0, v)
+CNA_DATA_SIZE1_DATAIN_CHANNEL_REAL = lambda v: _field(0x3fff0000, 16, v)
+CNA_DATA_SIZE1_DATAIN_CHANNEL  = lambda v: _field(0x0000ffff, 0, v)
+CNA_DATA_SIZE2_DATAOUT_WIDTH   = lambda v: _field(0x000007ff, 0, v)
+CNA_DATA_SIZE3_DATAOUT_ATOMICS = lambda v: _field(0x003fffff, 0, v)
+CNA_WEIGHT_SIZE0_WEIGHT_BYTES  = lambda v: _field(0xffffffff, 0, v)
+CNA_WEIGHT_SIZE1_WEIGHT_BYTES_PER_KERNEL = lambda v: _field(0x0007ffff, 0, v)
+CNA_WEIGHT_SIZE2_WEIGHT_WIDTH  = lambda v: _field(0x1f000000, 24, v)
+CNA_WEIGHT_SIZE2_WEIGHT_HEIGHT = lambda v: _field(0x001f0000, 16, v)
+CNA_WEIGHT_SIZE2_WEIGHT_KERNELS= lambda v: _field(0x00003fff, 0, v)
+CNA_CBUF_CON0_WEIGHT_BANK      = lambda v: _field(0x000000f0, 4, v)
+CNA_CBUF_CON0_DATA_BANK        = lambda v: _field(0x0000000f, 0, v)
+CNA_CBUF_CON0_WEIGHT_REUSE     = lambda v: _field(0x00002000, 13, v)
+CNA_CBUF_CON1_DATA_ENTRIES     = lambda v: _field(0x00003fff, 0, v)
+CNA_CVT_CON0_DATA_SIGN         = lambda v: _field(0x00000008, 3, v)
+CNA_CVT_CON0_CVT_TYPE          = lambda v: _field(0x00000002, 1, v)
+CNA_CVT_CON0_CVT_BYPASS        = lambda v: _field(0x00000001, 0, v)
+CNA_CVT_CON0_CVT_TRUNCATE_0    = lambda v: _field(0x000003f0, 4, v)
+CNA_CVT_CON0_CVT_TRUNCATE_1    = lambda v: _field(0x0000fc00, 10, v)
+CNA_CVT_CON0_CVT_TRUNCATE_2    = lambda v: _field(0x003f0000, 16, v)
+CNA_CVT_CON0_CVT_TRUNCATE_3    = lambda v: _field(0x0fc00000, 22, v)
+CNA_CVT_CON1_CVT_SCALE0        = lambda v: _field(0xffff0000, 16, v)
+CNA_CVT_CON1_CVT_OFFSET0       = lambda v: _field(0x0000ffff, 0, v)
+CNA_CVT_CON2_CVT_SCALE1        = lambda v: _field(0xffff0000, 16, v)
+CNA_CVT_CON2_CVT_OFFSET1       = lambda v: _field(0x0000ffff, 0, v)
+CNA_CVT_CON3_CVT_SCALE2        = lambda v: _field(0xffff0000, 16, v)
+CNA_CVT_CON3_CVT_OFFSET2       = lambda v: _field(0x0000ffff, 0, v)
+CNA_CVT_CON4_CVT_SCALE3        = lambda v: _field(0xffff0000, 16, v)
+CNA_CVT_CON4_CVT_OFFSET3       = lambda v: _field(0x0000ffff, 0, v)
+CNA_DMA_CON0_WEIGHT_BURST_LEN  = lambda v: _field(0x000f0000, 16, v)
+CNA_DMA_CON0_DATA_BURST_LEN    = lambda v: _field(0x0000000f, 0, v)
+CNA_DMA_CON1_LINE_STRIDE       = lambda v: _field(0x0fffffff, 0, v)
+CNA_DMA_CON2_SURF_STRIDE       = lambda v: _field(0x0fffffff, 0, v)
+CNA_FC_DATA_SIZE0_DMA_WIDTH    = lambda v: _field(0x3fff0000, 16, v)
+CNA_FC_DATA_SIZE0_DMA_HEIGHT   = lambda v: _field(0x000007ff, 0, v)
+CNA_FC_DATA_SIZE1_DMA_CHANNEL  = lambda v: _field(0x0000ffff, 0, v)
+CNA_PAD_CON0_PAD_LEFT          = lambda v: _field(0x000000f0, 4, v)
+CNA_PAD_CON0_PAD_TOP           = lambda v: _field(0x0000000f, 0, v)
+CNA_PAD_CON1_PAD_VALUE         = lambda v: _field(0xffffffff, 0, v)
+CNA_CVT_CON5_PER_CHANNEL_CVT_EN= lambda v: _field(0xffffffff, 0, v)
+CNA_DCOMP_ADDR0_DECOMPRESS_ADDR0 = lambda v: _field(0xffffffff, 0, v)
+CNA_DCOMP_REGNUM_DCOMP_REGNUM  = lambda v: _field(0xffffffff, 0, v)
+
+# --- CORE ---
+CORE_MISC_CFG_QD_EN            = lambda v: _field(0x00000001, 0, v)
+CORE_MISC_CFG_DW_EN            = lambda v: _field(0x00000002, 1, v)
+CORE_MISC_CFG_PROC_PRECISION   = lambda v: _field(0x00000700, 8, v)
+CORE_DATAOUT_SIZE_0_DATAOUT_HEIGHT = lambda v: _field(0xffff0000, 16, v)
+CORE_DATAOUT_SIZE_0_DATAOUT_WIDTH  = lambda v: _field(0x0000ffff, 0, v)
+CORE_DATAOUT_SIZE_1_DATAOUT_CHANNEL= lambda v: _field(0x0000ffff, 0, v)
+CORE_CLIP_TRUNCATE_CLIP_TRUNCATE    = lambda v: _field(0x0000001f, 0, v)
+
+# --- DPU ---
+DPU_S_POINTER_POINTER_PP_MODE  = lambda v: _field(0x00000008, 3, v)
+DPU_S_POINTER_EXECUTER_PP_EN   = lambda v: _field(0x00000004, 2, v)
+DPU_S_POINTER_POINTER_PP_EN    = lambda v: _field(0x00000002, 1, v)
+DPU_FEATURE_MODE_CFG_BURST_LEN = lambda v: _field(0x000001e0, 5, v)
+DPU_FEATURE_MODE_CFG_CONV_MODE = lambda v: _field(0x00000018, 3, v)
+DPU_FEATURE_MODE_CFG_OUTPUT_MODE = lambda v: _field(0x00000006, 1, v)
+DPU_DATA_FORMAT_OUT_PRECISION  = lambda v: _field(0xe0000000, 29, v)
+DPU_DATA_FORMAT_IN_PRECISION   = lambda v: _field(0x1c000000, 26, v)
+DPU_DATA_FORMAT_PROC_PRECISION = lambda v: _field(0x00000007, 0, v)
+DPU_DST_SURF_STRIDE_DST_SURF_STRIDE = lambda v: _field(0xfffffff0, 4, v)
+DPU_DATA_CUBE_WIDTH_WIDTH      = lambda v: _field(0x00001fff, 0, v)
+DPU_DATA_CUBE_HEIGHT_HEIGHT    = lambda v: _field(0x00001fff, 0, v)
+DPU_DATA_CUBE_CHANNEL_ORIG_CHANNEL = lambda v: _field(0x1fff0000, 16, v)
+DPU_DATA_CUBE_CHANNEL_CHANNEL  = lambda v: _field(0x00001fff, 0, v)
+DPU_BS_CFG_BS_ALU_ALGO         = lambda v: _field(0x000f0000, 16, v)
+DPU_BS_CFG_BS_ALU_SRC          = lambda v: _field(0x00000100, 8, v)
+DPU_BS_CFG_BS_RELU_BYPASS      = lambda v: _field(0x00000040, 6, v)
+DPU_BS_CFG_BS_MUL_BYPASS       = lambda v: _field(0x00000010, 4, v)
+DPU_BS_CFG_BS_ALU_BYPASS       = lambda v: _field(0x00000002, 1, v)
+DPU_BS_CFG_BS_BYPASS           = lambda v: _field(0x00000001, 0, v)
+DPU_BS_OW_CFG_SIZE_E_2         = lambda v: _field(0x00000700, 8, v)
+DPU_BS_OW_CFG_SIZE_E_1         = lambda v: _field(0x000000e0, 5, v)
+DPU_BS_OW_CFG_SIZE_E_0         = lambda v: _field(0x0000001c, 2, v)
+DPU_BS_OW_CFG_OD_BYPASS        = lambda v: _field(0x00000002, 1, v)
+DPU_BS_OW_OP_OW_OP             = lambda v: _field(0x0000ffff, 0, v)
+DPU_WDMA_SIZE_0_CHANNEL_WDMA   = lambda v: _field(0x00001fff, 0, v)
+DPU_WDMA_SIZE_1_HEIGHT_WDMA    = lambda v: _field(0x1fff0000, 16, v)
+DPU_WDMA_SIZE_1_WIDTH_WDMA     = lambda v: _field(0x00001fff, 0, v)
+DPU_BN_CFG_BN_RELU_BYPASS      = lambda v: _field(0x00000040, 6, v)
+DPU_BN_CFG_BN_MUL_BYPASS       = lambda v: _field(0x00000010, 4, v)
+DPU_BN_CFG_BN_ALU_BYPASS       = lambda v: _field(0x00000002, 1, v)
+DPU_BN_CFG_BN_BYPASS           = lambda v: _field(0x00000001, 0, v)
+DPU_EW_CFG_EW_RELU_BYPASS      = lambda v: _field(0x00000200, 9, v)
+DPU_EW_CFG_EW_OP_CVT_BYPASS    = lambda v: _field(0x00000100, 8, v)
+DPU_EW_CFG_EW_LUT_BYPASS       = lambda v: _field(0x00000080, 7, v)
+DPU_EW_CFG_EW_OP_BYPASS        = lambda v: _field(0x00000002, 1, v)
+DPU_EW_CFG_EW_BYPASS           = lambda v: _field(0x00000001, 0, v)
+DPU_EW_CFG_EW_CVT_TYPE         = lambda v: _field(0x00000400, 10, v)
+DPU_EW_CFG_EW_DATA_MODE        = lambda v: _field(0x00000800, 11, v)
+DPU_EW_CFG_EDATA_SIZE          = lambda v: _field(0x00001000, 12, v)
+DPU_EW_CFG_EW_ALU_ALGO         = lambda v: _field(0x000f0000, 16, v)
+DPU_EW_CFG_EW_OP_SRC           = lambda v: _field(0x00100000, 20, v)
+DPU_EW_CVT_SCALE_VALUE_EW_OP_CVT_SHIFT = lambda v: _field(0x003f0000, 16, v)
+DPU_EW_CVT_SCALE_VALUE_EW_OP_CVT_SCALE = lambda v: _field(0x0000ffff, 0, v)
+DPU_OUT_CVT_SCALE_OUT_CVT_SCALE= lambda v: _field(0x0000ffff, 0, v)
+DPU_OUT_CVT_SHIFT_OUT_CVT_SHIFT= lambda v: _field(0x00000fff, 0, v)
+DPU_SURFACE_ADD_SURF_ADD       = lambda v: _field(0xfffffff0, 4, v)
+
+# --- DPU RDMA ---
+DPU_RDMA_RDMA_S_POINTER_POINTER_PP_MODE  = lambda v: _field(0x00000008, 3, v)
+DPU_RDMA_RDMA_S_POINTER_EXECUTER_PP_EN   = lambda v: _field(0x00000004, 2, v)
+DPU_RDMA_RDMA_S_POINTER_POINTER_PP_EN    = lambda v: _field(0x00000002, 1, v)
+DPU_RDMA_RDMA_FEATURE_MODE_CFG_BURST_LEN = lambda v: _field(0x00007800, 11, v)
+DPU_RDMA_RDMA_FEATURE_MODE_CFG_COMB_USE  = lambda v: _field(0x00000700, 8, v)
+DPU_RDMA_RDMA_FEATURE_MODE_CFG_MRDMA_DISABLE = lambda v: _field(0x00000010, 4, v)
+DPU_RDMA_RDMA_FEATURE_MODE_CFG_CONV_MODE = lambda v: _field(0x00000006, 1, v)
+DPU_RDMA_RDMA_ERDMA_CFG_ERDMA_DATA_MODE  = lambda v: _field(0xc0000000, 30, v)
+DPU_RDMA_RDMA_ERDMA_CFG_ERDMA_DATA_SIZE  = lambda v: _field(0x0000000c, 2, v)
+DPU_RDMA_RDMA_ERDMA_CFG_ERDMA_DISABLE    = lambda v: _field(0x00000001, 0, v)
+DPU_RDMA_RDMA_BRDMA_CFG_BRDMA_DATA_USE   = lambda v: _field(0x0000001e, 1, v)
+DPU_RDMA_RDMA_EW_SURF_STRIDE_EW_SURF_STRIDE = lambda v: _field(0xfffffff0, 4, v)
+DPU_RDMA_RDMA_SURF_NOTCH_SURF_NOTCH_ADDR = lambda v: _field(0xfffffff0, 4, v)
+DPU_RDMA_RDMA_EW_SURF_NOTCH_EW_SURF_NOTCH= lambda v: _field(0xfffffff0, 4, v)
+DPU_RDMA_RDMA_WEIGHT_E_WEIGHT   = lambda v: _field(0xff000000, 24, v)
+DPU_RDMA_RDMA_WEIGHT_N_WEIGHT   = lambda v: _field(0x00ff0000, 16, v)
+DPU_RDMA_RDMA_WEIGHT_B_WEIGHT   = lambda v: _field(0x0000ff00, 8, v)
+DPU_RDMA_RDMA_WEIGHT_M_WEIGHT   = lambda v: _field(0x000000ff, 0, v)
+DPU_RDMA_RDMA_DATA_CUBE_WIDTH_WIDTH   = lambda v: _field(0x00001fff, 0, v)
+DPU_RDMA_RDMA_DATA_CUBE_HEIGHT_HEIGHT = lambda v: _field(0x00001fff, 0, v)
+DPU_RDMA_RDMA_DATA_CUBE_CHANNEL_CHANNEL = lambda v: _field(0x00001fff, 0, v)
+DPU_RDMA_RDMA_ERDMA_CFG_ERDMA_MODE    = lambda v: _field(0xc0000000, 30, v)
+DPU_RDMA_RDMA_ERDMA_CFG_ERDMA_SIZE    = lambda v: _field(0x3c000000, 26, v)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _ceil_div(x, y):
+    return (x + y - 1) // y
+
+def _align(x, a):
+    return _ceil_div(x, a) * a
+
+def E(target, reg_addr, value):
+    return (target << 48) | ((value & 0xFFFFFFFF) << 16) | reg_addr
+
+def fui(f):
+    return struct.unpack('I', struct.pack('f', f))[0]
+
+# ---------------------------------------------------------------------------
+# Rocket ioctl helpers (from conv.py)
+# ---------------------------------------------------------------------------
+DRM_COMMAND_BASE = 0x40
+
+class drm_rocket_create_bo(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_uint32),
+        ("handle", ctypes.c_uint32),
+        ("dma_address", ctypes.c_uint64),
+        ("offset", ctypes.c_uint64),
+    ]
+
+class drm_rocket_prep_bo(ctypes.Structure):
+    _fields_ = [
+        ("handle", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
+        ("timeout_ns", ctypes.c_int64),
+    ]
+
+class drm_rocket_fini_bo(ctypes.Structure):
+    _fields_ = [
+        ("handle", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
+    ]
+
+class drm_rocket_task(ctypes.Structure):
+    _fields_ = [
+        ("regcmd", ctypes.c_uint32),
+        ("regcmd_count", ctypes.c_uint32),
+    ]
+
+class drm_rocket_job(ctypes.Structure):
+    _fields_ = [
+        ("tasks", ctypes.c_uint64),
+        ("in_bo_handles", ctypes.c_uint64),
+        ("out_bo_handles", ctypes.c_uint64),
+        ("task_count", ctypes.c_uint32),
+        ("task_struct_size", ctypes.c_uint32),
+        ("in_bo_handle_count", ctypes.c_uint32),
+        ("out_bo_handle_count", ctypes.c_uint32),
+    ]
+
+class drm_rocket_submit(ctypes.Structure):
+    _fields_ = [
+        ("jobs", ctypes.c_uint64),
+        ("job_count", ctypes.c_uint32),
+        ("job_struct_size", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint64),
+    ]
+
+def _IOW(type_, nr, size):
+    return (1 << 30) | (ord(type_) << 8) | nr | (size << 16)
+
+def _IOWR(type_, nr, size):
+    return (3 << 30) | (ord(type_) << 8) | nr | (size << 16)
+
+DRM_IOCTL_ROCKET_CREATE_BO = _IOWR('d', DRM_COMMAND_BASE + 0x00, ctypes.sizeof(drm_rocket_create_bo))
+DRM_IOCTL_ROCKET_SUBMIT    = _IOW('d', DRM_COMMAND_BASE + 0x01, ctypes.sizeof(drm_rocket_submit))
+DRM_IOCTL_ROCKET_PREP_BO   = _IOW('d', DRM_COMMAND_BASE + 0x02, ctypes.sizeof(drm_rocket_prep_bo))
+DRM_IOCTL_ROCKET_FINI_BO   = _IOW('d', DRM_COMMAND_BASE + 0x03, ctypes.sizeof(drm_rocket_fini_bo))
+
+class RocketBO:
+    __slots__ = ("handle", "size", "dma_address", "offset")
+    def __init__(self, handle, size, dma_address, offset):
+        self.handle = int(handle)
+        self.size = int(size)
+        self.dma_address = int(dma_address)
+        self.offset = int(offset)
+
+def _rocket_mem_allocate(fd, size):
+    bo = drm_rocket_create_bo(size=size)
+    ioctl(fd, DRM_IOCTL_ROCKET_CREATE_BO, bo)
+    buf = mmap.mmap(fd, bo.size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=bo.offset)
+    return buf, RocketBO(bo.handle, bo.size, bo.dma_address, bo.offset)
+
+def _rocket_prep_bo(fd, bo, timeout_ns=6_000_000_000):
+    if timeout_ns > 0:
+        timeout_ns = time.monotonic_ns() + timeout_ns
+    ioctl(fd, DRM_IOCTL_ROCKET_PREP_BO, drm_rocket_prep_bo(handle=bo.handle, timeout_ns=timeout_ns))
+
+def _rocket_fini_bo(fd, bo):
+    ioctl(fd, DRM_IOCTL_ROCKET_FINI_BO, drm_rocket_fini_bo(handle=bo.handle))
+
+def _open_rocket_device():
+    path = os.environ.get("ROCKET_DEVICE")
+    if path:
+        return os.open(path, os.O_RDWR)
+    candidates = sorted(glob.glob("/dev/accel/accel*")) + sorted(glob.glob("/dev/dri/renderD*"))
+    for c in candidates:
+        try:
+            return os.open(c, os.O_RDWR)
+        except OSError:
+            pass
+    raise FileNotFoundError("No Rocket device found")
+
+# ---------------------------------------------------------------------------
+# Data structures matching Mesa struct rkt_operation and struct split_task
+# ---------------------------------------------------------------------------
+@dataclass
+class SplitTask:
+    num: int = 0
+    top_slice: int = 0
+    bottom_slice: int = 0
+    num_overlap_slices: int = 0
+    num_retain_slices: int = 0
+    convolutions: int = 0
+
+    pad_top: int = 0
+    pad_bottom: int = 0
+    pad_left: int = 0
+    pad_right: int = 0
+
+    stride_x: int = 1
+    stride_y: int = 1
+
+    input_width: int = 0
+    input_height: int = 0
+    input_channels: int = 0
+    input_channels_real: int = 0
+    input_zero_point: int = 0
+    input_scale: float = 1.0
+    input_data_entries: int = 0
+    input_line_stride: int = 0
+    input_surface_stride: int = 0
+    input_offset: int = 0
+
+    output_width: int = 0
+    output_height: int = 0
+    output_channels: int = 0
+    output_channels_real: int = 0
+    output_zero_point: int = 0
+    output_scale: float = 1.0
+    output_surface_stride: int = 0
+    output_offset: int = 0
+
+    weights_width: int = 0
+    weights_height: int = 0
+    weights_kernels: int = 0
+    weights_zero_point: int = 0
+    weights_scale: float = 1.0
+
+    input_banks: int = 0
+    weights_banks: int = 0
+
+    atomic_count: int = 0
+    surfaces_per_row: int = 0
+
+    regcfg_amount: int = 0
+    regcfg_addr: int = 0
+
+@dataclass
+class Operation:
+    depthwise: bool = False
+    reuse_weights_cbuf: bool = False
+    truncate_bits: int = 0
+
+    padding_top: int = 0
+    padding_bottom: int = 0
+    padding_left: int = 0
+    padding_right: int = 0
+    stride: int = 1
+
+    addition_input: bool = False
+    add_tensor: int = -1
+    addition_offset: int = 0
+    addition_scale: float = 1.0
+
+    input_index: int = 0
+    input_width: int = 0
+    input_height: int = 0
+    input_channels: int = 0
+    input_zero_point: int = 0
+    input_scale: float = 1.0
+
+    output_index: int = 0
+    output_width: int = 0
+    output_height: int = 0
+    output_channels: int = 0
+    output_zero_point: int = 0
+    output_scale: float = 1.0
+
+    weights_width: int = 0
+    weights_height: int = 0
+    weights_zero_point: int = 0
+    weights_scale: float = 1.0
+
+    tasks: list = field(default_factory=list)
+
+    # BO handles and DMA addresses (set during create_bos)
+    input_bo_handle: int = 0
+    input_bo_addr: int = 0
+    input_bo_size: int = 0
+    weight_bo_handle: int = 0
+    weight_bo_addr: int = 0
+    weight_bo_size: int = 0
+    bias_bo_handle: int = 0
+    bias_bo_addr: int = 0
+    bias_bo_size: int = 0
+    output_bo_handle: int = 0
+    output_bo_addr: int = 0
+    output_bo_size: int = 0
+    regcmd_bo_handle: int = 0
+    regcmd_bo_addr: int = 0
+    regcmd_bo_size: int = 0
+
+# ---------------------------------------------------------------------------
+# is_depthwise (rkt_ml.c:rkt_is_depthwise)
+# ---------------------------------------------------------------------------
+def is_depthwise(in_c, out_c, groups, depthwise_flag):
+    return depthwise_flag and in_c > 1 and out_c > 1
+
+def is_depthwise_op(poperation, in_channels, out_channels):
+    return poperation.conv.depthwise and in_channels > 1 and out_channels > 1
+
+# ---------------------------------------------------------------------------
+# Input packing (rkt_ml.c:rkt_ml_subgraph_invoke input conversion)
+# ---------------------------------------------------------------------------
+def calc_input_size(input_width, input_height, input_channels):
+    """Compute the Rocket tensor BO size for an input tensor."""
+    input_channels_1 = _ceil_div(input_channels, FEATURE_ATOMIC_SIZE) * 2
+    input_channels_2 = FEATURE_ATOMIC_SIZE
+    return input_width * input_height * input_channels_1 * input_channels_2
+
+def pack_input_like_mesa(input_nhwc, input_width, input_height, input_channels,
+                         input_zero_point, output_channels, addition_input, add_tensor):
+    """
+    Convert NHWC uint8 input into Rocket hardware tensor format.
+    Mirrors rkt_ml.c::rkt_ml_subgraph_invoke() input conversion.
+    """
+    feat_size = FEATURE_ATOMIC_SIZE
+    raw = np.zeros(calc_input_size(input_width, input_height, input_channels), dtype=np.uint8)
+
+    single_channel = (output_channels == 1 and input_channels == 1
+                      and not addition_input and add_tensor == -1)
+    if single_channel:
+        raw[:input_nhwc.size] = input_nhwc.ravel()
+        return raw
+
+    if input_channels == 1:
+        n = 0
+        for x in range(input_width):
+            for y in range(max(input_height, feat_size)):
+                if y < input_height:
+                    raw[n] = input_nhwc[0, y, x, 0]
+                else:
+                    raw[n] = input_zero_point
+                n += 1
+        return raw
+
+    channels_per_atom = feat_size
+    n = 0
+    for u in range(_ceil_div(input_channels, channels_per_atom)):
+        for x in range(input_width):
+            for y in range(input_height):
+                for c in range(channels_per_atom):
+                    ic = c + u * channels_per_atom
+                    if ic < input_channels:
+                        raw[n] = (int(input_nhwc[0, y, x, ic]) - 0x80) & 0xFF
+                    else:
+                        raw[n] = (input_zero_point - 0x80) & 0xFF
+                    n += 1
+    return raw
+
+def translateCRSToFeatureData(input_crs, channelsPerGroup=0, width_stride=None,
+                              pad_value=0, order="hw", output_size=None,
+                              output_fill_value=0, output_dtype=None,
+                              return_uint8_view=True):
+    """
+    Pack CRS/NCRS data into feature format.
+    Default C2 mirrors nvdla/sw translateCRSToFeatureData():
+    32 lanes for 1-byte data, 16 lanes for FP16/INT16.
+    """
+    if input_crs.ndim == 3:
+        src = input_crs[np.newaxis, ...]
+    elif input_crs.ndim == 4:
+        src = input_crs
+    else:
+        raise ValueError("translateCRSToFeatureData expects CRS/NCRS input with shape (C, H, W) or (N, C, H, W)")
+
+    output_dtype = np.dtype(np.int8 if output_dtype is None else output_dtype)
+    batch, channels, height, width = src.shape
+    cf = channelsPerGroup if channelsPerGroup != 0 else \
+        (WEIGHT_ATOMIC_SIZE if output_dtype.itemsize == 1 else FEATURE_ATOMIC_SIZE)
+    cfg = channels // cf
+    cp = channels % cf
+    cpg = 1 if cp else 0
+    groups = cfg + cpg
+    width_stride = width if width_stride is None else width_stride
+    if width_stride < width:
+        raise ValueError(f"width_stride {width_stride} is smaller than width {width}")
+    if order not in ("hw", "wh"):
+        raise ValueError("order must be 'hw' or 'wh'")
+
+    ff_size = batch * groups * cf * width_stride * height
+    out_size = ff_size if output_size is None else output_size
+    if out_size < ff_size:
+        raise ValueError(f"output_size {out_size} is smaller than packed size {ff_size}")
+
+    src = src.astype(output_dtype, copy=False)
+    dest = np.full(out_size, output_fill_value, dtype=output_dtype)
+    n = 0
+
+    for ind_n in range(batch):
+        for ind_cfg in range(groups):
+            outer_extent = height if order == "hw" else width_stride
+            inner_extent = width_stride if order == "hw" else height
+            for outer in range(outer_extent):
+                for inner in range(inner_extent):
+                    ind_r = outer if order == "hw" else inner
+                    ind_s = inner if order == "hw" else outer
+                    for ind_c in range(ind_cfg * cf, ind_cfg * cf + cf):
+                        if ind_s < width and ind_c < channels:
+                            dest[n] = src[ind_n, ind_c, ind_r, ind_s]
+                        else:
+                            dest[n] = pad_value
+                        n += 1
+
+    if n != ff_size:
+        raise RuntimeError(f"translateCRSToFeatureData packed {n} bytes, expected {ff_size}")
+
+    if return_uint8_view:
+        return dest.view(np.uint8)
+    return dest
+
+def pack_input_translate_crs_int8(input_nhwc, input_zero_point):
+    """Convert NHWC uint8 activations to signed CRS int8, then pack C1 x H x W x C2."""
+    del input_zero_point
+    input_crs = input_nhwc.transpose(0, 3, 1, 2).astype(np.int16)
+    input_crs = (input_crs - 0x80).astype(np.int8)
+    return translateCRSToFeatureData(input_crs)
+
+def pack_input_translate_crs_int8_like_mesa(input_nhwc, input_width, input_height,
+                                            input_channels, input_zero_point,
+                                            output_channels, addition_input, add_tensor):
+    single_channel = (output_channels == 1 and input_channels == 1
+                      and not addition_input and add_tensor == -1)
+    if single_channel:
+        raw = np.zeros(calc_input_size(input_width, input_height, input_channels), dtype=np.uint8)
+        raw[:input_nhwc.size] = input_nhwc.ravel()
+        return raw
+
+    if input_channels == 1:
+        raw = np.zeros(calc_input_size(input_width, input_height, input_channels), dtype=np.uint8)
+        n = 0
+        for x in range(input_width):
+            for y in range(max(input_height, FEATURE_ATOMIC_SIZE)):
+                if y < input_height:
+                    raw[n] = input_nhwc[0, y, x, 0]
+                else:
+                    raw[n] = input_zero_point
+                n += 1
+        return raw
+
+    input_crs = input_nhwc.transpose(0, 3, 1, 2).astype(np.int16)
+    input_crs = (input_crs - 0x80).astype(np.int8)
+    pad_value = input_zero_point - 0x80
+    return translateCRSToFeatureData(
+        input_crs, channelsPerGroup=FEATURE_ATOMIC_SIZE, pad_value=pad_value,
+        order="wh", output_size=calc_input_size(input_width, input_height, input_channels),
+        output_fill_value=0)
+
+def pack_cdma_dc_feature_input_int8(input_nhwc, width_stride=None, channelsPerGroup=0,
+                                    pad_value=0, use_nhwc=False):
+    if input_nhwc.ndim != 4:
+        raise ValueError("pack_cdma_dc_feature_input_int8 expects NHWC input")
+    batch, in_h, in_w, in_c = input_nhwc.shape
+    width_stride = in_w if width_stride is None else width_stride
+    if use_nhwc:
+        out = np.full((batch, in_h, width_stride, in_c), pad_value, dtype=np.int8)
+        out[:, :, :in_w, :] = input_nhwc.astype(np.int8, copy=False)
+        return out.view(np.uint8).ravel()
+
+    input_crs = input_nhwc.transpose(0, 3, 1, 2).astype(np.int8, copy=False)
+    return translateCRSToFeatureData(
+        input_crs, channelsPerGroup=channelsPerGroup, width_stride=width_stride,
+        pad_value=pad_value, order="hw")
+
+def translate_crs_fp16_mesa(input_nchw, p):
+    """
+    FP16 CDMA_DC feature input packing using translateCRSToFeatureData's
+    C1 x H x W x C2 core plus RK3588 width_stride/C2/NHWC-bypass knobs.
+    """
+    if input_nchw.ndim != 3:
+        raise ValueError("translate_crs_fp16_mesa expects NCHW input with shape (C, H, W)")
+
+    in_c, in_h, in_w = input_nchw.shape
+    width_stride = p["width_stride"]
+    if p.get("use_nhwc", False):
+        out = np.zeros((in_h, width_stride, in_c), dtype=np.float16)
+        out[:, :in_w] = input_nchw.transpose(1, 2, 0).astype(np.float16, copy=False)
+        return out.ravel()
+
+    c2 = p["input_pack_c2"]
+    c1 = _ceil_div(max(in_c, p["align_c"]), c2)
+    return translateCRSToFeatureData(
+        input_nchw, channelsPerGroup=c2, width_stride=width_stride,
+        pad_value=np.float16(0), order="hw", output_size=c1 * in_h * width_stride * c2,
+        output_fill_value=np.float16(0), output_dtype=np.float16,
+        return_uint8_view=False)
+
+def _pack_cdma_dc_feature_input_fp16_reference(input_nchw, p):
+    in_c, in_h, in_w = input_nchw.shape
+    if p["use_nhwc"]:
+        out = np.zeros((in_h, p["width_stride"], in_c), dtype=np.float16)
+        out[:, :in_w] = input_nchw.transpose(1, 2, 0)
+        return out.ravel()
+
+    c2 = p["input_pack_c2"]
+    c1 = _ceil_div(max(in_c, p["align_c"]), c2)
+    padded = np.zeros((c1 * c2, in_h, p["width_stride"]), dtype=np.float16)
+    padded[:in_c, :, :in_w] = input_nchw
+    return padded.reshape(c1, c2, in_h, p["width_stride"]).transpose(0, 2, 3, 1).ravel()
+
+def compare_translate_crs_fp16_mesa(shape=(5, 3, 7), align_c=8,
+                                    input_pack_c2=8, width_stride=8,
+                                    use_nhwc=False):
+    total = int(np.prod(shape))
+    input_nchw = (np.arange(total, dtype=np.float16).reshape(shape) / np.float16(7.0))
+    p = dict(width_stride=width_stride, input_pack_c2=input_pack_c2,
+             align_c=align_c, use_nhwc=use_nhwc)
+    reference = _pack_cdma_dc_feature_input_fp16_reference(input_nchw, p)
+    translated = translate_crs_fp16_mesa(input_nchw, p)
+    same_shape = reference.shape == translated.shape
+    same_bytes = reference.view(np.uint16).tolist() == translated.view(np.uint16).tolist()
+
+    print("FP16 translate_crs_fp16_mesa compare before submit:")
+    print(f"  input_shape={tuple(shape)} align_c={align_c} input_pack_c2={input_pack_c2} width_stride={width_stride} use_nhwc={use_nhwc}")
+    print(f"  reference_values={reference.size} translated_values={translated.size}")
+    print(f"  same_shape={same_shape} same_bytes={same_bytes}")
+    print(f"  reference_first_32_u16={reference.view(np.uint16)[:32].tolist()}")
+    print(f"  translated_first_32_u16={translated.view(np.uint16)[:32].tolist()}")
+    if not same_bytes:
+        mismatch = np.flatnonzero(reference.view(np.uint16) != translated.view(np.uint16))
+        for off in mismatch[:16]:
+            print(f"    @{int(off)} reference={int(reference.view(np.uint16)[off])} translated={int(translated.view(np.uint16)[off])}")
+    return same_shape and same_bytes
+
+def submit_translate_crs_fp16_mesa_case(batch=1, in_c=16, out_c=16, kh=1, kw=1,
+                                        in_h=8, in_w=8, groups=1, weight_in_c=None,
+                                        stride=1, atol=0.2):
+    sys.path.insert(0, os.path.dirname(__file__))
+    import conv_new
+
+    conv_new._pack_cdma_dc_feature_input_fp16 = translate_crs_fp16_mesa
+    result, inp, wt = conv_new.run_conv2d(
+        batch, in_c, out_c, kh, kw, (in_h, in_w),
+        groups=groups, weight_in_c=weight_in_c, stride=stride)
+    expected = conv_new.compute_expected_nchw(
+        inp, wt, batch, in_c, in_h, in_w, out_c, kh, kw,
+        groups=groups, stride=stride)
+    md = float(np.max(np.abs(result.astype(np.float64) - expected)))
+    ok = np.allclose(result, expected, atol=atol) and not np.any(np.isinf(result))
+    print("FP16 translate_crs_fp16_mesa submit:")
+    print(f"  shape=batch{batch} c{in_c} {in_h}x{in_w} -> oc{out_c} kh={kh} kw={kw} groups={groups} stride={stride}")
+    print(f"  {'PASS' if ok else 'FAIL'} max_diff={md:.4f} atol={atol}")
+    try:
+        os.close(conv_new.fd)
+    except OSError:
+        pass
+    return ok
+
+def pack_input_by_name(input_packer, input_nhwc, op):
+    if input_packer == "mesa":
+        return pack_input_like_mesa(
+            input_nhwc, op.input_width, op.input_height, op.input_channels,
+            op.input_zero_point, op.output_channels, op.addition_input, op.add_tensor)
+    if input_packer == "translate_crs_int8":
+        return pack_input_translate_crs_int8(input_nhwc, op.input_zero_point)
+    if input_packer == "translate_crs_int8_mesa":
+        return pack_input_translate_crs_int8_like_mesa(
+            input_nhwc, op.input_width, op.input_height, op.input_channels,
+            op.input_zero_point, op.output_channels, op.addition_input, op.add_tensor)
+    raise ValueError(f"unknown input_packer: {input_packer}")
+
+def compare_packed_input_bytes(input_nhwc, op, max_diffs=16, max_bytes=64):
+    mesa = pack_input_by_name("mesa", input_nhwc, op)
+    crs = pack_input_by_name("translate_crs_int8", input_nhwc, op)
+    crs_mesa = pack_input_by_name("translate_crs_int8_mesa", input_nhwc, op)
+    min_len = min(mesa.nbytes, crs.nbytes)
+    mismatch = np.flatnonzero(mesa[:min_len] != crs[:min_len])
+    mesa_min_len = min(mesa.nbytes, crs_mesa.nbytes)
+    mesa_mismatch = np.flatnonzero(mesa[:mesa_min_len] != crs_mesa[:mesa_min_len])
+    same_size = mesa.nbytes == crs.nbytes
+    same_bytes = same_size and mismatch.size == 0
+    mesa_same_size = mesa.nbytes == crs_mesa.nbytes
+    mesa_same_bytes = mesa_same_size and mesa_mismatch.size == 0
+
+    print("Packed input byte compare before submit:")
+    print(f"  input_shape={tuple(input_nhwc.shape)}")
+    print(f"  mesa_bytes={mesa.nbytes} translate_crs_int8_bytes={crs.nbytes}")
+    print(f"  same_size={same_size} same_bytes={same_bytes}")
+    print(f"  translate_crs_int8_mesa_bytes={crs_mesa.nbytes}")
+    print(f"  mesa_compatible_same_size={mesa_same_size} mesa_compatible_same_bytes={mesa_same_bytes}")
+    print(f"  mesa_first_{max_bytes}={mesa[:max_bytes].tolist()}")
+    print(f"  translate_crs_first_{max_bytes}={crs[:max_bytes].tolist()}")
+    print(f"  translate_crs_mesa_first_{max_bytes}={crs_mesa[:max_bytes].tolist()}")
+    if mismatch.size:
+        print(f"  first_{min(max_diffs, mismatch.size)}_diffs:")
+        for off in mismatch[:max_diffs]:
+            print(f"    @{int(off)} mesa={int(mesa[off])} translate_crs={int(crs[off])}")
+    if mesa_mismatch.size:
+        print(f"  first_{min(max_diffs, mesa_mismatch.size)}_mesa_compatible_diffs:")
+        for off in mesa_mismatch[:max_diffs]:
+            print(f"    @{int(off)} mesa={int(mesa[off])} translate_crs_mesa={int(crs_mesa[off])}")
+    if mesa.nbytes != crs.nbytes:
+        print(f"  extra_bytes={abs(mesa.nbytes - crs.nbytes)}")
+    return same_bytes, mesa_same_bytes
+
+# ---------------------------------------------------------------------------
+# Weight packing (rkt_coefs.c:rkt_fill_weights)
+# ---------------------------------------------------------------------------
+def calc_weight_size(weights_width, weights_height, input_channels, output_channels,
+                     depthwise):
+    wc = _align(max(input_channels, FEATURE_ATOMIC_SIZE), WEIGHT_ATOMIC_SIZE)
+    oc = _align(output_channels, 2) if not depthwise else 1
+    return weights_width * weights_height * oc * wc * 2
+
+def fill_weights_like_mesa(weight_ohwi, weights_width, weights_height,
+                           input_channels, output_channels, zero_point, depthwise):
+    """
+    Pack quantized uint8 weights into Rocket hardware layout.
+    Mirrors rkt_coefs.c::rkt_fill_weights().
+    """
+    ic = max(input_channels, FEATURE_ATOMIC_SIZE)
+    oc = _align(output_channels, 2) if not depthwise else 1
+    ic_groups = WEIGHT_ATOMIC_SIZE
+    if depthwise:
+        ic_groups *= 2
+
+    ic1 = _ceil_div(ic, ic_groups)
+    ic2 = min(ic, ic_groups)
+    oc1 = _ceil_div(oc, WEIGHT_ATOMIC_SIZE)
+
+    out_size = weights_width * weights_height * ic1 * ic_groups * oc1 * WEIGHT_ATOMIC_SIZE
+    if depthwise:
+        out_size = weights_width * weights_height * ic1 * ic_groups * oc1 * WEIGHT_ATOMIC_SIZE
+    if not depthwise:
+        out_size = weights_width * weights_height * oc * _align(ic, WEIGHT_ATOMIC_SIZE) * 2
+
+    # Actual Mesa size formula
+    wc = _align(ic, WEIGHT_ATOMIC_SIZE)
+    total_size = weights_width * weights_height * oc * wc * 2
+
+    out = np.zeros(total_size, dtype=np.uint8)
+    n = 0
+
+    for oo in range(_ceil_div(oc, WEIGHT_ATOMIC_SIZE)):
+        for ii in range(ic1):
+            for x in range(weights_width):
+                for y in range(weights_height):
+                    for oi in range(min(oc - oo * WEIGHT_ATOMIC_SIZE, WEIGHT_ATOMIC_SIZE)):
+                        for ij in range(ic2):
+                            oc_idx = oo * WEIGHT_ATOMIC_SIZE + oi
+                            ic_idx = ii * ic_groups + ij
+
+                            if output_channels > 2 and oc_idx >= _align(output_channels, 2):
+                                continue
+
+                            if oc_idx >= output_channels:
+                                out[n] = 0
+                                n += 1
+                            elif ic_idx >= input_channels:
+                                if ij < 16 or (input_channels % 32) > 16:
+                                    out[n] = (zero_point - 0x80) & 0xFF
+                                    n += 1
+                                else:
+                                    continue
+                            else:
+                                val = weight_ohwi[oc_idx, x, y, ic_idx]
+                                out[n] = (int(val) - 0x80) & 0xFF
+                                n += 1
+    return out
+
+# ---------------------------------------------------------------------------
+# Bias correction (rkt_coefs.c)
+# ---------------------------------------------------------------------------
+def calculate_bias_correction(weights_ohwi, weights_width, weights_height,
+                              input_channels, output_channels,
+                              input_zero_point, weight_zero_point, depthwise):
+    correction = np.zeros(output_channels, dtype=np.int64)
+    if depthwise:
+        for oc in range(output_channels):
+            s = 0
+            for x in range(weights_width):
+                for y in range(weights_height):
+                    s += (int(weights_ohwi[0, x, y, oc]) - weight_zero_point) * \
+                         (input_zero_point - 0x80)
+            correction[oc] = s
+    else:
+        for oc in range(output_channels):
+            s = 0
+            for x in range(weights_width):
+                for y in range(weights_height):
+                    for ic in range(input_channels):
+                        s += (int(weights_ohwi[oc, x, y, ic]) - weight_zero_point) * \
+                             (input_zero_point - 0x80)
+            correction[oc] = s
+    return correction
+
+def rkt_fill_biases_like_mesa(biases_in, output_channels, weights_ohwi,
+                              weights_width, weights_height, input_channels,
+                              input_zero_point, weight_zero_point, depthwise,
+                              weight_scale):
+    """
+    Port of rkt_coefs.c::rkt_fill_biases().
+    Returns (biases_packed, truncate_bits).
+    """
+    correction = calculate_bias_correction(
+        weights_ohwi, weights_width, weights_height, input_channels,
+        output_channels, input_zero_point, weight_zero_point, depthwise)
+
+    truncate_bits = 0
+    scale_bits = fui(weight_scale)
+    known_truncate_scales = [
+        0x3a88323f, 0x3c0060de, 0x3c06022d, 0x3c1642e3,
+        0x3c1e3f51, 0x3c5c8aa8, 0x3c615e93, 0x3c7326a2,
+        0x3c783013, 0x3d1748e6, 0x3d282992, 0x3d2e87ae,
+        0x3d77f5f6, 0x3a9a5956, 0x3caebc56,
+    ]
+    if scale_bits in known_truncate_scales:
+        truncate_bits = 1
+
+    biases = np.zeros(output_channels, dtype=np.int32)
+    for oc in range(output_channels):
+        corr = correction[oc]
+        biases[oc] = (biases_in[oc] - corr) // (1 << truncate_bits)
+    return biases, truncate_bits
+
+# ---------------------------------------------------------------------------
+# CBUF calculations (rkt_task.c)
+# ---------------------------------------------------------------------------
+def calc_line_stride(width):
+    return width * ATOMIC_K_SIZE * BPE
+
+def calc_entries_per_slice(input_width, input_channels):
+    bpe = BPE
+    atomics_per_entry = CBUF_ENTRY_SIZE // FEATURE_ATOMIC_SIZE
+    total_c_atomics = _ceil_div(input_channels * bpe, FEATURE_ATOMIC_SIZE)
+    last_c_atomics = total_c_atomics % atomics_per_entry
+    int_c_entries = (total_c_atomics // atomics_per_entry) * input_width
+    if last_c_atomics == 3:
+        frac_c_entries = input_width
+    else:
+        frac_c_entries = _ceil_div(last_c_atomics * input_width, atomics_per_entry)
+    return int_c_entries + frac_c_entries
+
+def calc_input_banks(input_width, input_height, input_channels):
+    eps = calc_entries_per_slice(input_width, input_channels)
+    return _ceil_div(eps * input_height, CBUF_ENTRIES_PER_BANK)
+
+def calc_weights_banks(weights_width, weights_height, input_channels,
+                       output_channels, depthwise):
+    bpe = BPE
+    bytes_ = weights_width * weights_height * input_channels * bpe
+    if not depthwise:
+        bytes_ *= output_channels
+    entries = _ceil_div(bytes_, CBUF_ENTRY_SIZE)
+    banks = _ceil_div(entries, CBUF_ENTRIES_PER_BANK)
+    banks += 1  # Mesa adds one extra bank
+    return banks
+
+# ---------------------------------------------------------------------------
+# fill_task (rkt_task.c::fill_task)
+# ---------------------------------------------------------------------------
+def fill_task(op, task):
+    task.stride_x = op.stride
+    task.stride_y = op.stride
+
+    task.input_width = op.input_width
+    if task.input_width == 8 and (op.addition_input or op.add_tensor != -1):
+        task.input_width *= 2
+
+    task.input_height = op.input_height
+    task.input_channels = _align(max(op.input_channels, FEATURE_ATOMIC_SIZE), FEATURE_ATOMIC_SIZE)
+    task.input_channels_real = op.input_channels
+    task.input_zero_point = op.input_zero_point
+    task.input_scale = op.input_scale
+
+    task.output_width = op.output_width
+    task.output_height = op.output_height
+    task.output_channels_real = op.output_channels
+    task.output_channels = _align(max(op.output_channels, 32), 32)
+    if op.depthwise:
+        if task.output_channels_real <= 32:
+            task.output_channels *= 2
+        task.output_channels = _align(task.output_channels, 64)
+
+    task.output_zero_point = op.output_zero_point
+    task.output_scale = op.output_scale
+
+    if task.input_channels_real == 1 and \
+       (task.output_channels_real > 1 or op.addition_input or op.add_tensor != -1):
+        task.input_width = max(task.input_width, FEATURE_ATOMIC_SIZE)
+        task.input_line_stride = max(calc_line_stride(op.input_width) // FEATURE_ATOMIC_SIZE,
+                                     FEATURE_ATOMIC_SIZE)
+        if op.input_channels == 32 and op.input_width == 80:
+            task.input_line_stride *= 4
+            task.input_surface_stride = int(task.input_line_stride * (task.input_height / 4 - 1))
+        else:
+            task.input_surface_stride = int(task.input_line_stride * (task.input_height - 1))
+    else:
+        task.input_line_stride = calc_line_stride(op.input_width) // 4
+        task.input_surface_stride = int(task.input_line_stride * (task.input_height / 4 - 1))
+
+    if task.input_width == 8 and (op.addition_input or op.add_tensor != -1):
+        task.input_line_stride //= 2
+        task.input_surface_stride = 112
+
+    output_line_stride = calc_line_stride(op.output_width)
+    task.output_surface_stride = output_line_stride * task.output_height // FEATURE_ATOMIC_SIZE
+
+    if task.input_channels_real == 1:
+        task.input_data_entries = task.input_width * task.input_height
+    elif task.input_width == 40 and task.input_channels_real == 40:
+        task.input_data_entries = 40
+    else:
+        task.input_data_entries = _ceil_div(
+            task.input_width * 2 * _ceil_div(task.input_channels_real, FEATURE_ATOMIC_SIZE), 8)
+
+    task.weights_width = op.weights_width
+    task.weights_height = op.weights_height
+    task.weights_zero_point = op.weights_zero_point
+    task.weights_scale = op.weights_scale
+
+    task.weights_kernels = 1 if op.depthwise else _align(op.output_channels, 2)
+
+    task.surfaces_per_row = task.output_width * task.output_height * 2
+    if op.depthwise:
+        task.surfaces_per_row *= 2
+
+# ---------------------------------------------------------------------------
+# Task splitting (rkt_task.c::rkt_split_tasks)
+# ---------------------------------------------------------------------------
+def split_tasks_like_mesa(op):
+    op.tasks = []
+
+    entries_per_slice = calc_entries_per_slice(op.input_width, op.input_channels)
+    input_banks_required = calc_input_banks(op.input_width, op.input_height, op.input_channels)
+    weights_banks_required = calc_weights_banks(
+        op.weights_width, op.weights_height, op.input_channels, op.output_channels, op.depthwise)
+    available_weights_banks = weights_banks_required
+    available_input_banks = CBUF_BANKS - weights_banks_required
+
+    pad_top = op.padding_top
+    pad_bottom = op.padding_bottom
+    pad_left = op.padding_left
+    pad_right = op.padding_right
+
+    if weights_banks_required + 1 < CBUF_BANKS:
+        op.reuse_weights_cbuf = True
+    else:
+        op.reuse_weights_cbuf = False
+        available_input_banks = 7
+        available_weights_banks = CBUF_BANKS - available_input_banks
+
+    if input_banks_required <= available_input_banks:
+        t = SplitTask()
+        t.num = 0
+        fill_task(op, t)
+        t.input_banks = input_banks_required
+        t.weights_banks = CBUF_BANKS - t.input_banks
+        t.input_height = op.input_height
+        t.pad_top = pad_top
+        t.pad_bottom = pad_bottom
+        t.pad_left = pad_left
+        t.pad_right = pad_right
+        t.atomic_count = t.output_width * t.output_height
+        op.tasks.append(t)
+        return
+
+    available_slices = (CBUF_ENTRIES_PER_BANK * available_input_banks) // entries_per_slice
+
+    t = SplitTask()
+    t.num = 0
+    fill_task(op, t)
+    t.input_banks = available_input_banks
+    t.weights_banks = available_weights_banks
+    t.top_slice = 0
+    t.bottom_slice = available_slices - 1
+    t.pad_top = pad_top
+    t.pad_left = pad_left
+    t.pad_right = pad_right
+    op.tasks.append(t)
+
+    s = op.weights_height - pad_top - 1
+    while s < op.input_height:
+        prev = op.tasks[-1]
+        while s <= prev.bottom_slice:
+            s += op.stride
+        if s > prev.bottom_slice:
+            s -= op.stride
+
+        t = SplitTask()
+        t.num = len(op.tasks)
+        fill_task(op, t)
+        t.top_slice = min(s, prev.bottom_slice) - (op.weights_height - 1) + op.stride
+        t.bottom_slice = t.top_slice + available_slices - 1
+        t.pad_left = pad_left
+        t.pad_right = pad_right
+
+        if t.bottom_slice >= op.input_height - 1:
+            t.bottom_slice = op.input_height - 1
+            t.pad_bottom = pad_bottom
+            op.tasks.append(t)
+            break
+
+        s = t.top_slice + op.weights_height - 1
+        op.tasks.append(t)
+
+    last = op.tasks[-1]
+    if last.top_slice >= op.input_height or \
+       last.bottom_slice >= (op.input_height + pad_bottom):
+        op.tasks.pop()
+
+    for i in range(1, len(op.tasks)):
+        prev = op.tasks[i - 1]
+        cur = op.tasks[i]
+        if prev.bottom_slice >= cur.top_slice:
+            cur.num_overlap_slices = prev.bottom_slice - cur.top_slice + 1
+            prev.num_retain_slices = cur.num_overlap_slices
+        else:
+            cur.num_overlap_slices = 0
+            prev.num_retain_slices = 0
+
+    output_height_processed = 0
+    for i, cur in enumerate(op.tasks):
+        s = cur.top_slice + (op.weights_height - 1) - cur.pad_top
+        conv_count = 0
+        while s <= cur.bottom_slice + cur.pad_bottom:
+            s += op.stride
+            conv_count += 1
+        cur.convolutions = conv_count
+
+        cur.bottom_slice = min(cur.bottom_slice, op.input_height - 1)
+        cur.input_height = cur.bottom_slice - cur.top_slice + 1
+        cur.output_width = (cur.input_width + cur.pad_left + cur.pad_right -
+                            op.weights_width) // op.stride + 1
+        cur.output_height = (cur.input_height + cur.pad_top + cur.pad_bottom -
+                             op.weights_height) // op.stride + 1
+        cur.atomic_count = cur.output_width * cur.output_height
+        cur.input_offset = calc_line_stride(op.input_width) * cur.top_slice
+        cur.output_offset = calc_line_stride(op.output_width) * output_height_processed
+        cur.input_banks = available_input_banks
+        cur.weights_banks = available_weights_banks
+        output_height_processed += cur.output_height
+
+# ---------------------------------------------------------------------------
+# Output size (rkt_ml.c::calc_raw_output_size)
+# ---------------------------------------------------------------------------
+def calc_raw_output_size(output_width, output_height, output_channels):
+    oc1 = _ceil_div(output_channels, FEATURE_ATOMIC_SIZE) * 2
+    oc2 = FEATURE_ATOMIC_SIZE
+    return output_width * output_height * oc1 * oc2
+
+# ---------------------------------------------------------------------------
+# Register emission (rkt_regcmd.c::fill_first_regcmd)
+# ---------------------------------------------------------------------------
+def emit_regcmd_like_mesa(op, task_num, input_phys_addr, output_phys_addr,
+                          weight_phys_addr, bias_phys_addr):
+    task = op.tasks[task_num]
+    num_tasks = len(op.tasks)
+    offset = task.output_zero_point - 0x80
+
+    con0 = (CNA_CBUF_CON0_WEIGHT_BANK(task.weights_banks) |
+            CNA_CBUF_CON0_DATA_BANK(task.input_banks))
+    if task_num > 0 and op.reuse_weights_cbuf:
+        con0 |= CNA_CBUF_CON0_WEIGHT_REUSE(1)
+
+    con1 = 0
+    if task.input_channels_real == 1:
+        con1 |= (CNA_CONV_CON1_NONALIGN_DMA(1) | CNA_CONV_CON1_GROUP_LINE_OFF(1) |
+                 CNA_CONV_CON1_ARGB_IN(8))
+    if op.depthwise:
+        con1 |= CNA_CONV_CON1_CONV_MODE(3)
+
+    if task.input_channels_real == 1:
+        trunc = 14
+        scale = 16384
+        coff = 65408
+
+        if op.addition_input or op.add_tensor != -1:
+            trunc = 15
+            scale = 32388
+
+        cvt_regs = [
+            E(reg.CNA, reg.CNA_CVT_CON0,
+              CNA_CVT_CON0_CVT_TRUNCATE_3(trunc) |
+              CNA_CVT_CON0_CVT_TRUNCATE_2(trunc) |
+              CNA_CVT_CON0_CVT_TRUNCATE_1(trunc) |
+              CNA_CVT_CON0_CVT_TRUNCATE_0(trunc)),
+            E(reg.CNA, reg.CNA_CVT_CON1,
+              CNA_CVT_CON1_CVT_SCALE0(scale) | CNA_CVT_CON1_CVT_OFFSET0(coff)),
+            E(reg.CNA, reg.CNA_CVT_CON2,
+              CNA_CVT_CON2_CVT_SCALE1(scale) | CNA_CVT_CON2_CVT_OFFSET1(coff)),
+            E(reg.CNA, reg.CNA_CVT_CON3,
+              CNA_CVT_CON3_CVT_SCALE2(scale) | CNA_CVT_CON3_CVT_OFFSET2(coff)),
+            E(reg.CNA, reg.CNA_CVT_CON4,
+              CNA_CVT_CON4_CVT_SCALE3(scale) | CNA_CVT_CON4_CVT_OFFSET3(coff)),
+        ]
+    else:
+        cvt_regs = [
+            E(reg.CNA, reg.CNA_CVT_CON0,
+              CNA_CVT_CON0_DATA_SIGN(1) | CNA_CVT_CON0_CVT_TYPE(1) |
+              CNA_CVT_CON0_CVT_BYPASS(1)),
+            E(reg.CNA, reg.CNA_CVT_CON1, CNA_CVT_CON1_CVT_SCALE0(1)),
+            E(reg.CNA, reg.CNA_CVT_CON2, CNA_CVT_CON2_CVT_SCALE1(1)),
+            E(reg.CNA, reg.CNA_CVT_CON3, CNA_CVT_CON3_CVT_SCALE2(1)),
+            E(reg.CNA, reg.CNA_CVT_CON4, CNA_CVT_CON4_CVT_SCALE3(1)),
+        ]
+
+    feat_addr = input_phys_addr + task.input_offset
+    cvt_con5 = 65535 if task.input_channels_real == 1 else 0
+
+    w3 = task.weights_width >= 3
+    izp = task.input_zero_point
+    if w3 and izp == 0:
+        pad_con1 = 0xffff8080
+    else:
+        pad_con1 = izp - 0x80
+
+    if op.addition_input or op.add_tensor != -1:
+        pad_con1 = 0xffffff80
+
+    if op.depthwise and izp == 0x8b:
+        pad_con1 = 0x0b0b
+
+    misc_cfg = CORE_MISC_CFG_QD_EN(1)
+    if op.depthwise:
+        misc_cfg |= CORE_MISC_CFG_DW_EN(1)
+
+    feat_mode_cfg = (DPU_FEATURE_MODE_CFG_BURST_LEN(15) |
+                     DPU_FEATURE_MODE_CFG_OUTPUT_MODE(2))
+    if op.depthwise:
+        feat_mode_cfg |= DPU_FEATURE_MODE_CFG_CONV_MODE(3)
+
+    dst_addr = output_phys_addr + task.output_offset
+
+    if op.depthwise:
+        bs_ow_cfg = (DPU_BS_OW_CFG_SIZE_E_2(3) | DPU_BS_OW_CFG_SIZE_E_1(3) |
+                     DPU_BS_OW_CFG_SIZE_E_0(3))
+    else:
+        bs_ow_cfg = (DPU_BS_OW_CFG_SIZE_E_2(1) | DPU_BS_OW_CFG_SIZE_E_1(1) |
+                     DPU_BS_OW_CFG_SIZE_E_0(1))
+
+    if op.add_tensor != -1:
+        add_scale_map = {
+            0.090192: 299.671889248, 0.399250: 1326.499209406,
+            0.364902: 780.34375,     0.422037: 715.5625,
+            0.213016: 564.6875,      0.244231: 499.796875,
+            0.283416: 488.203125,    0.171151: 602.90625,
+            0.164588: 271.921875,    0.204098: 262.90625,
+            0.116532: 450.140625,    0.134499: 212.1953125,
+            0.220141: 368.28125,     0.094560: 416.421875,
+            0.093230: 305.421875,    0.100618: 313.671875,
+        }
+        add_scale = 0.0
+        for k, v in add_scale_map.items():
+            if fabs(op.addition_scale - k) < 0.00001:
+                add_scale = v
+                break
+
+        add_scale_bits = fui(add_scale)
+        add_shift = 127 + 31 - 32 - (add_scale_bits >> 23) + 16
+        scale = ((add_scale_bits >> 9) & 0x7fff)
+        if scale < 1 << 14:
+            scale |= 1 << 14
+
+        add_scale_out = {
+            0.213016: (0x4, 25914, 24), 0.244231: (0x1, 28927, 24),
+            0.283416: (0x6, 26050, 24), 0.171151: (0xfffffffd, 28937, 24),
+            0.164588: (0x1, 24877, 23), 0.204098: (0x0, 23272, 23),
+            0.116532: (0xfffffff8, 32292, 24), 0.134499: (0xfffffffb, 24153, 23),
+            0.220141: (0xb, 27655, 24), 0.094560: (0x5, 20432, 23),
+            0.093230: (0xffffffff, 25449, 23), 0.100618: (offset, 16874, 23),
+            0.422037: (0x1, 22559, 24), 0.364902: (0x4, 18589, 24),
+        }
+        out_off, out_scale, out_shift = 0x6, 27676, 25
+        for k, (o, s, sh) in add_scale_out.items():
+            if fabs(op.addition_scale - k) < 0.00001:
+                out_off, out_scale, out_shift = o, s, sh
+                break
+        ew_regs = [
+            E(reg.DPU, reg.EW_CFG,
+              DPU_EW_CFG_EW_CVT_TYPE(1) | DPU_EW_CFG_EW_DATA_MODE(1) |
+              DPU_EW_CFG_EDATA_SIZE(1) | DPU_EW_CFG_EW_ALU_ALGO(2) |
+              DPU_EW_CFG_EW_RELU_BYPASS(1) | DPU_EW_CFG_EW_LUT_BYPASS(1) |
+              DPU_EW_CFG_EW_OP_SRC(1)),
+            E(reg.DPU, reg.EW_CVT_OFFSET_VALUE, op.addition_offset),
+            E(reg.DPU, reg.EW_CVT_SCALE_VALUE,
+              DPU_EW_CVT_SCALE_VALUE_EW_OP_CVT_SHIFT(add_shift - 1) |
+              DPU_EW_CVT_SCALE_VALUE_EW_OP_CVT_SCALE(scale)),
+            E(reg.DPU, reg.OUT_CVT_OFFSET, out_off),
+            E(reg.DPU, reg.OUT_CVT_SCALE, DPU_OUT_CVT_SCALE_OUT_CVT_SCALE(out_scale)),
+            E(reg.DPU, reg.OUT_CVT_SHIFT, DPU_OUT_CVT_SHIFT_OUT_CVT_SHIFT(out_shift)),
+        ]
+    else:
+        conv_scale = (task.input_scale * task.weights_scale) / task.output_scale
+        scale_bits = fui(conv_scale)
+        shift = 127 + 31 - 32 - (scale_bits >> 23) + 16
+        if op.truncate_bits > 0:
+            shift -= 1
+        scale = ((scale_bits >> 9) & 0x7fff) + 1
+        if scale < 1 << 14:
+            scale |= 1 << 14
+
+        ew_regs = [
+            E(reg.DPU, reg.EW_CFG,
+              DPU_EW_CFG_EW_RELU_BYPASS(1) | DPU_EW_CFG_EW_OP_CVT_BYPASS(1) |
+              DPU_EW_CFG_EW_LUT_BYPASS(1) | DPU_EW_CFG_EW_OP_BYPASS(1) |
+              DPU_EW_CFG_EW_BYPASS(1)),
+            E(reg.DPU, reg.EW_CVT_SCALE_VALUE, DPU_EW_CVT_SCALE_VALUE_EW_OP_CVT_SCALE(1)),
+            E(reg.DPU, reg.OUT_CVT_OFFSET, offset),
+            E(reg.DPU, reg.OUT_CVT_SCALE, DPU_OUT_CVT_SCALE_OUT_CVT_SCALE(scale)),
+            E(reg.DPU, reg.OUT_CVT_SHIFT, DPU_OUT_CVT_SHIFT_OUT_CVT_SHIFT(shift - 1)),
+        ]
+
+    if op.add_tensor != -1:
+        rdma_src_regs = [
+            E(reg.RDMA, reg.RDMA_SRC_BASE_ADDR,
+              (output_phys_addr + task.output_offset) & 0xFFFFFFFF),
+        ]
+    else:
+        rdma_src_regs = []
+
+    ew_stride = max(op.output_width * op.output_height, 12)
+    if op.add_tensor != -1:
+        ew_base_offset = op.output_width * op.output_height * ATOMIC_K_SIZE
+        rdma_erdma_regs = [
+            E(reg.RDMA, reg.RDMA_ERDMA_CFG,
+              DPU_RDMA_RDMA_ERDMA_CFG_ERDMA_DATA_MODE(1) |
+              DPU_RDMA_RDMA_ERDMA_CFG_ERDMA_DATA_SIZE(1)),
+            E(reg.RDMA, reg.RDMA_EW_BASE_ADDR,
+              ((output_phys_addr + task.output_offset + ew_base_offset) & 0xFFFFFFFF)),
+            E(reg.RDMA, reg.RDMA_EW_SURF_STRIDE,
+              DPU_RDMA_RDMA_EW_SURF_STRIDE_EW_SURF_STRIDE(ew_stride)),
+        ]
+    else:
+        rdma_erdma_regs = [
+            E(reg.RDMA, reg.RDMA_ERDMA_CFG,
+              DPU_RDMA_RDMA_ERDMA_CFG_ERDMA_DISABLE(1)),
+        ]
+
+    rdma_feat = DPU_RDMA_RDMA_FEATURE_MODE_CFG_BURST_LEN(15)
+    if op.add_tensor != -1:
+        rdma_feat |= DPU_RDMA_RDMA_FEATURE_MODE_CFG_COMB_USE(5)
+    else:
+        rdma_feat |= DPU_RDMA_RDMA_FEATURE_MODE_CFG_MRDMA_DISABLE(1)
+    if op.depthwise:
+        rdma_feat |= DPU_RDMA_RDMA_FEATURE_MODE_CFG_CONV_MODE(3)
+
+    surf_notch = ew_stride + task.output_width * (op.output_height - task.output_height)
+    if op.input_width == 3:
+        surf_notch = 15
+
+    if op.add_tensor != -1:
+        rdma_src_regs.extend([
+            E(reg.RDMA, reg.RDMA_SURF_NOTCH,
+              DPU_RDMA_RDMA_SURF_NOTCH_SURF_NOTCH_ADDR(surf_notch)),
+            E(reg.RDMA, reg.RDMA_EW_SURF_NOTCH,
+              DPU_RDMA_RDMA_EW_SURF_NOTCH_EW_SURF_NOTCH(surf_notch)),
+        ])
+    pc_base_reg = 0x0 if num_tasks == 1 else E(reg.PC_REG, reg.PC_BASE_ADDRESS, 0)
+
+    npu_regs = [
+        E(reg.DPU, reg.S_POINTER,
+          DPU_S_POINTER_POINTER_PP_MODE(1) | DPU_S_POINTER_EXECUTER_PP_EN(1) |
+          DPU_S_POINTER_POINTER_PP_EN(1)),
+        E(reg.RDMA, reg.RDMA_S_POINTER,
+          DPU_RDMA_RDMA_S_POINTER_POINTER_PP_MODE(1) |
+          DPU_RDMA_RDMA_S_POINTER_EXECUTER_PP_EN(1) |
+          DPU_RDMA_RDMA_S_POINTER_POINTER_PP_EN(1)),
+        E(reg.CNA, reg.CNA_CONV_CON1, con1),
+        E(reg.CNA, reg.CNA_CONV_CON2, CNA_CONV_CON2_FEATURE_GRAINS(50 + task.stride_y + 1)),
+        E(reg.CNA, reg.CNA_CONV_CON3,
+          CNA_CONV_CON3_CONV_X_STRIDE(task.stride_x) |
+          CNA_CONV_CON3_CONV_Y_STRIDE(task.stride_y)),
+        E(reg.CNA, reg.CNA_DATA_SIZE0,
+          CNA_DATA_SIZE0_DATAIN_WIDTH(task.input_width) |
+          CNA_DATA_SIZE0_DATAIN_HEIGHT(task.input_height)),
+        E(reg.CNA, reg.CNA_DATA_SIZE1,
+          CNA_DATA_SIZE1_DATAIN_CHANNEL_REAL(task.input_channels_real - 1) |
+          CNA_DATA_SIZE1_DATAIN_CHANNEL(task.input_channels)),
+        E(reg.CNA, reg.CNA_DATA_SIZE2, CNA_DATA_SIZE2_DATAOUT_WIDTH(task.output_width)),
+        E(reg.CNA, reg.CNA_DATA_SIZE3, CNA_DATA_SIZE3_DATAOUT_ATOMICS(task.atomic_count)),
+        E(reg.CNA, reg.CNA_WEIGHT_SIZE0,
+          CNA_WEIGHT_SIZE0_WEIGHT_BYTES(
+              task.weights_width * task.weights_height *
+              task.input_channels * task.weights_kernels)),
+        E(reg.CNA, reg.CNA_WEIGHT_SIZE1,
+          CNA_WEIGHT_SIZE1_WEIGHT_BYTES_PER_KERNEL(
+              task.weights_width * task.weights_height * task.input_channels)),
+        E(reg.CNA, reg.CNA_WEIGHT_SIZE2,
+          CNA_WEIGHT_SIZE2_WEIGHT_WIDTH(task.weights_width) |
+          CNA_WEIGHT_SIZE2_WEIGHT_HEIGHT(task.weights_height) |
+          CNA_WEIGHT_SIZE2_WEIGHT_KERNELS(task.weights_kernels)),
+        E(reg.CNA, reg.CNA_CBUF_CON0, con0),
+        E(reg.CNA, reg.CNA_CBUF_CON1, CNA_CBUF_CON1_DATA_ENTRIES(task.input_data_entries)),
+        *cvt_regs,
+        E(reg.CNA, reg.CNA_PAD_CON0,
+          CNA_PAD_CON0_PAD_LEFT(task.pad_left) |
+          CNA_PAD_CON0_PAD_TOP(task.pad_top)),
+        E(reg.CNA, reg.CNA_FEATURE_DATA_ADDR, feat_addr & 0xFFFFFFFF),
+        E(reg.CNA, reg.CNA_DMA_CON0,
+          CNA_DMA_CON0_WEIGHT_BURST_LEN(15) |
+          CNA_DMA_CON0_DATA_BURST_LEN(15)),
+        E(reg.CNA, reg.CNA_DMA_CON1, CNA_DMA_CON1_LINE_STRIDE(task.input_line_stride)),
+        E(reg.CNA, reg.CNA_DMA_CON2, CNA_DMA_CON2_SURF_STRIDE(task.input_surface_stride)),
+        E(reg.CNA, reg.CNA_FC_DATA_SIZE0,
+          CNA_FC_DATA_SIZE0_DMA_WIDTH(op.input_width) |
+          CNA_FC_DATA_SIZE0_DMA_HEIGHT(task.input_height)),
+        E(reg.CNA, reg.CNA_FC_DATA_SIZE1, CNA_FC_DATA_SIZE1_DMA_CHANNEL(task.input_channels)),
+        E(reg.CNA, reg.CNA_DCOMP_ADDR0, CNA_DCOMP_ADDR0_DECOMPRESS_ADDR0(weight_phys_addr & 0xFFFFFFFF)),
+        E(reg.CNA, reg.CNA_CVT_CON5, CNA_CVT_CON5_PER_CHANNEL_CVT_EN(cvt_con5)),
+        E(reg.CNA, reg.CNA_PAD_CON1, CNA_PAD_CON1_PAD_VALUE(pad_con1)),
+        E(reg.CORE, reg.CORE_MISC_CFG, misc_cfg),
+        # TODO
+        E(reg.CORE, reg.CORE_DATAOUT_SIZE_0,
+          CORE_DATAOUT_SIZE_0_DATAOUT_HEIGHT(task.output_height - 1) |
+          CORE_DATAOUT_SIZE_0_DATAOUT_WIDTH(task.output_width - 1)),
+        E(reg.CORE, reg.CORE_DATAOUT_SIZE_1,
+          CORE_DATAOUT_SIZE_1_DATAOUT_CHANNEL(task.output_channels - 1)),
+        E(reg.CORE, reg.CORE_CLIP_TRUNCATE,
+          CORE_CLIP_TRUNCATE_CLIP_TRUNCATE(op.truncate_bits)),
+        E(reg.CORE, 0x3030, 0),
+        E(reg.DPU, reg.FEATURE_MODE_CFG, feat_mode_cfg),
+        E(reg.DPU, reg.DATA_FORMAT, 0),
+        E(reg.DPU, reg.DST_BASE_ADDR, dst_addr & 0xFFFFFFFF),
+        E(reg.DPU, reg.DST_SURF_STRIDE,
+          DPU_DST_SURF_STRIDE_DST_SURF_STRIDE(task.output_surface_stride)),
+        E(reg.DPU, reg.DATA_CUBE_WIDTH,
+          DPU_DATA_CUBE_WIDTH_WIDTH(task.output_width - 1)),
+        E(reg.DPU, reg.DATA_CUBE_HEIGHT,
+          DPU_DATA_CUBE_HEIGHT_HEIGHT(task.output_height - 1)),
+        E(reg.DPU, reg.DATA_CUBE_NOTCH_ADDR, 0),
+        E(reg.DPU, reg.DATA_CUBE_CHANNEL,
+          DPU_DATA_CUBE_CHANNEL_ORIG_CHANNEL(task.output_channels_real - 1) |
+          DPU_DATA_CUBE_CHANNEL_CHANNEL(task.output_channels - 1)),
+        E(reg.DPU, reg.BS_CFG,
+          DPU_BS_CFG_BS_ALU_ALGO(2) | DPU_BS_CFG_BS_ALU_SRC(1) |
+          DPU_BS_CFG_BS_RELU_BYPASS(1) | DPU_BS_CFG_BS_MUL_BYPASS(1)),
+        # BS_ALU_CFG BS_MUL_CFG BS_RELUX_CMP_VALUE need explictly set 0 to pass test
+        E(reg.DPU, reg.BS_ALU_CFG, 0),
+        E(reg.DPU, reg.BS_MUL_CFG, 0),
+        E(reg.DPU, reg.BS_RELUX_CMP_VALUE, 0),
+        E(reg.DPU, reg.BS_OW_CFG, bs_ow_cfg),
+        E(reg.DPU, reg.BS_OW_OP, DPU_BS_OW_OP_OW_OP(0x80 - task.weights_zero_point)),
+        E(reg.DPU, reg.WDMA_SIZE_0,
+          DPU_WDMA_SIZE_0_CHANNEL_WDMA(task.output_channels - 1)),
+        E(reg.DPU, reg.WDMA_SIZE_1,
+          DPU_WDMA_SIZE_1_HEIGHT_WDMA(task.output_height - 1) |
+          DPU_WDMA_SIZE_1_WIDTH_WDMA(task.output_width - 1)),
+        E(reg.DPU, reg.BN_CFG,
+          DPU_BN_CFG_BN_RELU_BYPASS(1) | DPU_BN_CFG_BN_MUL_BYPASS(1) |
+          DPU_BN_CFG_BN_ALU_BYPASS(1) | DPU_BN_CFG_BN_BYPASS(1)),
+        *ew_regs,
+        E(reg.DPU, reg.SURFACE_ADD,
+          DPU_SURFACE_ADD_SURF_ADD(task.surfaces_per_row)),
+        E(reg.RDMA, reg.RDMA_DATA_CUBE_WIDTH,
+          DPU_RDMA_RDMA_DATA_CUBE_WIDTH_WIDTH(task.output_width - 1)),
+        E(reg.RDMA, reg.RDMA_DATA_CUBE_HEIGHT,
+          DPU_RDMA_RDMA_DATA_CUBE_HEIGHT_HEIGHT(task.output_height - 1)),
+        E(reg.RDMA, reg.RDMA_DATA_CUBE_CHANNEL,
+          DPU_RDMA_RDMA_DATA_CUBE_CHANNEL_CHANNEL(task.output_channels - 1)),
+        *rdma_src_regs,
+        E(reg.RDMA, reg.RDMA_BRDMA_CFG,
+          DPU_RDMA_RDMA_BRDMA_CFG_BRDMA_DATA_USE(1)),
+        E(reg.RDMA, reg.RDMA_BS_BASE_ADDR, bias_phys_addr & 0xFFFFFFFF),
+        *rdma_erdma_regs,
+        E(reg.RDMA, reg.RDMA_FEATURE_MODE_CFG, rdma_feat),
+        E(reg.RDMA, reg.RDMA_WEIGHT,
+          DPU_RDMA_RDMA_WEIGHT_E_WEIGHT(1) | DPU_RDMA_RDMA_WEIGHT_N_WEIGHT(1) |
+          DPU_RDMA_RDMA_WEIGHT_B_WEIGHT(1) | DPU_RDMA_RDMA_WEIGHT_M_WEIGHT(1)),
+        pc_base_reg,  # placeholder for single-task mode, patched for multi-task mode
+        E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, 0),  # placeholder, patched later
+        E(reg.VERSION, 0, 0),  # version sentinel
+        E(reg.PC, reg.OPERATION_ENABLE,
+          PC_OPERATION_ENABLE_RESERVED_0(14) | PC_OPERATION_ENABLE_OP_EN(1)),
+    ]
+    return npu_regs
+
+def _get_target(reg_addr):
+    """Determine target from register address, matching rkt_get_target()."""
+    if reg_addr < 0x1000:
+        return 0x100  # PC
+    elif reg_addr < 0x2000:
+        return 0x200  # CNA
+    elif reg_addr < 0x3000:
+        return 0x200  # CNA (upper CNA regs)
+    elif reg_addr < 0x4000:
+        return 0x800  # CORE
+    elif reg_addr < 0x5000:
+        return 0x1000  # DPU
+    elif reg_addr < 0x6000:
+        return 0x2000  # DPU_RDMA
+    else:
+        return 0x400  # default
+
+# ---------------------------------------------------------------------------
+# PC patching and compilation (rkt_ml.c::compile_operation)
+# ---------------------------------------------------------------------------
+def compile_operation_like_mesa(op, regcmd_phys_addr):
+    num_tasks = len(op.tasks)
+    regcmds = []
+    for i in range(num_tasks):
+        regs = emit_regcmd_like_mesa(op, i,
+                                     op.input_bo_addr, op.output_bo_addr,
+                                     op.weight_bo_addr, op.bias_bo_addr)
+        regcmds.append(regs)
+
+    regcmd_offset = 0
+    for i in range(num_tasks):
+        size_qwords = len(regcmds[i])
+        if i < num_tasks - 1:
+            next_size = len(regcmds[i + 1])
+            next_addr = regcmd_phys_addr + regcmd_offset + _align(size_qwords * 8, 64)
+            regs_to_fetch = next_size - 4
+            regs_to_fetch = _align(regs_to_fetch // 2, 2)
+            regcmds[i][-4] = E(reg.PC_REG, reg.PC_BASE_ADDRESS,
+                               (next_addr & 0xFFFFFFF0))
+            regcmds[i][-3] = E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS,
+                               PC_REGISTER_AMOUNTS_PC_DATA_AMOUNT(regs_to_fetch))
+
+        op.tasks[i].regcfg_amount = size_qwords
+        op.tasks[i].regcfg_addr = regcmd_phys_addr + regcmd_offset
+        regcmd_offset += _align(size_qwords * 8, 64)
+
+    return regcmds
+
+# ---------------------------------------------------------------------------
+# Output conversion (rkt_ml.c::rkt_ml_subgraph_read_outputs)
+# ---------------------------------------------------------------------------
+def read_output_like_mesa(raw_output, output_width, output_height, output_channels):
+    raw = raw_output.reshape(-1, output_width or 1, output_height or 1, FEATURE_ATOMIC_SIZE)
+    out = np.zeros((output_height, output_width, output_channels), dtype=np.uint8)
+    for oc in range(output_channels):
+        c = oc % FEATURE_ATOMIC_SIZE
+        g = oc // FEATURE_ATOMIC_SIZE
+        for y in range(output_height):
+            for x in range(output_width):
+                out[y, x, oc] = (int(raw[g, x, y, c]) + 0x80) & 0xFF
+    return out
+
+# ---------------------------------------------------------------------------
+# Submit (rkt_ml.c::rkt_ml_subgraph_invoke)
+# ---------------------------------------------------------------------------
+def submit_operation_like_mesa(fd, op, input_bo, weight_bo, bias_bo, output_bo,
+                               regcmd_bo, regcmds):
+    num_tasks = len(op.tasks)
+    # include regcmd, weight, and optional bias in input handles
+    num_inputs = 1  # input tensor
+    extra_in = [regcmd_bo, weight_bo, bias_bo]
+    if op.add_tensor != -1:
+        extra_in.append(output_bo)
+    num_inputs += len(extra_in)
+
+    in_handles = (ctypes.c_uint32 * num_inputs)()
+    in_handles[0] = input_bo.handle
+    for j, bo in enumerate(extra_in):
+        in_handles[1 + j] = bo.handle
+    out_handles = (ctypes.c_uint32 * 1)(output_bo.handle)
+
+    # fini_bo on all BOs -> makes them IDLE for kernel submission
+    for bo in (regcmd_bo, input_bo, weight_bo, bias_bo, output_bo):
+        try:
+            _rocket_fini_bo(fd, bo)
+        except OSError:
+            pass
+
+    if op.reuse_weights_cbuf:
+        tasks = (drm_rocket_task * num_tasks)()
+        for i in range(num_tasks):
+            tasks[i].regcmd = op.tasks[i].regcfg_addr & 0xFFFFFFFF
+            tasks[i].regcmd_count = op.tasks[i].regcfg_amount
+        job = drm_rocket_job(
+            tasks=ctypes.addressof(tasks),
+            in_bo_handles=ctypes.addressof(in_handles) if num_inputs > 0 else 0,
+            out_bo_handles=ctypes.addressof(out_handles),
+            task_count=num_tasks,
+            task_struct_size=ctypes.sizeof(drm_rocket_task),
+            in_bo_handle_count=num_inputs,
+            out_bo_handle_count=1,
+        )
+        jobs_array = (drm_rocket_job * 1)(job)
+        submit = drm_rocket_submit(
+            jobs=ctypes.addressof(jobs_array),
+            job_count=1,
+            job_struct_size=ctypes.sizeof(drm_rocket_job),
+        )
+        ret = ioctl(fd, DRM_IOCTL_ROCKET_SUBMIT, submit)
+        _rocket_prep_bo(fd, output_bo)
+        return ret
+    else:
+        # Submit one task per job (parallelism)
+        job_refs = []
+        for i in range(num_tasks):
+            ktask = (drm_rocket_task * 1)()
+            ktask[0].regcmd = op.tasks[i].regcfg_addr & 0xFFFFFFFF
+            ktask[0].regcmd_count = op.tasks[i].regcfg_amount
+            job = drm_rocket_job(
+                tasks=ctypes.addressof(ktask),
+                in_bo_handles=ctypes.addressof(in_handles) if num_inputs > 0 else 0,
+                out_bo_handles=ctypes.addressof(out_handles),
+                task_count=1,
+                task_struct_size=ctypes.sizeof(drm_rocket_task),
+                in_bo_handle_count=num_inputs,
+                out_bo_handle_count=1,
+            )
+            job_refs.append((ktask, job))
+        # Create a single submit with all jobs
+        jobs_array = (drm_rocket_job * num_tasks)()
+        for i, (_, j) in enumerate(job_refs):
+            jobs_array[i] = j
+        submit = drm_rocket_submit(
+            jobs=ctypes.addressof(jobs_array),
+            job_count=num_tasks,
+            job_struct_size=ctypes.sizeof(drm_rocket_job),
+        )
+        ret = ioctl(fd, DRM_IOCTL_ROCKET_SUBMIT, submit)
+        _rocket_prep_bo(fd, output_bo)
+        return ret
+
+# ---------------------------------------------------------------------------
+# Create operation from TFLite-like arguments
+# ---------------------------------------------------------------------------
+def create_operation_from_args(input_nhwc, weight_ohwi, biases_in,
+                                input_zero_point, input_scale,
+                                weight_zero_point, weight_scale,
+                                output_zero_point, output_scale,
+                                pad_top=0, pad_bottom=0, pad_left=0, pad_right=0,
+                                stride=1, depthwise=False,
+                                add_tensor=-1, addition_input=False,
+                                addition_offset=0, addition_scale=1.0):
+    """
+    Create an Operation from NHWC uint8 tensors.
+    Mirrors rkt_ml.c::lower_convolution().
+    """
+    _, in_h, in_w, in_c = input_nhwc.shape
+    oc, kw, kh, ic = weight_ohwi.shape
+    output_channels = ic if depthwise else oc
+
+    op = Operation(
+        depthwise=depthwise,
+        padding_top=pad_top, padding_bottom=pad_bottom,
+        padding_left=pad_left, padding_right=pad_right,
+        stride=stride,
+        input_width=in_w, input_height=in_h, input_channels=in_c,
+        input_zero_point=input_zero_point, input_scale=input_scale,
+        output_width=(in_w + pad_left + pad_right - kw) // stride + 1,
+        output_height=(in_h + pad_top + pad_bottom - kh) // stride + 1,
+        output_channels=output_channels,
+        output_zero_point=output_zero_point, output_scale=output_scale,
+        weights_width=kw, weights_height=kh,
+        weights_zero_point=weight_zero_point, weights_scale=weight_scale,
+        add_tensor=add_tensor, addition_input=addition_input,
+        addition_offset=addition_offset, addition_scale=addition_scale,
+    )
+    return op
+
+# ---------------------------------------------------------------------------
+# Allocate buffers and set up all BOs
+# ---------------------------------------------------------------------------
+def setup_bos(fd, op, input_data_nhwc, weight_ohwi, biases_data,
+              input_packer="mesa"):
+    """Allocate input, weight, bias, output, and regcmd BOs for an operation."""
+
+    input_size = calc_input_size(op.input_width, op.input_height, op.input_channels)
+    weight_size = calc_weight_size(op.weights_width, op.weights_height,
+                                    op.input_channels, op.output_channels, op.depthwise)
+    output_size = calc_raw_output_size(op.output_width, op.output_height, op.output_channels)
+
+    input_buf, input_bo = _rocket_mem_allocate(fd, input_size)
+    weight_buf, weight_bo = _rocket_mem_allocate(fd, weight_size)
+    bias_buf, bias_bo = _rocket_mem_allocate(fd, op.output_channels * 4)
+    output_buf, output_bo = _rocket_mem_allocate(fd, output_size)
+    regcmd_buf, regcmd_bo = _rocket_mem_allocate(fd, 512 * 1024)
+
+    packed_input = pack_input_by_name(input_packer, input_data_nhwc, op)
+
+    if packed_input.nbytes > input_size:
+        raise ValueError(
+            f"packed input ({packed_input.nbytes} bytes) exceeds input BO ({input_size} bytes)")
+    ctypes.memmove(ctypes.addressof(ctypes.c_char.from_buffer(input_buf)),
+                   packed_input.ctypes.data, packed_input.nbytes)
+
+    packed_weight = fill_weights_like_mesa(
+        weight_ohwi, op.weights_width, op.weights_height,
+        op.input_channels, op.output_channels, op.weights_zero_point, op.depthwise)
+    ctypes.memmove(ctypes.addressof(ctypes.c_char.from_buffer(weight_buf)),
+                   packed_weight.ctypes.data, packed_weight.nbytes)
+
+    packed_bias, truncate_bits = rkt_fill_biases_like_mesa(
+        biases_data, op.output_channels, weight_ohwi,
+        op.weights_width, op.weights_height, op.input_channels,
+        op.input_zero_point, op.weights_zero_point, op.depthwise,
+        op.weights_scale)
+    op.truncate_bits = truncate_bits
+    ctypes.memmove(ctypes.addressof(ctypes.c_char.from_buffer(bias_buf)),
+                   packed_bias.ctypes.data, packed_bias.nbytes)
+
+    op.input_bo_handle = input_bo.handle
+    op.input_bo_addr = input_bo.dma_address
+    op.input_bo_size = input_size
+    op.weight_bo_handle = weight_bo.handle
+    op.weight_bo_addr = weight_bo.dma_address
+    op.weight_bo_size = weight_size
+    op.bias_bo_handle = bias_bo.handle
+    op.bias_bo_addr = bias_bo.dma_address
+    op.bias_bo_size = op.output_channels * 4
+    op.output_bo_handle = output_bo.handle
+    op.output_bo_addr = output_bo.dma_address
+    op.output_bo_size = output_size
+    op.regcmd_bo_handle = regcmd_bo.handle
+    op.regcmd_bo_addr = regcmd_bo.dma_address
+    op.regcmd_bo_size = 512 * 1024
+
+    return (input_buf, input_bo), (weight_buf, weight_bo), (bias_buf, bias_bo), \
+           (output_buf, output_bo), (regcmd_buf, regcmd_bo)
+
+# ---------------------------------------------------------------------------
+# Main runner
+# ---------------------------------------------------------------------------
+def run_mesa_conv(fd, input_nhwc, weight_ohwi, biases,
+                   input_zero_point=0, input_scale=1.0/255,
+                   weight_zero_point=0, weight_scale=1.0/255,
+                   output_zero_point=0, output_scale=1.0/255,
+                   pad_top=0, pad_bottom=0, pad_left=0, pad_right=0,
+                   stride=1, depthwise=False, _allow_im2col=True,
+                   input_packer="mesa"):
+    """
+    Run one convolution through the Mesa-equivalent pipeline.
+    Returns output NHWC uint8 tensor.
+    """
+
+    _, in_h, in_w, in_c = input_nhwc.shape
+    oc, kw, kh, _ = weight_ohwi.shape
+    out_h = (in_h + pad_top + pad_bottom - kh) // stride + 1
+    out_w = (in_w + pad_left + pad_right - kw) // stride + 1
+
+    use_im2col = (
+        _allow_im2col and stride == 1 and pad_top == 0 and pad_bottom == 0 and
+        pad_left == 0 and pad_right == 0 and
+        (((kw != 1 or kh != 1) and in_c <= 3) or
+         (in_c == 1 and (out_h == 1 or out_w == 1)))
+    )
+    if use_im2col:
+        result, op = run_mesa_conv_im2col(
+            fd, input_nhwc, weight_ohwi, biases,
+            input_zero_point=input_zero_point, input_scale=input_scale,
+            weight_zero_point=weight_zero_point, weight_scale=weight_scale,
+            output_zero_point=output_zero_point, output_scale=output_scale,
+            depthwise=depthwise, input_packer=input_packer)
+        return result, op
+
+    if depthwise and input_nhwc.shape[3] > 64 and (input_nhwc.shape[3] % 64) != 0:
+        outputs = []
+        for start in range(0, input_nhwc.shape[3], 64):
+            end = min(start + 64, input_nhwc.shape[3])
+            chunk_out, _ = run_mesa_conv(
+                fd, input_nhwc[:, :, :, start:end], weight_ohwi[:, :, :, start:end],
+                biases[start:end], input_zero_point=input_zero_point,
+                input_scale=input_scale, weight_zero_point=weight_zero_point,
+                weight_scale=weight_scale, output_zero_point=output_zero_point,
+                output_scale=output_scale, pad_top=pad_top, pad_bottom=pad_bottom,
+                pad_left=pad_left, pad_right=pad_right, stride=stride, depthwise=depthwise,
+                _allow_im2col=False, input_packer=input_packer)
+            outputs.append(chunk_out)
+
+        op = create_operation_from_args(
+            input_nhwc, weight_ohwi, biases,
+            input_zero_point, input_scale,
+            weight_zero_point, weight_scale,
+            output_zero_point, output_scale,
+            pad_top=pad_top, pad_bottom=pad_bottom,
+            pad_left=pad_left, pad_right=pad_right,
+            stride=stride, depthwise=depthwise)
+        return np.concatenate(outputs, axis=2), op
+
+    op = create_operation_from_args(
+        input_nhwc, weight_ohwi, biases,
+        input_zero_point, input_scale,
+        weight_zero_point, weight_scale,
+        output_zero_point, output_scale,
+        pad_top=pad_top, pad_bottom=pad_bottom,
+        pad_left=pad_left, pad_right=pad_right,
+        stride=stride, depthwise=depthwise)
+
+    split_tasks_like_mesa(op)
+
+    bos = setup_bos(fd, op, input_nhwc, weight_ohwi, biases, input_packer=input_packer)
+    (input_buf, input_bo), (weight_buf, weight_bo), (bias_buf, bias_bo), \
+        (output_buf, output_bo), (regcmd_buf, regcmd_bo) = bos
+
+    regcmds = compile_operation_like_mesa(op, op.regcmd_bo_addr)
+
+    total_qwords = sum(_align(len(r), 2) for r in regcmds)
+    flat_regs = []
+    for i, r in enumerate(regcmds):
+        offset = sum(_align(len(regcmds[j]), 2) for j in range(i))
+        for q in r:
+            flat_regs.append(q)
+        pad = _align(len(r), 2) - len(r)
+        for _ in range(pad):
+            flat_regs.append(0)
+
+    regcmd_array = (ctypes.c_uint64 * len(flat_regs))(*flat_regs)
+    ctypes.memmove(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_buf)),
+                   ctypes.addressof(regcmd_array), len(flat_regs) * 8)
+
+    submit_operation_like_mesa(fd, op, input_bo, weight_bo, bias_bo,
+                                output_bo, regcmd_bo, regcmds)
+
+    _rocket_prep_bo(fd, output_bo)
+    raw_output = np.frombuffer(output_buf, dtype=np.uint8, count=op.output_bo_size).copy()
+
+    result = read_output_like_mesa(raw_output, op.output_width, op.output_height,
+                                    op.output_channels)
+
+    return result, op
+
+
+def run_mesa_conv_im2col(fd, input_nhwc, weight_ohwi, biases,
+                         input_zero_point=0, input_scale=1.0/255,
+                         weight_zero_point=0, weight_scale=1.0/255,
+                         output_zero_point=0, output_scale=1.0/255,
+                         depthwise=False, input_packer="mesa"):
+    """Lower fragile spatial/1D cases to a 1x1 NPU conv; no CPU convolution."""
+    _, in_h, in_w, in_c = input_nhwc.shape
+    oc, kw, kh, _ = weight_ohwi.shape
+    out_h = in_h - kh + 1
+    out_w = in_w - kw + 1
+    output_channels = in_c if depthwise else oc
+    flat_c = kh * kw * in_c
+    flat_c_aligned = _align(flat_c, FEATURE_ATOMIC_SIZE)
+
+    def build_im2col(row_start, row_end):
+        tile_h = row_end - row_start
+        im2col = np.full((1, tile_h, out_w, flat_c_aligned), input_zero_point, dtype=np.uint8)
+        flat = 0
+        for ic in range(in_c):
+            for ky in range(kh):
+                for kx in range(kw):
+                    src_y = row_start + ky
+                    im2col[0, :, :, flat] = input_nhwc[0, src_y:src_y + tile_h, kx:kx + out_w, ic]
+                    flat += 1
+        return im2col
+
+    weight_1x1 = np.full((output_channels, 1, 1, flat_c_aligned), weight_zero_point, dtype=np.uint8)
+    if depthwise:
+        for channel in range(in_c):
+            flat = channel * kh * kw
+            for ky in range(kh):
+                for kx in range(kw):
+                    weight_1x1[channel, 0, 0, flat] = weight_ohwi[0, kx, ky, channel]
+                    flat += 1
+    else:
+        for out_channel in range(oc):
+            flat = 0
+            for ic in range(in_c):
+                for ky in range(kh):
+                    for kx in range(kw):
+                        weight_1x1[out_channel, 0, 0, flat] = weight_ohwi[out_channel, kx, ky, ic]
+                        flat += 1
+
+    weights_banks = calc_weights_banks(1, 1, flat_c_aligned, output_channels, False)
+    available_input_banks = CBUF_BANKS - weights_banks
+    entries_per_slice = calc_entries_per_slice(out_w, flat_c_aligned)
+    tile_h = max(1, (CBUF_ENTRIES_PER_BANK * available_input_banks) // entries_per_slice)
+    tile_h = min(out_h, tile_h)
+
+    outputs = []
+    last_op = None
+    for row_start in range(0, out_h, tile_h):
+        row_end = min(row_start + tile_h, out_h)
+        im2col = build_im2col(row_start, row_end)
+        result, last_op = run_mesa_conv(
+            fd, im2col, weight_1x1, biases,
+            input_zero_point=input_zero_point, input_scale=input_scale,
+            weight_zero_point=weight_zero_point, weight_scale=weight_scale,
+            output_zero_point=output_zero_point, output_scale=output_scale,
+            stride=1, depthwise=False, _allow_im2col=False,
+            input_packer=input_packer)
+        outputs.append(result[:, :, :output_channels])
+
+    return np.concatenate(outputs, axis=0), last_op
+
+
+def run_mesa_case(fd, input_nhwc, weight_ohwi, biases,
+                  input_zero_point=0, input_scale=1.0/255,
+                  weight_zero_point=0, weight_scale=1.0/255,
+                  output_zero_point=0, output_scale=1.0/255,
+                  pad_top=0, pad_bottom=0, pad_left=0, pad_right=0,
+                  stride=1, depthwise=False, groups=1,
+                  input_packer="mesa"):
+    """Run batch/grouped cases as serial NPU convolutions."""
+    batch, _, _, in_c = input_nhwc.shape
+    out_c = in_c if depthwise else weight_ohwi.shape[0]
+    batch_outputs = []
+    last_op = None
+
+    for batch_index in range(batch):
+        sample = input_nhwc[batch_index:batch_index + 1]
+        if groups == 1 or depthwise:
+            result, last_op = run_mesa_conv(
+                fd, sample, weight_ohwi, biases,
+                input_zero_point=input_zero_point, input_scale=input_scale,
+                weight_zero_point=weight_zero_point, weight_scale=weight_scale,
+                output_zero_point=output_zero_point, output_scale=output_scale,
+                pad_top=pad_top, pad_bottom=pad_bottom,
+                pad_left=pad_left, pad_right=pad_right,
+                stride=stride, depthwise=depthwise,
+                input_packer=input_packer)
+        else:
+            input_per_group = in_c // groups
+            output_per_group = out_c // groups
+            group_outputs = []
+            for group in range(groups):
+                input_start = group * input_per_group
+                input_end = input_start + input_per_group
+                output_start = group * output_per_group
+                output_end = output_start + output_per_group
+                group_result, last_op = run_mesa_conv(
+                    fd, sample[:, :, :, input_start:input_end],
+                    weight_ohwi[output_start:output_end], biases[output_start:output_end],
+                    input_zero_point=input_zero_point, input_scale=input_scale,
+                    weight_zero_point=weight_zero_point, weight_scale=weight_scale,
+                    output_zero_point=output_zero_point, output_scale=output_scale,
+                    pad_top=pad_top, pad_bottom=pad_bottom,
+                    pad_left=pad_left, pad_right=pad_right,
+                    stride=stride, depthwise=False,
+                    input_packer=input_packer)
+                group_outputs.append(group_result)
+            result = np.concatenate(group_outputs, axis=2)
+        batch_outputs.append(result)
+
+    return np.stack(batch_outputs, axis=0), last_op
+
+
+# ---------------------------------------------------------------------------
+# CPU quantized reference
+# ---------------------------------------------------------------------------
+def compute_expected_quantized(input_nhwc, weight_ohwi, biases,
+                                input_zero_point, weight_zero_point,
+                                output_zero_point,
+                                pad_top=0, pad_bottom=0, pad_left=0, pad_right=0,
+                                stride=1, depthwise=False, groups=1):
+    """Simulate quantized convolution on CPU for comparison."""
+    batch, in_h, in_w, in_c = input_nhwc.shape
+    oc, kw, kh, ic = weight_ohwi.shape
+    output_channels = ic if depthwise else oc
+
+    if batch > 1:
+        return np.concatenate([
+            compute_expected_quantized(
+                input_nhwc[b:b + 1], weight_ohwi, biases,
+                input_zero_point, weight_zero_point, output_zero_point,
+                pad_top=pad_top, pad_bottom=pad_bottom,
+                pad_left=pad_left, pad_right=pad_right,
+                stride=stride, depthwise=depthwise, groups=groups)
+            for b in range(batch)
+        ], axis=0)
+
+    if groups != 1 and not depthwise:
+        input_per_group = in_c // groups
+        output_per_group = oc // groups
+        outputs = []
+        for group in range(groups):
+            input_start = group * input_per_group
+            input_end = input_start + input_per_group
+            output_start = group * output_per_group
+            output_end = output_start + output_per_group
+            outputs.append(compute_expected_quantized(
+                input_nhwc[:, :, :, input_start:input_end],
+                weight_ohwi[output_start:output_end], biases[output_start:output_end],
+                input_zero_point, weight_zero_point, output_zero_point,
+                pad_top=pad_top, pad_bottom=pad_bottom,
+                pad_left=pad_left, pad_right=pad_right,
+                stride=stride, depthwise=False, groups=1))
+        return np.concatenate(outputs, axis=3)
+
+    out_h = (in_h + pad_top + pad_bottom - kh) // stride + 1
+    out_w = (in_w + pad_left + pad_right - kw) // stride + 1
+
+    input_s = input_nhwc.astype(np.int32) - input_zero_point
+    weight_s = weight_ohwi.astype(np.int32) - weight_zero_point
+
+    padded = np.zeros((1, in_h + pad_top + pad_bottom, in_w + pad_left + pad_right, in_c), dtype=np.int32)
+    padded[:, pad_top:pad_top + in_h, pad_left:pad_left + in_w, :] = input_s
+
+    windows = np.lib.stride_tricks.sliding_window_view(
+        padded[0], (kh, kw), axis=(0, 1))[::stride, ::stride]
+    # sliding_window_view yields H/W windows as (out_h, out_w, C, kh, kw).
+    if depthwise:
+        expected = np.einsum('yxcab,bac->yxc', windows[:, :, :output_channels], weight_s[0], dtype=np.int64)
+        expected = expected[np.newaxis, :, :, :] + biases.reshape(1, 1, 1, output_channels)
+    else:
+        expected = np.einsum('yxcab,obac->yxo', windows, weight_s, dtype=np.int64)
+        expected = expected[np.newaxis, :, :, :] + biases.reshape(1, 1, 1, oc)
+
+    input_scale = 1.0 / 255
+    weight_scale = 1.0 / 255
+    output_scale = 1.0 / 255
+    conv_scale = (input_scale * weight_scale) / output_scale
+    expected_f = expected.astype(np.float64) * conv_scale + output_zero_point
+    expected_f = np.clip(np.round(expected_f), 0, 255).astype(np.uint8)
+    return expected_f
+
+
+def load_conv_py_shapes():
+    """Extract the literal shapes list from sibling conv.py without importing it."""
+    def literal_dict_call(node):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name) or node.func.id != "dict":
+            return None
+        if node.args:
+            return None
+        out = {}
+        for kw in node.keywords:
+            if kw.arg is None:
+                return None
+            out[kw.arg] = ast.literal_eval(kw.value)
+        return out
+
+    conv_path = os.path.join(os.path.dirname(__file__), "conv_legacy.py")
+    with open(conv_path, "r", encoding="utf-8") as f:
+        tree = ast.parse(f.read(), filename=conv_path)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+            if "shapes" in names and isinstance(node.value, ast.List):
+                shapes = []
+                for elt in node.value.elts:
+                    shape = literal_dict_call(elt)
+                    if shape is not None:
+                        shapes.append(shape)
+                return shapes
+    raise RuntimeError("Could not find literal shapes list in conv.py")
+
+def conv_py_shape_to_mesa_case(shape):
+    """Translate one conv.py FP16 shape row into Mesa-style quantized semantics."""
+    batch = shape["batch"]
+    in_c = shape["in_c"]
+    out_c = shape["out_c"]
+    weight_in_c = shape["weight_in_c"]
+    kh = shape["kh"]
+    kw = shape["kw"]
+    groups = shape["groups"]
+
+    if shape["in_h"] < kh or shape["in_w"] < kw:
+        return None, "invalid output shape"
+    if in_c % groups != 0 or out_c % groups != 0:
+        return None, "invalid grouped channel counts"
+
+    depthwise = groups == in_c == out_c and weight_in_c == 1
+
+    input_shape = (batch, shape["in_h"], shape["in_w"], in_c)
+    if depthwise:
+        weight_shape = (1, kw, kh, in_c)
+        bias_shape = (in_c,)
+    else:
+        if weight_in_c != in_c // groups:
+            return None, "weight_in_c does not match grouped input channels"
+        weight_shape = (out_c, kw, kh, in_c)
+        if groups != 1:
+            weight_shape = (out_c, kw, kh, weight_in_c)
+        bias_shape = (out_c,)
+
+    return dict(name=shape["name"], input_shape=input_shape, weight_shape=weight_shape,
+                bias_shape=bias_shape, pad=0, stride=1, depthwise=depthwise,
+                groups=groups), None
+
+def run_quantized_case(fd, shape, input_packer="mesa"):
+    np.random.seed(42)
+    input_nhwc = np.random.randint(0, 256, shape["input_shape"], dtype=np.uint8)
+    weight_ohwi = np.random.randint(0, 256, shape["weight_shape"], dtype=np.uint8)
+    biases = np.random.randint(-128, 128, shape["bias_shape"], dtype=np.int32)
+
+    result, op = run_mesa_case(
+        fd, input_nhwc, weight_ohwi, biases,
+        pad_top=shape["pad"], pad_bottom=shape["pad"],
+        pad_left=shape["pad"], pad_right=shape["pad"],
+        stride=shape["stride"], depthwise=shape["depthwise"],
+        groups=shape.get("groups", 1), input_packer=input_packer)
+
+    expected = compute_expected_quantized(
+        input_nhwc, weight_ohwi, biases, 0, 0, 0,
+        pad_top=shape["pad"], pad_bottom=shape["pad"],
+        pad_left=shape["pad"], pad_right=shape["pad"],
+        stride=shape["stride"], depthwise=shape["depthwise"],
+        groups=shape.get("groups", 1))
+
+    diff = int(np.max(np.abs(result.astype(np.int32) - expected.astype(np.int32))))
+    return diff
+
+def make_quantized_case_tensors(shape):
+    np.random.seed(42)
+    input_nhwc = np.random.randint(0, 256, shape["input_shape"], dtype=np.uint8)
+    weight_ohwi = np.random.randint(0, 256, shape["weight_shape"], dtype=np.uint8)
+    biases = np.random.randint(-128, 128, shape["bias_shape"], dtype=np.int32)
+    return input_nhwc, weight_ohwi, biases
+
+def compare_packed_input_case(case):
+    input_nhwc, weight_ohwi, biases = make_quantized_case_tensors(case)
+    op = create_operation_from_args(
+        input_nhwc, weight_ohwi, biases,
+        0, 1.0 / 255,
+        0, 1.0 / 255,
+        0, 1.0 / 255,
+        pad_top=case["pad"], pad_bottom=case["pad"],
+        pad_left=case["pad"], pad_right=case["pad"],
+        stride=case["stride"], depthwise=case["depthwise"])
+    split_tasks_like_mesa(op)
+    print(f"Case: {case['name']}")
+    return compare_packed_input_bytes(input_nhwc, op)
+
+def shape_matrix_runner(fd, input_packer="mesa"):
+    """Run a list of known TFLite conv shapes through the Mesa-equivalent pipeline."""
+
+    shapes = [
+        # dict(name="3x3_valid", input_shape=(1, 4, 4, 3), weight_shape=(6, 3, 3, 3),
+        #      bias_shape=(6,), pad=0, stride=1, depthwise=False),
+        # dict(name="3x3_stride2", input_shape=(1, 8, 8, 3), weight_shape=(6, 3, 3, 3),
+        #      bias_shape=(6,), pad=0, stride=2, depthwise=False),
+        # dict(name="depthwise_3x3", input_shape=(1, 8, 8, 4), weight_shape=(1, 3, 3, 4),
+        #      bias_shape=(4,), pad=0, stride=1, depthwise=True),
+        # dict(name="depthwise_stride2", input_shape=(1, 8, 8, 4), weight_shape=(1, 3, 3, 4),
+        #      bias_shape=(4,), pad=0, stride=2, depthwise=True),
+        # dict(name="pad_same_3x3", input_shape=(1, 4, 4, 3), weight_shape=(6, 3, 3, 3),
+        #      bias_shape=(6,), pad=1, stride=1, depthwise=False),
+        # dict(name="large_pointwise", input_shape=(1, 7, 7, 1024), weight_shape=(2048, 1, 1, 1024),
+        #      bias_shape=(2048,), pad=0, stride=1, depthwise=False),
+    ]
+
+    failed = 0
+    for s in shapes:
+        print(f"Running {s['name']} ...", end=" ")
+        sys.stdout.flush()
+
+        try:
+            diff = run_quantized_case(fd, s, input_packer=input_packer)
+            ok = diff <= 1
+            status = "PASS" if ok else f"FAIL (max_diff={diff})"
+            print(f" {status}")
+            failed += 0 if ok else 1
+        except Exception as e:
+            print(f" ERROR: {e}")
+            failed += 1
+    print(f"Built-in matrix: {len(shapes) - failed} PASS, {failed} FAIL")
+
+def conv_py_shape_matrix_runner(fd, input_packer="mesa"):
+    """Run every conv.py test row that has Mesa-equivalent quantized semantics."""
+    conv_shapes = load_conv_py_shapes()
+    cases = []
+    skipped = []
+    for s in conv_shapes:
+        case, reason = conv_py_shape_to_mesa_case(s)
+        if case is None:
+            skipped.append((s["name"], reason))
+        else:
+            cases.append(case)
+    name_width = max(len(s["name"]) for s in conv_shapes) if conv_shapes else 1
+    passed = failed = 0
+    print(f"Running {len(cases)} Mesa-equivalent cases extracted from conv.py ({len(skipped)} skipped) ...")
+    for case in cases:
+        print(f"  {case['name']:<{name_width}s} ...", end=" ")
+        sys.stdout.flush()
+        try:
+            diff = run_quantized_case(fd, case, input_packer=input_packer)
+            ok = diff <= 1
+            if ok:
+                passed += 1
+                print("PASS")
+            else:
+                failed += 1
+                print(f"FAIL (max_diff={diff})")
+        except Exception as e:
+            failed += 1
+            print(f"ERROR: {e}")
+    if skipped:
+        print("Skipped conv.py rows outside this Mesa-clone contract:")
+        for name, reason in skipped:
+            print(f"  {name:<{name_width}s} SKIP ({reason})")
+    print(f"conv.py-derived Mesa matrix: {passed} PASS, {failed} FAIL, {len(skipped)} SKIP")
+    return failed
+
+def conv_py_shape_cases():
+    conv_shapes = load_conv_py_shapes()
+    cases = []
+    skipped = []
+    for s in conv_shapes:
+        case, reason = conv_py_shape_to_mesa_case(s)
+        if case is None:
+            skipped.append((s["name"], reason))
+        else:
+            cases.append(case)
+    return cases, skipped
+
+def select_conv_py_shape_case(selector):
+    cases, _ = conv_py_shape_cases()
+    if selector is None:
+        return cases[0]
+    try:
+        return cases[int(selector)]
+    except ValueError:
+        pass
+    for case in cases:
+        if case["name"] == selector:
+            return case
+    raise ValueError(f"unknown conv.py case selector: {selector}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--use-translate-crs-int8", action="store_true",
+        help="pack input activations with translateCRSToFeatureData int8 layout instead of Mesa layout")
+    parser.add_argument(
+        "--input-packer", choices=("mesa", "translate_crs_int8", "translate_crs_int8_mesa"),
+        help="select input packer; overrides --use-translate-crs-int8")
+    parser.add_argument(
+        "--compare-packed-input", nargs="?", const="0", metavar="CASE",
+        help="compare Mesa and translateCRSToFeatureData packed input bytes before submit, then exit")
+    parser.add_argument(
+        "--compare-fp16-packed-input", action="store_true",
+        help="compare translate_crs_fp16_mesa with _pack_cdma_dc_feature_input_fp16 before submit, then exit")
+    parser.add_argument("--fp16-shape", default="5,3,7", help="C,H,W shape for --compare-fp16-packed-input")
+    parser.add_argument("--fp16-align-c", type=int, default=8)
+    parser.add_argument("--fp16-c2", type=int, default=8)
+    parser.add_argument("--fp16-width-stride", type=int, default=8)
+    parser.add_argument("--fp16-use-nhwc", action="store_true")
+    parser.add_argument(
+        "--submit-fp16-packed-input", action="store_true",
+        help="submit one FP16 conv using translate_crs_fp16_mesa through conv_new, then compare with CPU")
+    parser.add_argument("--submit-shape", default="1,16,8,8,16,1,1,1",
+                        help="batch,in_c,in_h,in_w,out_c,kh,kw,groups for --submit-fp16-packed-input")
+    parser.add_argument("--submit-stride", type=int, default=1)
+    parser.add_argument("--submit-atol", type=float, default=0.2)
+    args = parser.parse_args()
+
+    input_packer = args.input_packer
+    if input_packer is None:
+        input_packer = "translate_crs_int8" if args.use_translate_crs_int8 else "mesa"
+    print(f"Input packer: {input_packer}")
+
+    if args.compare_packed_input is not None:
+        compare_packed_input_case(select_conv_py_shape_case(args.compare_packed_input))
+        sys.exit(0)
+
+    if args.compare_fp16_packed_input:
+        shape = tuple(int(v) for v in args.fp16_shape.split(","))
+        if len(shape) != 3:
+            raise ValueError("--fp16-shape must be C,H,W")
+        ok = compare_translate_crs_fp16_mesa(
+            shape=shape, align_c=args.fp16_align_c, input_pack_c2=args.fp16_c2,
+            width_stride=args.fp16_width_stride, use_nhwc=args.fp16_use_nhwc)
+        sys.exit(0 if ok else 1)
+
+    if args.submit_fp16_packed_input:
+        shape = tuple(int(v) for v in args.submit_shape.split(","))
+        if len(shape) != 8:
+            raise ValueError("--submit-shape must be batch,in_c,in_h,in_w,out_c,kh,kw,groups")
+        batch, in_c, in_h, in_w, out_c, kh, kw, groups = shape
+        weight_in_c = in_c // groups
+        ok = submit_translate_crs_fp16_mesa_case(
+            batch=batch, in_c=in_c, out_c=out_c, kh=kh, kw=kw,
+            in_h=in_h, in_w=in_w, groups=groups, weight_in_c=weight_in_c,
+            stride=args.submit_stride, atol=args.submit_atol)
+        sys.exit(0 if ok else 1)
+
+    fd = _open_rocket_device()
+    shape_matrix_runner(fd, input_packer=input_packer)
+    conv_py_shape_matrix_runner(fd, input_packer=input_packer)
+    os.close(fd)
