@@ -17,6 +17,7 @@ RK_CBUF_BANKS = 12
 CBUF_BANK_SIZE = CBUF_ENTRIES_PER_BANK * CBUF_ENTRY_BYTES
 RK_MAX_CONV_FLAT_STRIDE = 992
 PC_CHAIN_TAIL_QWORDS = 4
+DPU_CLEAR_REGS = tuple(range(0x4100, 0x4130, 4))
 
 class TileDesc:
     __slots__ = (
@@ -29,11 +30,20 @@ class TileDesc:
     )
     def __init__(self, **kw):
         for s in self.__slots__:
-            setattr(self, s, kw.get(s, 0 if s != "extra" else {}))
+            if s == "extra":
+                default = {}
+            elif s in {"grain_bits", "cbuf0", "cbuf1"}:
+                default = None
+            else:
+                default = 0
+            setattr(self, s, kw.get(s, default))
     def update(self, **kw):
         for k, v in kw.items():
             setattr(self, k, v)
         return self
+
+class RegList(list):
+    pass
 
 class reg:
     CNA  = 0x0201; CORE = 0x0801; DPU  = 0x1001; RDMA = 0x2001
@@ -59,6 +69,7 @@ class reg:
     EW_CVT_SCALE_VALUE  = 0x4078
     OUT_CVT_SCALE       = 0x4084
     SURFACE_ADD         = 0x40c0
+    DPU_SURFACE_ADD_EXTRA = 0x40c4
     RDMA_S_POINTER      = 0x5004
     RDMA_DATA_CUBE_WIDTH  = 0x500c
     RDMA_DATA_CUBE_HEIGHT = 0x5010
@@ -85,6 +96,11 @@ class reg:
     CNA_CVT_CON3           = 0x1058
     CNA_CVT_CON4           = 0x105c
     CNA_CVT_CON5           = 0x1180
+    CNA_FC_CON0            = 0x1060
+    CNA_FC_CON1            = 0x1064
+    CNA_PAD_CON0           = 0x1068
+    CNA_FC_CON2            = 0x1074
+    CNA_PAD_CON1           = 0x1184
     CNA_FEATURE_DATA_ADDR  = 0x1070
     CNA_DMA_CON0           = 0x1078
     CNA_DMA_CON1           = 0x107c
@@ -93,9 +109,13 @@ class reg:
     CNA_FC_DATA_SIZE1      = 0x1088
     CNA_DCOMP_ADDR0        = 0x1110
     CNA_DCOMP_ADDR1        = 0x1114
+    CNA_DCOMP_REGNUM       = 0x1104
+    CNA_DCOMP_CTRL         = 0x1100
+    CNA_DCOMP_AMOUNT0      = 0x1140
     CORE_MISC_CFG          = 0x3010
     CORE_DATAOUT_SIZE_0    = 0x3014
     CORE_DATAOUT_SIZE_1    = 0x3018
+    CORE_CLIP_TRUNCATE     = 0x301c
     CORE_RESERVED_3030     = 0x3030
 
 class struct_rknpu_task(ctypes.Structure):
@@ -169,7 +189,10 @@ def _pointwise_weight_atom_groups(in_c):
 def _uses_pointwise_weight_atom_layout(in_c, kh, kw, groups):
     return groups == 1 and kh == 1 and kw == 1 and _pointwise_weight_atom_groups(in_c) > 1
 
-def _cdma_dc_feature_input_pack_c2(in_c, groups, out_c, align_c):
+def conv_output_hw(in_h, in_w, kh, kw, stride):
+    return (in_h - kh) // stride + 1, (in_w - kw) // stride + 1
+
+def _cdma_dc_feature_input_pack_c2(in_c, groups, out_c):
     if in_c == 1:
         return 2
     if not _is_depthwise(in_c, out_c, groups) and groups == 1 and 1 < in_c <= 4:
@@ -201,13 +224,12 @@ def _data_bank(width_stride, feature_grains, align_c, use_nhwc_pack=False, is_sp
 def _conv_params(in_c, in_h, in_w, out_c, kh, kw, groups, stride=1):
     is_depthwise = _is_depthwise(in_c, out_c, groups)
     is_spatial = (kh != 1 or kw != 1)
-    out_h = (in_h - kh) // stride + 1
-    out_w = (in_w - kw) // stride + 1
+    out_h, out_w = conv_output_hw(in_h, in_w, kh, kw, stride)
     align_c = 32 if _uses_pointwise_weight_atom_layout(in_c, kh, kw, groups) else _conv_align_c(in_c, groups, out_c)
     align_out_c = max(32, _align_up(out_c, 16))
     width_stride = _align_up(in_w, max(1, _ceil_div(16, align_c)))
     out_width_stride = out_h * out_w if not is_spatial else _align_up(out_h * out_w, 4)
-    input_pack_c2 = _cdma_dc_feature_input_pack_c2(in_c, groups, out_c, align_c)
+    input_pack_c2 = _cdma_dc_feature_input_pack_c2(in_c, groups, out_c)
     use_nhwc = (not is_depthwise) and (not (groups > 1 and is_spatial)) and in_c < input_pack_c2
     return {"in_c": in_c, "in_h": in_h, "in_w": in_w, "out_c": out_c, "kh": kh, "kw": kw,
             "groups": groups, "stride": stride, "is_depthwise": is_depthwise, "is_spatial": is_spatial,
@@ -299,25 +321,142 @@ def make_conv2d_regs(p, in_dma, wt_dma, out_dma, weight_reuse=False, full_data_b
     return npu_regs
 
 def make_conv2d_regs_from_desc(p, desc, in_dma, wt_dma, out_dma):
-    regs = make_conv2d_regs(p,
+    tile_p = dict(p)
+    tile_p.update({
+        "in_h": desc.input_h,
+        "out_h": desc.output_h,
+        "out_w": desc.output_w,
+        "out_c": desc.oc_count,
+        "align_out_c": max(32, _align_up(desc.oc_count, 16)),
+        "out_width_stride": p["out_width_stride"],
+    })
+    regs = make_conv2d_regs(tile_p,
         in_dma + desc.feature_off,
         wt_dma + desc.weight_off,
         out_dma + desc.output_off,
         weight_reuse=desc.weight_reuse,
         full_data_bank=desc.extra.get("full_data_bank", False))
 
-    if desc.family_bits or desc.grain_bits:
-        _patch_reg(regs, reg.CNA_CONV_CON2, (desc.grain_bits << 4) | desc.family_bits)
-    if desc.cbuf0 or desc.cbuf1:
+    if desc.family_bits or desc.grain_bits is not None:
+        current = _find_reg_value(regs, reg.CNA_CONV_CON2)
+        grain_bits = current if desc.grain_bits is None else desc.grain_bits
+        _patch_reg(regs, reg.CNA_CONV_CON2, desc.family_bits | grain_bits)
+    if desc.cbuf0 is not None:
         _patch_reg(regs, reg.CNA_CBUF_CON0, desc.cbuf0)
+    if desc.cbuf1 is not None:
         _patch_reg(regs, reg.CNA_CBUF_CON1, desc.cbuf1)
+    if p["is_spatial"]:
+        _patch_reg(regs, reg.SURFACE_ADD, (p["out_width_stride"] * 2) << 4)
     return regs
 
+def make_rknn_full_conv2d_regs_from_desc(p, desc, in_dma, wt_dma, out_dma):
+    regs = make_conv2d_regs_from_desc(p, desc, in_dma, wt_dma, out_dma)
+    def reg_value(reg_addr):
+        return _find_reg_value(regs, reg_addr)
+    dcomp_amounts = [E(reg.CNA, reg.CNA_DCOMP_AMOUNT0 + i * 4, 0) for i in range(16)]
+    compiler_data_size1 = ((min(p["in_c"], 32) - 1) << 16) | _align_up(p["in_c"], p["align_c"])
+    compiler_dma_con2 = p["width_stride"] * (p["in_h"] - 4) if p["in_h"] > 4 else 0
+    compiler_cvt_con0 = 0x0b if p["is_spatial"] and not p["is_depthwise"] else reg_value(reg.CNA_CVT_CON0)
+    compiler_core_misc = (2 << 8) | (p["is_depthwise"] << 1)
+    return [
+        E(reg.CNA, reg.CNA_CBUF_CON0, reg_value(reg.CNA_CBUF_CON0)),
+        E(reg.CNA, reg.CNA_DCOMP_REGNUM, 0),
+        E(reg.CNA, reg.CNA_DCOMP_CTRL, 0),
+        E(reg.CNA, reg.CNA_CONV_CON1, reg_value(reg.CNA_CONV_CON1)),
+        E(reg.DPU, reg.S_POINTER, reg_value(reg.S_POINTER)),
+        E(reg.CNA, reg.CNA_CONV_CON1, reg_value(reg.CNA_CONV_CON1)),
+        E(reg.CNA, reg.CNA_CONV_CON2, reg_value(reg.CNA_CONV_CON2)),
+        E(reg.CNA, reg.CNA_CONV_CON3, reg_value(reg.CNA_CONV_CON3)),
+        E(reg.CNA, reg.CNA_DATA_SIZE0, reg_value(reg.CNA_DATA_SIZE0)),
+        E(reg.CNA, reg.CNA_DATA_SIZE1, compiler_data_size1),
+        E(reg.CNA, reg.CNA_DATA_SIZE2, reg_value(reg.CNA_DATA_SIZE2)),
+        E(reg.CNA, reg.CNA_DATA_SIZE3, reg_value(reg.CNA_DATA_SIZE3)),
+        E(reg.CNA, reg.CNA_WEIGHT_SIZE0, reg_value(reg.CNA_WEIGHT_SIZE0)),
+        E(reg.CNA, reg.CNA_WEIGHT_SIZE1, reg_value(reg.CNA_WEIGHT_SIZE1)),
+        E(reg.CNA, reg.CNA_WEIGHT_SIZE2, reg_value(reg.CNA_WEIGHT_SIZE2)),
+        E(reg.CNA, reg.CNA_CBUF_CON0, reg_value(reg.CNA_CBUF_CON0)),
+        E(reg.CNA, reg.CNA_CBUF_CON1, reg_value(reg.CNA_CBUF_CON1)),
+        E(reg.CNA, reg.CNA_CVT_CON0, compiler_cvt_con0),
+        E(reg.CNA, reg.CNA_CVT_CON1, reg_value(reg.CNA_CVT_CON1)),
+        E(reg.CNA, reg.CNA_CVT_CON2, reg_value(reg.CNA_CVT_CON2)),
+        E(reg.CNA, reg.CNA_CVT_CON3, reg_value(reg.CNA_CVT_CON3)),
+        E(reg.CNA, reg.CNA_CVT_CON4, reg_value(reg.CNA_CVT_CON4)),
+        E(reg.CNA, reg.CNA_FC_CON0, 0),
+        E(reg.CNA, reg.CNA_FC_CON1, 0),
+        E(reg.CNA, reg.CNA_PAD_CON0, 0),
+        E(reg.CNA, reg.CNA_FEATURE_DATA_ADDR, reg_value(reg.CNA_FEATURE_DATA_ADDR)),
+        E(reg.CNA, reg.CNA_FC_CON2, 0),
+        E(reg.CNA, reg.CNA_DMA_CON0, reg_value(reg.CNA_DMA_CON0)),
+        E(reg.CNA, reg.CNA_DMA_CON1, reg_value(reg.CNA_DMA_CON1)),
+        E(reg.CNA, reg.CNA_DMA_CON2, compiler_dma_con2),
+        E(reg.CNA, reg.CNA_FC_DATA_SIZE0, reg_value(reg.CNA_FC_DATA_SIZE0)),
+        E(reg.CNA, reg.CNA_FC_DATA_SIZE1, reg_value(reg.CNA_FC_DATA_SIZE1)),
+        E(reg.CNA, reg.CNA_DCOMP_CTRL, 0),
+        E(reg.CNA, reg.CNA_DCOMP_REGNUM, 0),
+        E(reg.CNA, reg.CNA_DCOMP_ADDR0, reg_value(reg.CNA_DCOMP_ADDR0)),
+        *dcomp_amounts,
+        E(reg.CNA, reg.CNA_CVT_CON5, reg_value(reg.CNA_CVT_CON5)),
+        E(reg.CNA, reg.CNA_PAD_CON1, 0),
+        E(reg.CORE, reg.CORE_MISC_CFG, compiler_core_misc),
+        E(reg.CORE, reg.CORE_DATAOUT_SIZE_0, reg_value(reg.CORE_DATAOUT_SIZE_0)),
+        E(reg.CORE, reg.CORE_DATAOUT_SIZE_1, reg_value(reg.CORE_DATAOUT_SIZE_1)),
+        E(reg.CORE, reg.CORE_CLIP_TRUNCATE, 0),
+        E(reg.CORE, reg.CORE_RESERVED_3030, 0),
+        E(reg.DPU, reg.FEATURE_MODE_CFG, reg_value(reg.FEATURE_MODE_CFG)),
+        E(reg.DPU, reg.DATA_FORMAT, reg_value(reg.DATA_FORMAT)),
+        E(reg.DPU, 0x4014, 0),
+        E(reg.DPU, reg.DST_BASE_ADDR, reg_value(reg.DST_BASE_ADDR)),
+        E(reg.DPU, reg.DST_SURF_STRIDE, reg_value(reg.DST_SURF_STRIDE)),
+        E(reg.DPU, reg.DATA_CUBE_WIDTH, reg_value(reg.DATA_CUBE_WIDTH)),
+        E(reg.DPU, reg.DATA_CUBE_HEIGHT, reg_value(reg.DATA_CUBE_HEIGHT)),
+        E(reg.DPU, reg.DATA_CUBE_NOTCH, reg_value(reg.DATA_CUBE_NOTCH)),
+        E(reg.DPU, reg.DATA_CUBE_CHANNEL, reg_value(reg.DATA_CUBE_CHANNEL)),
+        E(reg.DPU, reg.BS_CFG, reg_value(reg.BS_CFG)),
+        E(reg.DPU, 0x4044, 0),
+        E(reg.DPU, 0x4048, 0),
+        E(reg.DPU, 0x404c, 0),
+        E(reg.DPU, reg.BS_OW_CFG, reg_value(reg.BS_OW_CFG)),
+        E(reg.DPU, 0x4054, 0),
+        E(reg.DPU, reg.WDMA_SIZE_0, reg_value(reg.WDMA_SIZE_0)),
+        E(reg.DPU, reg.WDMA_SIZE_1, reg_value(reg.WDMA_SIZE_1)),
+        E(reg.DPU, reg.BN_CFG, reg_value(reg.BN_CFG)),
+        E(reg.DPU, 0x4064, 0),
+        E(reg.DPU, 0x4068, 0),
+        E(reg.DPU, 0x406c, 0),
+        E(reg.DPU, reg.EW_CFG, reg_value(reg.EW_CFG)),
+        E(reg.DPU, 0x4074, 0),
+        E(reg.DPU, reg.EW_CVT_SCALE_VALUE, reg_value(reg.EW_CVT_SCALE_VALUE)),
+        E(reg.DPU, 0x407c, 0),
+        E(reg.DPU, 0x4080, 0),
+        E(reg.DPU, reg.OUT_CVT_SCALE, reg_value(reg.OUT_CVT_SCALE)),
+        E(reg.DPU, 0x4088, 0),
+        E(reg.DPU, 0x4090, 0),
+        E(reg.DPU, 0x4094, 0),
+        E(reg.DPU, 0x4098, 0),
+        E(reg.DPU, 0x409c, 0),
+        E(reg.DPU, 0x40a0, 0),
+        E(reg.DPU, 0x40a4, 0),
+        E(reg.DPU, 0x40a8, 0),
+        E(reg.DPU, 0x40ac, 0),
+        E(reg.DPU, reg.SURFACE_ADD, reg_value(reg.SURFACE_ADD)),
+        E(reg.DPU, reg.DPU_SURFACE_ADD_EXTRA, 0),
+        *(E(reg.DPU, clear_reg, 0) for clear_reg in DPU_CLEAR_REGS),
+    ]
+
 def _patch_reg(regs, target_reg, value):
+    found = False
     for i, cmd in enumerate(regs):
         if (cmd & 0xFFFF) == target_reg:
-            regs[i] = (cmd & 0xFFFF0000FFFF0000) | ((value & 0xFFFFFFFF) << 16) | target_reg
-            return
+            regs[i] = (cmd & 0xFFFF000000000000) | ((value & 0xFFFFFFFF) << 16) | target_reg
+            found = True
+    if not found:
+        raise KeyError(f"register 0x{target_reg:x} not found")
+
+def _find_reg_value(regs, target_reg):
+    for cmd in regs:
+        if (cmd & 0xFFFF) == target_reg:
+            return (cmd >> 16) & 0xFFFFFFFF
+    raise KeyError(f"register 0x{target_reg:x} not found")
 
 def _mesa_weight_banks(weights_width, weights_height, input_channels, output_channels, depthwise):
     weight_bytes = weights_width * weights_height * input_channels * FP16_BYTES
@@ -486,93 +625,258 @@ def _plan_conv_tiles(in_c, out_c, kh, kw, in_h, in_w, groups, stride):
             ks = k_boundary[ki]
             k_span = k_boundary[ki + 1] - ks
             tiles.append({"y_start": ys, "y_step": y_span, "k_start": ks, "k_step": k_span})
-    return p, split_method, tiles, y_step, k_step
+    return p, split_method, tiles
 
-def _execute_conv_tiles(descs):
+def execute_conv_descriptors(descs):
     for d in descs:
         _load_tile_input(d["packed_input"])
         _load_tile_weight(d["packed_weight"])
         _clear_output()
-        _submit_single_tile(d["regs"])
+        _submit_task_regs(d["regs"])
         _unpack_tile_result(d)
+
+def _store_tile_output(u, out):
+    real_channels = u["oc_end"] - u["oc_start"]
+    u["result"][u["n"],
+                u["oc_start"]:u["oc_end"],
+                u["y_start"]:u["y_start"] + u["out_h"]] = out[:real_channels, :u["out_h"]]
+
+def _read_nc1hwc2_output(count, channels, out_h, out_w, out_width_stride, offset=0):
+    return _unpack_nc1hwc2_output(_read_tile_output(count, offset),
+                                  channels, out_h, out_w, UNPACK_C2, out_width_stride)
+
+def _read_flat_1x1_output(count, hw_channels, out_h, out_w, out_width_stride, offset=0):
+    return _unpack_flat_1x1_output(_read_tile_output(count, offset),
+                                   hw_channels, out_h, out_w, out_width_stride, UNPACK_C2)
 
 def _unpack_tile_result(d):
     u = d["unpack"]
-    result = u["result"]
-    n = u["n"]
     if u["kind"] == "nc1hwc2":
-        out = _unpack_nc1hwc2_output(_read_tile_output(u["count"], u.get("offset", 0)),
-                                     u["channels"], u["hw_h"], u["out_w"], UNPACK_C2, u["stride"])
-        result[n, u["oc_start"]:u["oc_end"], u["y_start"]:u["y_start"] + u["out_h"]] = out[:u["oc_end"] - u["oc_start"], :u["out_h"]]
+        out = _read_nc1hwc2_output(u["count"], u["channels"], u["hw_h"], u["out_w"],
+                                   u["stride"], u.get("offset", 0))
+        _store_tile_output(u, out)
     elif u["kind"] == "flat_1x1":
-        out = _unpack_flat_1x1_output(_read_tile_output(u["count"], u.get("offset", 0)),
-                                      u["hw_channels"], u["hw_h"], u["out_w"], u["stride"], UNPACK_C2)
-        result[n, u["oc_start"]:u["oc_end"], u["y_start"]:u["y_start"] + u["out_h"]] = out[:u["channels"], :u["out_h"]]
+        out = _read_flat_1x1_output(u["count"], u["hw_channels"], u["hw_h"], u["out_w"],
+                                    u["stride"], u.get("offset", 0))
+        _store_tile_output(u, out)
     else:
         raise ValueError(f"unknown unpack kind: {u['kind']}")
 
-def _append_nc1hwc2_desc(descs, result, n, packed_input, packed_weight, regs, oc_start, oc_end,
-                         y_start, out_h, hw_h, out_w, channels, out_width_stride, count, offset=0):
-    descs.append({"packed_input": packed_input, "packed_weight": packed_weight, "regs": regs,
-                  "unpack": {"kind": "nc1hwc2", "result": result, "n": n,
-                             "oc_start": oc_start, "oc_end": oc_end,
-                             "y_start": y_start, "out_h": out_h, "hw_h": hw_h,
-                             "out_w": out_w, "channels": channels,
-                             "stride": out_width_stride, "count": count,
-                             "offset": offset}})
+def make_tile_exec_desc(family, packed_input, packed_weight, regs, unpack, meta=None):
+    return {"family": family,
+            "packed_input": packed_input,
+            "packed_weight": packed_weight,
+            "regs": regs,
+            "unpack": unpack,
+            "meta": meta or {}}
 
-def _append_flat_1x1_desc(descs, result, n, packed_input, packed_weight, regs, oc_start, oc_end,
-                          y_start, out_h, hw_h, out_w, channels, hw_channels, out_width_stride, count):
-    descs.append({"packed_input": packed_input, "packed_weight": packed_weight, "regs": regs,
-                  "unpack": {"kind": "flat_1x1", "result": result, "n": n,
-                             "oc_start": oc_start, "oc_end": oc_end,
-                             "y_start": y_start, "out_h": out_h, "hw_h": hw_h,
-                             "out_w": out_w, "channels": channels,
-                             "hw_channels": hw_channels,
-                             "stride": out_width_stride, "count": count}})
+def make_tile_unpack(kind, result, n, oc_start, oc_end, y_start, out_h, hw_h,
+                     out_w, channels, out_width_stride, count, hw_channels=None, offset=0):
+    unpack = {"kind": kind, "result": result, "n": n,
+              "oc_start": oc_start, "oc_end": oc_end,
+              "y_start": y_start, "out_h": out_h, "hw_h": hw_h,
+              "out_w": out_w, "channels": channels,
+              "stride": out_width_stride, "count": count,
+              "offset": offset}
+    if hw_channels is not None:
+        unpack["hw_channels"] = hw_channels
+    return unpack
 
-def _tile_to_desc(tile, split_method, p, first_tile=False):
+def make_nc1hwc2_tile_desc(family, result, n, packed_input, packed_weight, regs, oc_start, oc_end,
+                           y_start, out_h, hw_h, out_w, channels, out_width_stride, count,
+                           offset=0, meta=None):
+    return make_tile_exec_desc(family, packed_input, packed_weight, regs,
+                               make_tile_unpack("nc1hwc2", result, n, oc_start, oc_end,
+                                                y_start, out_h, hw_h, out_w, channels,
+                                                out_width_stride, count, offset=offset),
+                               meta=meta)
+
+def make_flat_1x1_tile_desc(family, result, n, packed_input, packed_weight, regs, oc_start, oc_end,
+                            y_start, out_h, hw_h, out_w, channels, hw_channels,
+                            out_width_stride, count, meta=None):
+    return make_tile_exec_desc(family, packed_input, packed_weight, regs,
+                               make_tile_unpack("flat_1x1", result, n, oc_start, oc_end,
+                                                y_start, out_h, hw_h, out_w, channels,
+                                                out_width_stride, count, hw_channels=hw_channels),
+                               meta=meta)
+
+def conv_output_count(p):
+    return _ceil_div(p["align_out_c"], UNPACK_C2) * p["out_width_stride"] * UNPACK_C2
+
+def conv_output_bytes(p):
+    return conv_output_count(p) * FP16_BYTES
+
+def materialize_conv_tile(p, input_tile, weight_tile, out_c, in_c, kh, kw, groups,
+                          out_dma=None, full_data_bank=False):
+    out_dma = output_mem_create.dma_addr if out_dma is None else out_dma
+    packed_input = _pack_cdma_dc_feature_input_fp16(input_tile, p)
+    packed_weight = pack_weights(weight_tile, out_c, in_c, kh, kw, p["align_c"], groups)
+    regs = [make_conv2d_regs(p, input_mem_create.dma_addr, weight_mem_create.dma_addr,
+                             out_dma, full_data_bank=full_data_bank)]
+    return packed_input, packed_weight, regs, conv_output_count(p)
+
+def tile_meta(y_start, out_h, oc_start, oc_end, tile_p, reason, **extra):
+    meta = {"y": (y_start, y_start + out_h), "oc": (oc_start, oc_end),
+            "tile_p": tile_p, "reason": reason}
+    meta.update(extra)
+    return meta
+
+def _rknn_family_bits(family):
+    return {
+        "setup": 0x00000000,
+        "y_tile": 0x20000000,
+        "k_half": 0x40000000,
+        "k_tile": 0x50000000,
+    }[family]
+
+def _rknn_spatial_y_windows(in_h):
+    return {
+        16: [(0, 16, 14)],
+        20: [(0, 20, 18)],
+        24: [(0, 24, 22)],
+        28: [(0, 28, 26)],
+        32: [(0, 28, 26), (26, 6, 4)],
+        36: [(0, 25, 23), (23, 13, 11)],
+        40: [(0, 23, 21), (21, 19, 17)],
+    }.get(in_h)
+
+def _rknn_spatial_pc_core(family):
+    if family == "setup":
+        return 0
+    if family == "k_half":
+        return 1
+    if family == "k_tile":
+        return 2
+    return 0
+
+def _make_observed_spatial_tile_desc(family, input_y, input_h, output_h, output_w,
+                                     oc_start, oc_count, feature_off, weight_off, output_off,
+                                     grain_bits=None, cbuf0=None, cbuf1=None):
     return TileDesc(
-        input_y=tile["y_start"],
-        input_h=tile["y_step"],
-        output_y=tile["y_start"],
-        output_h=tile["y_step"],
-        output_w=p["out_w"],
-        oc_start=tile["k_start"],
-        oc_count=tile["k_step"],
-        feature_off=0,
-        weight_off=0,
-        output_off=0,
-        weight_reuse=not first_tile,
+        family=family,
+        family_bits=_rknn_family_bits(family),
+        grain_bits=grain_bits,
+        input_y=input_y,
+        input_h=input_h,
+        output_y=input_y,
+        output_h=output_h,
+        output_w=output_w,
+        oc_start=oc_start,
+        oc_count=oc_count,
+        feature_off=feature_off,
+        weight_off=weight_off,
+        output_off=output_off,
+        cbuf0=cbuf0,
+        cbuf1=cbuf1,
+        weight_reuse=family != "setup",
+        data_reuse=False,
         pc_core=0,
-        extra={"full_data_bank": split_method != 0},
     )
 
-def _submit_single_tile(task_regs):
+def _tile_desc_meta(desc):
+    return {slot: getattr(desc, slot) for slot in TileDesc.__slots__ if slot != "extra"}
+
+def plan_observed_spatial_tile_descs(p, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
+    if not (groups == 1 and stride == 1 and kh == 3 and kw == 3 and in_c == 160 and out_c == 320 and in_h == in_w):
+        return []
+    y_windows = _rknn_spatial_y_windows(in_h)
+    if y_windows is None:
+        return []
+
+    weight_per_oc = kh * kw * in_c * FP16_BYTES
+    output_per_oc = p["out_h"] * p["out_w"] * FP16_BYTES
+    feature_row = in_w * UNPACK_C2 * FP16_BYTES
+    output_row = p["out_w"] * UNPACK_C2 * FP16_BYTES
+    observed_grain = 0xc0 if in_h >= 28 else 0xf0
+    observed_cbuf0 = 0x39 if in_h >= 32 else {16: 0x93, 20: 0x84, 24: 0x66, 28: 0x48}.get(in_h, None)
+    families = [
+        ("setup", [(0, out_c)]),
+        ("k_half", [(0, 160), (160, 160)]),
+        ("k_tile", [(0, 112), (112, 112), (224, 96)]),
+    ]
+    descs = []
+    for family, k_windows in families:
+        for oc_start, oc_count in k_windows:
+            for input_y, input_rows, output_rows in y_windows:
+                descs.append(_make_observed_spatial_tile_desc(
+                    family, input_y, input_rows, output_rows, p["out_w"],
+                    oc_start, oc_count,
+                    input_y * feature_row,
+                    oc_start * weight_per_oc,
+                    oc_start * output_per_oc + input_y * output_row,
+                    grain_bits=observed_grain,
+                    cbuf0=observed_cbuf0,
+                ).update(pc_core=_rknn_spatial_pc_core(family)))
+    return descs
+
+def build_direct_spatial_descs(n, input_nchw, weight_nchw, p, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
+    descs = plan_observed_spatial_tile_descs(p, in_c, out_c, kh, kw, in_h, in_w, groups, stride)
+    if not descs:
+        return [], None, None
+    packed_input = _pack_cdma_dc_feature_input_fp16(input_nchw[n], p)
+    packed_weight = pack_weights(weight_nchw.reshape(out_c, in_c, kh, kw), out_c, in_c, kh, kw, p["align_c"], groups)
+    for idx, desc in enumerate(descs):
+        desc.extra = {"full_data_bank": True}
+        regs = RegList(make_conv2d_regs_from_desc(p, desc,
+                                                  input_mem_create.dma_addr,
+                                                  weight_mem_create.dma_addr,
+                                                  output_mem_create.dma_addr))
+        regs.extend(E(reg.DPU, clear_reg, 0) for clear_reg in DPU_CLEAR_REGS)
+        regs.pc_core = desc.pc_core
+        desc.extra = {
+            "full_data_bank": True,
+            "regs": [regs],
+            "index": idx,
+        }
+    return descs, packed_input, packed_weight
+
+def _submit_task_regs(task_regs):
     write_regs_to_npu_task(task_regs)
     if npu_submit(task_count=len(task_regs)) < 0:
         raise RuntimeError("npu_submit failed")
 
+def _bo_addr(bo_map):
+    return ctypes.addressof(ctypes.c_char.from_buffer(bo_map))
+
+def _clear_bo(bo_map, bo_create):
+    ctypes.memset(_bo_addr(bo_map), 0, bo_create.size)
+
+def _copy_packed_to_bo(packed, bo_map, bo_create, clear=False):
+    packed_u16 = np.ascontiguousarray(packed.view(np.uint16))
+    assert packed_u16.nbytes <= bo_create.size
+    if clear:
+        _clear_bo(bo_map, bo_create)
+    ctypes.memmove(_bo_addr(bo_map), packed_u16.ctypes.data, packed_u16.nbytes)
+
 def _load_tile_input(packed_input):
-    inp = np.ascontiguousarray(packed_input.view(np.uint16))
-    assert inp.nbytes <= input_mem_create.size
-    ctypes.memmove(ctypes.addressof(ctypes.c_char.from_buffer(input_map)), inp.ctypes.data, inp.nbytes)
+    _copy_packed_to_bo(packed_input, input_map, input_mem_create)
 
 def _load_tile_weight(packed_weight):
-    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(weight_map)), 0, weight_mem_create.size)
+    _clear_bo(weight_map, weight_mem_create)
     if packed_weight is not None:
-        wt_bytes = np.ascontiguousarray(packed_weight.view(np.uint16))
-        assert wt_bytes.nbytes <= weight_mem_create.size
-        ctypes.memmove(ctypes.addressof(ctypes.c_char.from_buffer(weight_map)), wt_bytes.ctypes.data, wt_bytes.nbytes)
+        _copy_packed_to_bo(packed_weight, weight_map, weight_mem_create)
 
 def _clear_output():
-    ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_mem_create.size)
+    _clear_bo(output_map, output_mem_create)
 
 def _read_tile_output(count, offset=0):
     return np.frombuffer(output_map, dtype=np.uint16, count=count, offset=offset).copy().view(np.float16)
 
+def _load_full_input(packed_input):
+    _copy_packed_to_bo(packed_input, input_map, input_mem_create, clear=True)
+
+def _load_full_weight(packed_weight):
+    _copy_packed_to_bo(packed_weight, weight_map, weight_mem_create, clear=True)
+
+def execute_direct_spatial_descriptors(descs, packed_input, packed_weight):
+    _load_full_input(packed_input)
+    _load_full_weight(packed_weight)
+    _clear_output()
+    task_regs = [desc.extra["regs"][0] for desc in descs]
+    _submit_task_regs(task_regs)
+
 def write_regs_to_npu_task(task_regs):
-    def enable_npu_units_and_set_next_pc_addr(next_offset, next_task_regs_len):
+    def enable_npu_units_and_set_next_pc_addr(next_offset, next_task_regs_len, pc_core=0):
         enable_npu_units = E(reg.PC, reg.OPERATION_ENABLE, (6 << 1) | 1)
         if next_offset is None:
             return [
@@ -584,7 +888,7 @@ def write_regs_to_npu_task(task_regs):
         next_addr = regcmd_mem_create.dma_addr + next_offset * ctypes.sizeof(ctypes.c_uint64)
         return [
             E(reg.PC_REG, reg.PC_BASE_ADDRESS, next_addr & 0xFFFFFFF0),
-            E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, _ceil_div(next_task_regs_len, 2) + 1),
+            E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, (pc_core << 16) | (_ceil_div(next_task_regs_len, 2) + 1)),
             E(reg.VERSION, 0, 0),
             enable_npu_units,
         ]
@@ -602,7 +906,8 @@ def write_regs_to_npu_task(task_regs):
             npu_regcmd[base + i] = qword
         next_task_regs_len = len(task_regs[idx + 1]) if idx + 1 < len(task_regs) else 0
         next_offset = offsets[idx + 1] if idx + 1 < len(task_regs) else None
-        tails = enable_npu_units_and_set_next_pc_addr(next_offset, next_task_regs_len)
+        pc_core = getattr(regs, "pc_core", 0)
+        tails = enable_npu_units_and_set_next_pc_addr(next_offset, next_task_regs_len, pc_core)
         for i, qword in enumerate(tails):
             npu_regcmd[base + len(regs) + i] = qword
         npu_tasks[idx].regcmd_addr = regcmd_mem_create.dma_addr + base * ctypes.sizeof(ctypes.c_uint64)
@@ -702,260 +1007,407 @@ def _unpack_nc1hwc2_output(out_raw, out_c, out_h, out_w, c2, out_width_stride=No
     packed = packed[:, :out_h * out_w, :]
     return packed.transpose(0, 2, 1).reshape(c1 * c2, out_h * out_w)[:out_c].reshape(out_c, out_h, out_w)
 
-def run_conv(batch, in_c, out_c, kh, kw, input_hw, groups=1, stride=1):
+def make_conv_test_data(batch, in_c, out_c, kh, kw, input_hw, groups):
     in_h, in_w = input_hw
     np.random.seed(42)
     input_nchw = np.random.uniform(-2, 2, (batch, in_c, in_h, in_w)).astype(np.float16)
     weight_nchw = np.random.uniform(-2, 2, (out_c, in_c // groups, kh, kw)).astype(np.float16)
+    return input_nchw, weight_nchw
 
-    p, split_method, tiles, y_step, k_step = _plan_conv_tiles(in_c, out_c, kh, kw, in_h, in_w, groups, stride)
-    out_h, out_w = p["out_h"], p["out_w"]
+def _needs_spatial_im2col_fallback(p, in_c, out_c, kh, kw, groups):
+    if not (p["is_spatial"] and groups == 1 and not p["is_depthwise"]):
+        return False
+    spatial_weight_banks = _mesa_weight_banks(kw, kh, in_c, out_c, False)
+    return spatial_weight_banks > RK_CBUF_BANKS // 3 or conv_output_bytes(p) > output_mem_create.size
+
+def _needs_spatial_oc_serial(p, in_c, out_c, groups):
+    return (p["is_spatial"] and groups == 1 and not p["is_depthwise"] and
+            out_c > UNPACK_C2 and (in_c % 16 != 0 or in_c >= 16))
+
+def _needs_grouped_spatial_serial(p, groups):
+    return p["is_spatial"] and groups > 1 and not p["is_depthwise"]
+
+def classify_conv_plan(p, in_c, out_c, kh, kw, in_h, in_w, groups, split_method, tiles):
     is_spatial, is_depthwise = p["is_spatial"], p["is_depthwise"]
-    align_c = p["align_c"]
-    result = np.zeros((batch, out_c, out_h, out_w), dtype=np.float16)
+    if _needs_grouped_spatial_serial(p, groups):
+        # Special handle: grouped spatial weights are serialized group-by-group until native grouped descriptors are known.
+        family = "grouped_serial"
+    elif _needs_spatial_im2col_fallback(p, in_c, out_c, kh, kw, groups):
+        # Special handle: dense spatial shapes with high weight/output pressure use Python im2col as a temporary fallback.
+        family = "spatial_im2col_fallback"
+    elif _needs_spatial_oc_serial(p, in_c, out_c, groups):
+        # Special handle: dense spatial OC tiling needs full data banks; low-IC 160x160 cases depend on this.
+        family = "spatial_oc_serial"
+    elif is_depthwise and is_spatial:
+        # Special handle: depthwise spatial uses channel/Y tiling and diagonal expanded weights.
+        family = "depthwise_spatial_tiled"
+    elif not is_spatial and not is_depthwise and groups == 1 and _needs_pointwise_oc_tile_schedule(in_c, out_c, in_h, in_w, kh, kw, groups):
+        # Special handle: large pointwise OC or height tiling uses flat 1x1 unpack and padded OC tiles.
+        family = "pointwise_oc"
+    else:
+        family = "generic_yk"
+    return {"family": family, "tiles": tiles, "split_method": split_method}
 
-    def _get_input_tile(inp, tile):
+def make_grouped_input_tile(input_nchw_n, group, input_per_group):
+    input_start = group * input_per_group
+    input_end = input_start + input_per_group
+    return input_nchw_n[input_start:input_end]
+
+def make_grouped_weight_tile(weight_nchw, group, out_per_group, input_per_group, kh, kw):
+    oc_start = group * out_per_group
+    oc_end = oc_start + out_per_group
+    return weight_nchw[oc_start:oc_end].reshape(out_per_group, input_per_group, kh, kw)
+
+def tile_range(start, tile_size, total):
+    end = min(start + tile_size, total)
+    return end, end - start
+
+def tile_ranges(total, tile_size):
+    for start in range(0, total, tile_size):
+        end, count = tile_range(start, tile_size, total)
+        yield start, end, count
+
+def output_row_tiles(out_h, row_tile_h):
+    for out_row_start, _, tile_out_h in tile_ranges(out_h, row_tile_h):
+        yield out_row_start, tile_out_h
+
+def input_h_for_output_tile(tile_out_h, kh, stride):
+    return (tile_out_h - 1) * stride + kh
+
+def hardware_tile_h(tile_out_h, minimum):
+    return max(minimum, tile_out_h)
+
+def build_grouped_serial_descs(n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
+    out_h, out_w = p["out_h"], p["out_w"]
+    input_per_group = in_c // groups
+    out_per_group = out_c // groups
+    gp = _conv_params(input_per_group, in_h, in_w, out_per_group, kh, kw, 1, stride=stride)
+    descs = []
+    for g, (oc_start, oc_end, tile_out_c) in enumerate(tile_ranges(out_c, out_per_group)):
+        input_tile = make_grouped_input_tile(input_nchw[n], g, input_per_group)
+        group_weight = make_grouped_weight_tile(weight_nchw, g, out_per_group, input_per_group, kh, kw)
+        packed_input, packed_weight, regs, out_count = materialize_conv_tile(
+            gp, input_tile, group_weight, tile_out_c, input_per_group, kh, kw, 1)
+        meta = tile_meta(0, out_h, oc_start, oc_end, gp, "grouped serial group slice")
+        descs.append(make_nc1hwc2_tile_desc("grouped_serial", result, n, packed_input, packed_weight, regs,
+                                            oc_start, oc_end, 0, out_h, out_h, out_w,
+                                            gp["align_out_c"], gp["out_width_stride"], out_count,
+                                            meta=meta))
+    return descs
+
+def make_spatial_oc_input_tile(input_nchw_n, out_row_start, tile_in_h, stride):
+    return input_nchw_n[:, out_row_start * stride:out_row_start * stride + tile_in_h, :]
+
+def build_spatial_oc_serial_descs(n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, in_w, stride):
+    out_h, out_w = p["out_h"], p["out_w"]
+    oc_tile = UNPACK_C2
+    descs = []
+    for out_row_start, tile_out_h in output_row_tiles(out_h, 32):
+        tile_in_h = input_h_for_output_tile(tile_out_h, kh, stride)
+        input_tile = make_spatial_oc_input_tile(input_nchw[n], out_row_start, tile_in_h, stride)
+        for oc_start, oc_end, tile_out_c in tile_ranges(out_c, oc_tile):
+            tp = _conv_params(in_c, tile_in_h, in_w, tile_out_c, kh, kw, 1, stride)
+            tile_weight = make_spatial_oc_weight_tile(weight_nchw, oc_start, oc_end, in_c, kh, kw)
+            packed_input, packed_weight, regs, out_count = materialize_conv_tile(
+                tp, input_tile, tile_weight, tile_out_c, in_c, kh, kw, 1, full_data_bank=True)
+            meta = tile_meta(out_row_start, tile_out_h, oc_start, oc_end, tp,
+                             "dense spatial output-channel serial tile")
+            descs.append(make_nc1hwc2_tile_desc("spatial_oc_serial", result, n, packed_input, packed_weight, regs,
+                                                oc_start, oc_end, out_row_start, tile_out_h, tile_out_h,
+                                                out_w, tile_out_c, tp["out_width_stride"], out_count,
+                                                meta=meta))
+    return descs
+
+def make_spatial_oc_weight_tile(weight_nchw, oc_start, oc_end, in_c, kh, kw):
+    tile_out_c = oc_end - oc_start
+    tile_weight = np.zeros((tile_out_c, in_c, kh, kw), dtype=np.float16)
+    tile_weight[:] = weight_nchw[oc_start:oc_end].reshape(tile_out_c, in_c, kh, kw)
+    return tile_weight
+
+def make_depthwise_input_tile(input_nchw_n, ch_start, ch_end, out_row_start, tile_in_h, in_h, in_w, stride):
+    tile_c = ch_end - ch_start
+    input_tile = np.zeros((tile_c, tile_in_h, in_w), dtype=np.float16)
+    real_in_h = min(tile_in_h, in_h - out_row_start * stride)
+    input_tile[:, :real_in_h] = input_nchw_n[ch_start:ch_end,
+                                             out_row_start * stride:out_row_start * stride + real_in_h, :]
+    return input_tile
+
+def make_depthwise_weight_tile(weight_nchw, ch_start, ch_end, kh, kw):
+    tile_c = ch_end - ch_start
+    tile_weight = np.zeros((tile_c, tile_c, kh, kw), dtype=np.float16)
+    for local_c in range(tile_c):
+        tile_weight[local_c, local_c] = weight_nchw[ch_start + local_c, 0]
+    return tile_weight
+
+def build_depthwise_spatial_descs(n, input_nchw, weight_nchw, result, p, out_c, kh, kw, in_h, in_w, stride):
+    out_h, out_w = p["out_h"], p["out_w"]
+    channel_tile = min(32, out_c)
+    row_tile_h = max(1, _depthwise_tile_h(out_c, out_h, in_w, kh, kw, stride))
+    descs = []
+    for out_row_start, tile_out_h in output_row_tiles(out_h, row_tile_h):
+        hw_tile_out_h = hardware_tile_h(tile_out_h, 2)
+        tile_in_h = input_h_for_output_tile(hw_tile_out_h, kh, stride)
+        for ch_start, ch_end, tile_c in tile_ranges(out_c, channel_tile):
+            tile_p = _conv_params(tile_c, tile_in_h, in_w, tile_c, kh, kw, tile_c, stride=stride)
+            input_tile = make_depthwise_input_tile(input_nchw[n], ch_start, ch_end, out_row_start,
+                                                   tile_in_h, in_h, in_w, stride)
+            tile_weight = make_depthwise_weight_tile(weight_nchw, ch_start, ch_end, kh, kw)
+            packed_input, packed_weight, regs, out_count = materialize_conv_tile(
+                tile_p, input_tile, tile_weight, tile_c, tile_c, kh, kw, tile_c)
+            meta = tile_meta(out_row_start, tile_out_h, ch_start, ch_end, tile_p,
+                             "depthwise spatial channel and row tile")
+            descs.append(make_nc1hwc2_tile_desc("depthwise_spatial_tiled", result, n, packed_input, packed_weight, regs,
+                                                ch_start, ch_end, out_row_start, tile_out_h, hw_tile_out_h,
+                                                out_w, tile_c, tile_p["out_width_stride"], out_count,
+                                                meta=meta))
+    return descs
+
+def make_pointwise_input_tile(input_nchw_n, out_row_start, tile_out_h, hw_tile_h, in_w, in_c, stride):
+    input_tile = np.zeros((in_c, hw_tile_h, in_w), dtype=np.float16)
+    input_tile[:, :tile_out_h] = input_nchw_n[:, out_row_start * stride:out_row_start * stride + tile_out_h, :]
+    return input_tile
+
+def padded_oc_count(tile_out_c, oc_tile):
+    return oc_tile if tile_out_c < oc_tile else tile_out_c
+
+def build_pointwise_oc_descs(n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, in_w, groups, stride):
+    out_h, out_w = p["out_h"], p["out_w"]
+    oc_tile = _pointwise_oc_tile_c(in_c)
+    row_tile_h = _pointwise_oc_tile_h(in_c, out_h, out_w, oc_tile, stride)
+    tw = weight_nchw.reshape(out_c, in_c // groups, kh, kw)
+    descs = []
+    for out_row_start, tile_out_h in output_row_tiles(out_h, row_tile_h):
+        hw_tile_h = hardware_tile_h(tile_out_h, 7)
+        input_tile = make_pointwise_input_tile(input_nchw[n], out_row_start, tile_out_h,
+                                               hw_tile_h, in_w, in_c, stride)
+        for oc_start, oc_end, tile_out_c in tile_ranges(out_c, oc_tile):
+            hw_out_c = padded_oc_count(tile_out_c, oc_tile)
+            tp = _conv_params(in_c, hw_tile_h, in_w, hw_out_c, kh, kw, groups, stride)
+            tile_wt = tw[oc_start:oc_end]
+            tile_wt = pad_output_channels(tile_wt, tile_out_c, hw_out_c)
+            packed_input, packed_weight, regs, out_count = materialize_conv_tile(
+                tp, input_tile, tile_wt, hw_out_c, in_c, kh, kw, groups, full_data_bank=True)
+            meta = tile_meta(out_row_start, tile_out_h, oc_start, oc_end, tp,
+                             "pointwise output-channel tile")
+            descs.append(make_flat_1x1_tile_desc("pointwise_oc", result, n, packed_input, packed_weight, regs,
+                                                 oc_start, oc_end, out_row_start, tile_out_h, hw_tile_h,
+                                                 out_w, tile_out_c, hw_out_c, tp["out_width_stride"], out_count,
+                                                 meta=meta))
+    return descs
+
+def make_spatial_im2col_input_tile(input_nchw_n, out_row_start, tile_out_h, hw_tile_h, out_w, in_c, kh, kw, stride):
+    im2col = np.zeros((in_c * kh * kw, hw_tile_h, out_w), dtype=np.float16)
+    flat = 0
+    for ic in range(in_c):
+        for ky in range(kh):
+            src_y = out_row_start * stride + ky
+            for kx in range(kw):
+                im2col[flat, :tile_out_h] = input_nchw_n[ic, src_y:src_y + tile_out_h * stride:stride,
+                                                          kx:kx + out_w * stride:stride]
+                flat += 1
+    return im2col
+
+def make_spatial_im2col_weight_tile(weight_nchw, oc_start, oc_end, hw_out_c, in_c, kh, kw):
+    tile_weight = np.zeros((hw_out_c, in_c * kh * kw, 1, 1), dtype=np.float16)
+    for local_oc, oc in enumerate(range(oc_start, oc_end)):
+        flat = 0
+        for ic in range(in_c):
+            for ky in range(kh):
+                for kx in range(kw):
+                    tile_weight[local_oc, flat, 0, 0] = weight_nchw[oc, ic, ky, kx]
+                    flat += 1
+    return tile_weight
+
+def pad_output_channels(weight_tile, real_out_c, hw_out_c):
+    if hw_out_c <= real_out_c:
+        return weight_tile
+    padded = np.zeros((hw_out_c,) + weight_tile.shape[1:], dtype=np.float16)
+    padded[:real_out_c] = weight_tile
+    return padded
+
+def build_spatial_im2col_fallback_descs(n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, stride):
+    out_h, out_w = p["out_h"], p["out_w"]
+    flat_c = in_c * kh * kw
+    oc_tile = _pointwise_oc_tile_c(flat_c)
+    row_tile_h = _pointwise_oc_tile_h(flat_c, out_h, out_w, oc_tile)
+    direct_descs = plan_observed_spatial_tile_descs(
+        p, in_c, out_c, kh, kw, input_nchw.shape[2], input_nchw.shape[3], 1, stride)
+    direct_meta = [_tile_desc_meta(d) for d in direct_descs]
+    descs = []
+    for out_row_start, tile_out_h in output_row_tiles(out_h, row_tile_h):
+        hw_tile_h = hardware_tile_h(tile_out_h, 7)
+        im2col = make_spatial_im2col_input_tile(input_nchw[n], out_row_start, tile_out_h,
+                                                hw_tile_h, out_w, in_c, kh, kw, stride)
+        for oc_start, oc_end, tile_out_c in tile_ranges(out_c, oc_tile):
+            hw_out_c = padded_oc_count(tile_out_c, oc_tile)
+            tile_p = _conv_params(flat_c, hw_tile_h, out_w, hw_out_c, 1, 1, 1)
+
+            tile_weight = make_spatial_im2col_weight_tile(weight_nchw, oc_start, oc_end,
+                                                          hw_out_c, in_c, kh, kw)
+            packed_input, packed_weight, regs, out_count = materialize_conv_tile(
+                tile_p, im2col, tile_weight, hw_out_c, flat_c, 1, 1, 1, full_data_bank=True)
+            meta = tile_meta(out_row_start, tile_out_h, oc_start, oc_end, tile_p,
+                             "temporary software im2col fallback",
+                             direct_spatial_descs=direct_meta)
+            descs.append(make_flat_1x1_tile_desc("spatial_im2col_fallback", result, n, packed_input, packed_weight, regs,
+                                                 oc_start, oc_end, out_row_start, tile_out_h, hw_tile_h,
+                                                 out_w, tile_out_c, hw_out_c, tile_p["out_width_stride"], out_count,
+                                                 meta=meta))
+    return descs
+
+def _get_generic_input_tile(inp, tile, p, in_c, kh, in_h, in_w, stride):
+    ys, y_span = tile["y_start"], tile["y_step"]
+    k_span = tile["k_step"]
+    if p["is_depthwise"]:
+        ks = tile["k_start"]
+        tn = min((y_span - 1) * stride + kh, in_h - ys * stride)
+        ti = np.zeros((k_span, tn, in_w), dtype=np.float16)
+        rih = min(tn, in_h - ys * stride)
+        ti[:, :rih] = inp[ks:ks + k_span, ys * stride:ys * stride + rih, :]
+        return ti, tn
+    t_in = input_h_for_output_tile(y_span, kh, stride)
+    hw_th = max(t_in, hardware_tile_h(y_span, 7))
+    tn = min(t_in, in_h - ys * stride)
+    ti = np.zeros((in_c, hw_th, in_w), dtype=np.float16)
+    rih = min(tn, in_h - ys * stride)
+    ti[:, :rih] = inp[:, ys * stride:ys * stride + rih, :]
+    return ti, tn
+
+def _get_generic_weight_tile(wt, tile, p, in_c, kh, kw):
+    ks, k_span = tile["k_start"], tile["k_step"]
+    groups = p["groups"]
+    if p["is_depthwise"]:
+        tw = np.zeros((k_span, k_span, kh, kw), dtype=np.float16)
+        for i in range(k_span):
+            tw[i, i] = wt[ks + i, 0]
+        return tw
+    tw = wt[ks:ks + k_span].reshape(k_span, in_c // groups, kh, kw)
+    if groups > 1:
+        tw = _expand_grouped_weights(tw, in_c, k_span, kh, kw, groups)
+    return tw
+
+def generic_tile_channels(p, in_c, tile_out_c):
+    if p["is_depthwise"]:
+        return tile_out_c, tile_out_c, tile_out_c
+    oc_tile = _pointwise_oc_tile_c(in_c)
+    hw_oc = oc_tile if tile_out_c < oc_tile else tile_out_c
+    return in_c, p["groups"], hw_oc
+
+def generic_tile_full_data_bank(p, split_method):
+    return split_method != _SPLIT_NONE or (p["is_spatial"] and p["groups"] == 1)
+
+def build_generic_yk_descs(n, input_nchw, weight_nchw, result, p, plan, in_c, kh, kw, in_h, in_w, stride):
+    descs = []
+    out_offset = 0
+    for tile in plan["tiles"]:
         ys, y_span = tile["y_start"], tile["y_step"]
         ks, k_span = tile["k_start"], tile["k_step"]
-        if is_depthwise:
-            tn = min((y_span - 1) * stride + kh, in_h - ys * stride)
-            ti = np.zeros((k_span, tn, in_w), dtype=np.float16)
-            rih = min(tn, in_h - ys * stride)
-            ti[:, :rih] = inp[ks:ks + k_span, ys * stride:ys * stride + rih, :]
-            return ti, tn
-        t_in = (y_span - 1) * stride + kh
-        hw_th = max(t_in, y_span, 7)
-        tn = min(t_in, in_h - ys * stride)
-        ti = np.zeros((in_c, hw_th, in_w), dtype=np.float16)
-        rih = min(tn, in_h - ys * stride)
-        ti[:, :rih] = inp[:, ys * stride:ys * stride + rih, :]
-        return ti, tn
+        ti, tn_actual = _get_generic_input_tile(input_nchw[n], tile, p, in_c, kh, in_h, in_w, stride)
+        tw = _get_generic_weight_tile(weight_nchw, tile, p, in_c, kh, kw)
 
-    def _get_weight_tile(wt, tile):
-        ks, k_span = tile["k_start"], tile["k_step"]
-        if is_depthwise:
-            tw = np.zeros((k_span, k_span, kh, kw), dtype=np.float16)
-            for i in range(k_span):
-                tw[i, i] = wt[ks + i, 0]
-            return tw
-        tw = wt[ks:ks + k_span].reshape(k_span, in_c // groups, kh, kw)
-        if groups > 1:
-            tw = _expand_grouped_weights(tw, in_c, k_span, kh, kw, groups)
-        return tw
+        tile_out_c = k_span
+        oc_end = ks + tile_out_c
+        tile_ic, tile_g, hw_oc = generic_tile_channels(p, in_c, tile_out_c)
+        tw = pad_output_channels(tw, tile_out_c, hw_oc)
 
-    use_pointwise_oc_schedule = (not is_spatial and not is_depthwise and groups == 1 and
-                                  _needs_pointwise_oc_tile_schedule(in_c, out_c, in_h, in_w, kh, kw, groups))
+        tp = _conv_params(tile_ic, tn_actual, in_w, hw_oc, kh, kw, tile_g, stride)
 
-    grouped_serial = is_spatial and groups > 1 and not is_depthwise
-    spatial_output_bytes = _ceil_div(p["align_out_c"], UNPACK_C2) * p["out_width_stride"] * UNPACK_C2 * FP16_BYTES
-    spatial_weight_banks = _mesa_weight_banks(kw, kh, in_c, out_c, False) if is_spatial else 0
-    spatial_im2col = is_spatial and groups == 1 and not is_depthwise and (spatial_weight_banks > RK_CBUF_BANKS // 3 or spatial_output_bytes > output_mem_create.size)
-    spatial_oc_serial = is_spatial and groups == 1 and not is_depthwise and out_c > UNPACK_C2 and (in_c % 16 != 0 or in_c >= 16)
-    depthwise_spatial_tiled = is_depthwise and is_spatial
+        full_data_bank = generic_tile_full_data_bank(p, plan["split_method"])
+        out_dma = output_mem_create.dma_addr + out_offset
+        packed_input, packed_weight, regs, out_count = materialize_conv_tile(
+            tp, ti, tw, hw_oc, tile_ic, kh, kw, tile_g, out_dma=out_dma,
+            full_data_bank=full_data_bank)
+        meta = tile_meta(ys, y_span, ks, oc_end, tp,
+                         "generic RKNN-style Y/K tile planner")
+        descs.append(make_nc1hwc2_tile_desc("generic_yk", result, n, packed_input, packed_weight, regs,
+                                            ks, oc_end, ys, y_span, y_span,
+                                            p["out_w"], tile_out_c, tp["out_width_stride"], out_count,
+                                            offset=out_offset, meta=meta))
+        out_offset += conv_output_bytes(tp)
+    return descs
 
-    if grouped_serial:
-        input_per_group = in_c // groups
-        out_per_group = out_c // groups
-        gp = _conv_params(input_per_group, in_h, in_w, out_per_group, kh, kw, 1, stride=stride)
-        group_out_c1 = _ceil_div(gp["align_out_c"], UNPACK_C2)
-        group_out_count = group_out_c1 * gp["out_width_stride"] * UNPACK_C2
-        for n in range(batch):
-            descs = []
-            for g in range(groups):
-                input_start = g * input_per_group
-                input_end = input_start + input_per_group
-                oc_start = g * out_per_group
-                oc_end = oc_start + out_per_group
-                input_tile = input_nchw[n, input_start:input_end]
-                packed_input = _pack_cdma_dc_feature_input_fp16(input_tile, gp)
-                group_weight = weight_nchw[oc_start:oc_end].reshape(out_per_group, input_per_group, kh, kw)
-                packed_weight = pack_weights(group_weight, out_per_group, input_per_group, kh, kw, gp["align_c"], 1)
-                task_regs = [make_conv2d_regs(gp, input_mem_create.dma_addr,
-                                             weight_mem_create.dma_addr,
-                                             output_mem_create.dma_addr)]
-                _append_nc1hwc2_desc(descs, result, n, packed_input, packed_weight, task_regs,
-                                     oc_start, oc_end, 0, out_h, out_h, out_w,
-                                     gp["align_out_c"], gp["out_width_stride"], group_out_count)
-            _execute_conv_tiles(descs)
-        return result, input_nchw, weight_nchw
+def _build_grouped_serial_from_plan(n, input_nchw, weight_nchw, result, p, plan, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
+    return build_grouped_serial_descs(
+        n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, in_h, in_w, groups, stride)
 
-    if spatial_im2col:
-        flat_c = in_c * kh * kw
-        oc_tile = _pointwise_oc_tile_c(flat_c)
-        row_tile_h = _pointwise_oc_tile_h(flat_c, out_h, out_w, oc_tile)
-        for n in range(batch):
-            descs = []
-            for out_row_start in range(0, out_h, row_tile_h):
-                tile_out_h = min(row_tile_h, out_h - out_row_start)
-                hw_tile_h = max(7, tile_out_h)
-                im2col = np.zeros((flat_c, hw_tile_h, out_w), dtype=np.float16)
-                flat = 0
-                for ic in range(in_c):
-                    for ky in range(kh):
-                        src_y = out_row_start * stride + ky
-                        for kx in range(kw):
-                            im2col[flat, :tile_out_h] = input_nchw[n, ic, src_y:src_y + tile_out_h * stride:stride, kx:kx + out_w * stride:stride]
-                            flat += 1
-                for oc_start in range(0, out_c, oc_tile):
-                    oc_end = min(oc_start + oc_tile, out_c)
-                    tile_out_c = oc_end - oc_start
-                    hw_out_c = oc_tile if tile_out_c < oc_tile else tile_out_c
-                    tile_p = _conv_params(flat_c, hw_tile_h, out_w, hw_out_c, 1, 1, 1)
-                    packed_input = _pack_cdma_dc_feature_input_fp16(im2col, tile_p)
+def _build_spatial_im2col_fallback_from_plan(n, input_nchw, weight_nchw, result, p, plan, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
+    return build_spatial_im2col_fallback_descs(
+        n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, stride)
 
-                    tile_weight = np.zeros((hw_out_c, flat_c, 1, 1), dtype=np.float16)
-                    for local_oc, oc in enumerate(range(oc_start, oc_end)):
-                        flat = 0
-                        for ic in range(in_c):
-                            for ky in range(kh):
-                                for kx in range(kw):
-                                    tile_weight[local_oc, flat, 0, 0] = weight_nchw[oc, ic, ky, kx]
-                                    flat += 1
-                    packed_weight = pack_weights(tile_weight, hw_out_c, flat_c, 1, 1, tile_p["align_c"], 1)
-                    task_regs = [make_conv2d_regs(tile_p, input_mem_create.dma_addr,
-                                                  weight_mem_create.dma_addr,
-                                                  output_mem_create.dma_addr,
-                                                  full_data_bank=True)]
-                    out_c1 = _ceil_div(tile_p["align_out_c"], UNPACK_C2)
-                    out_count = out_c1 * tile_p["out_width_stride"] * UNPACK_C2
-                    _append_flat_1x1_desc(descs, result, n, packed_input, packed_weight, task_regs,
-                                          oc_start, oc_end, out_row_start, tile_out_h, hw_tile_h,
-                                          out_w, tile_out_c, hw_out_c, tile_p["out_width_stride"], out_count)
-            _execute_conv_tiles(descs)
-        return result, input_nchw, weight_nchw
+def _build_spatial_oc_serial_from_plan(n, input_nchw, weight_nchw, result, p, plan, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
+    return build_spatial_oc_serial_descs(
+        n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, in_w, stride)
 
-    if spatial_oc_serial:
-        oc_tile = UNPACK_C2
-        for n in range(batch):
-            descs = []
-            for out_row_start in range(0, out_h, 32):
-                tile_out_h = min(32, out_h - out_row_start)
-                tile_in_h = (tile_out_h - 1) * stride + kh
-                input_tile = input_nchw[n, :, out_row_start * stride:out_row_start * stride + tile_in_h, :]
-                for oc_start in range(0, out_c, oc_tile):
-                    oc_end = min(oc_start + oc_tile, out_c)
-                    tile_out_c = oc_end - oc_start
-                    tp = _conv_params(in_c, tile_in_h, in_w, tile_out_c, kh, kw, 1, stride)
-                    packed_input = _pack_cdma_dc_feature_input_fp16(input_tile, tp)
-                    tile_weight = np.zeros((tile_out_c, in_c, kh, kw), dtype=np.float16)
-                    tile_weight[:] = weight_nchw[oc_start:oc_end].reshape(tile_out_c, in_c, kh, kw)
-                    packed_weight = pack_weights(tile_weight, tile_out_c, in_c, kh, kw, tp["align_c"], 1)
-                    regs = [make_conv2d_regs(tp, input_mem_create.dma_addr, weight_mem_create.dma_addr,
-                                              output_mem_create.dma_addr, full_data_bank=True)]
-                    out_c1 = _ceil_div(tp["align_out_c"], 8)
-                    out_count = out_c1 * tp["out_width_stride"] * 8
-                    _append_nc1hwc2_desc(descs, result, n, packed_input, packed_weight, regs,
-                                         oc_start, oc_end, out_row_start, tile_out_h, tile_out_h,
-                                         out_w, oc_end - oc_start, tp["out_width_stride"], out_count)
-            _execute_conv_tiles(descs)
-        return result, input_nchw, weight_nchw
+def _build_depthwise_spatial_from_plan(n, input_nchw, weight_nchw, result, p, plan, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
+    return build_depthwise_spatial_descs(
+        n, input_nchw, weight_nchw, result, p, out_c, kh, kw, in_h, in_w, stride)
 
-    if depthwise_spatial_tiled:
-        channel_tile = min(32, out_c)
-        row_tile_h = max(1, _depthwise_tile_h(out_c, out_h, in_w, kh, kw, stride)) if is_spatial else out_h
-        for n in range(batch):
-            descs = []
-            for out_row_start in range(0, out_h, row_tile_h):
-                tile_out_h = min(row_tile_h, out_h - out_row_start)
-                hw_tile_out_h = max(2, tile_out_h)
-                tile_in_h = (hw_tile_out_h - 1) * stride + kh
-                for ch_start in range(0, out_c, channel_tile):
-                    ch_end = min(ch_start + channel_tile, out_c)
-                    tile_c = ch_end - ch_start
-                    tile_p = _conv_params(tile_c, tile_in_h, in_w, tile_c, kh, kw, tile_c, stride=stride)
-                    input_tile = np.zeros((tile_c, tile_in_h, in_w), dtype=np.float16)
-                    real_in_h = min(tile_in_h, in_h - out_row_start * stride)
-                    input_tile[:, :real_in_h] = input_nchw[n, ch_start:ch_end, out_row_start * stride:out_row_start * stride + real_in_h, :]
-                    packed_input = _pack_cdma_dc_feature_input_fp16(input_tile, tile_p)
-                    tile_weight = np.zeros((tile_c, tile_c, kh, kw), dtype=np.float16)
-                    for local_c in range(tile_c):
-                        tile_weight[local_c, local_c] = weight_nchw[ch_start + local_c, 0]
-                    packed_weight = pack_weights(tile_weight, tile_c, tile_c, kh, kw, tile_p["align_c"], tile_c)
-                    regs = [make_conv2d_regs(tile_p, input_mem_create.dma_addr, weight_mem_create.dma_addr,
-                                             output_mem_create.dma_addr)]
-                    out_c1 = _ceil_div(tile_p["align_out_c"], 8)
-                    out_count = out_c1 * tile_p["out_width_stride"] * 8
-                    _append_nc1hwc2_desc(descs, result, n, packed_input, packed_weight, regs,
-                                         ch_start, ch_end, out_row_start, tile_out_h, hw_tile_out_h,
-                                         out_w, ch_end - ch_start, tile_p["out_width_stride"], out_count)
-            _execute_conv_tiles(descs)
-        return result, input_nchw, weight_nchw
+def _build_pointwise_oc_from_plan(n, input_nchw, weight_nchw, result, p, plan, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
+    return build_pointwise_oc_descs(
+        n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, in_w, groups, stride)
+
+def _build_generic_yk_from_plan(n, input_nchw, weight_nchw, result, p, plan, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
+    return build_generic_yk_descs(
+        n, input_nchw, weight_nchw, result, p, plan, in_c, kh, kw, in_h, in_w, stride)
+
+DESCRIPTOR_PRODUCERS = {
+    "grouped_serial": _build_grouped_serial_from_plan,
+    "spatial_im2col_fallback": _build_spatial_im2col_fallback_from_plan,
+    "spatial_oc_serial": _build_spatial_oc_serial_from_plan,
+    "depthwise_spatial_tiled": _build_depthwise_spatial_from_plan,
+    "pointwise_oc": _build_pointwise_oc_from_plan,
+    "generic_yk": _build_generic_yk_from_plan,
+}
+
+def build_conv_descriptors(plan, n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
+    producer = DESCRIPTOR_PRODUCERS[plan["family"]]
+    return producer(n, input_nchw, weight_nchw, result, p, plan,
+                    in_c, out_c, kh, kw, in_h, in_w, groups, stride)
+
+def plan_conv_descriptors(n, input_nchw, weight_nchw, result, in_c, out_c, kh, kw, input_hw, groups=1, stride=1):
+    in_h, in_w = input_hw
+    p, split_method, tiles = _plan_conv_tiles(in_c, out_c, kh, kw, in_h, in_w, groups, stride)
+    plan = classify_conv_plan(p, in_c, out_c, kh, kw, in_h, in_w, groups,
+                              split_method, tiles)
+    return build_conv_descriptors(plan, n, input_nchw, weight_nchw, result, p,
+                                  in_c, out_c, kh, kw, in_h, in_w, groups, stride)
+
+def _run_direct_spatial_conv(n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
+    descs, packed_input, packed_weight = build_direct_spatial_descs(
+        n, input_nchw, weight_nchw, p, in_c, out_c, kh, kw, in_h, in_w, groups, stride)
+    if not descs:
+        return False
+    execute_direct_spatial_descriptors(descs, packed_input, packed_weight)
+    out_count = conv_output_count(p)
+    out = _read_nc1hwc2_output(out_count, out_c, p["out_h"], p["out_w"], p["out_width_stride"])
+    result[n] = out[:out_c]
+    return True
+
+def direct_spatial_hw_enabled():
+    return (os.environ.get("RK3588_CONV_DIRECT_SPATIAL") == "1" and
+            os.environ.get("RK3588_CONV_DIRECT_SPATIAL_UNSAFE") == "1")
+
+def run_conv(batch, in_c, out_c, kh, kw, input_hw, groups=1, stride=1):
+    in_h, in_w = input_hw
+    input_nchw, weight_nchw = make_conv_test_data(batch, in_c, out_c, kh, kw, input_hw, groups)
+
+    p = _conv_params(in_c, in_h, in_w, out_c, kh, kw, groups, stride)
+    out_h, out_w = p["out_h"], p["out_w"]
+    result = np.zeros((batch, out_c, out_h, out_w), dtype=np.float16)
 
     for n in range(batch):
-        descs = []
-        out_offset = 0
-        if use_pointwise_oc_schedule:
-            oc_tile = _pointwise_oc_tile_c(in_c)
-            row_tile_h = _pointwise_oc_tile_h(in_c, out_h, out_w, oc_tile, stride)
-            tw = weight_nchw.reshape(out_c, in_c // groups, kh, kw)
-            for out_row_start in range(0, out_h, row_tile_h):
-                tile_out_h = min(row_tile_h, out_h - out_row_start)
-                hw_tile_h = max(7, tile_out_h)
-                ti = np.zeros((in_c, hw_tile_h, in_w), dtype=np.float16)
-                ti[:, :tile_out_h] = input_nchw[n, :, out_row_start * stride:out_row_start * stride + tile_out_h, :]
-                for oc_start in range(0, out_c, oc_tile):
-                    oc_end = min(oc_start + oc_tile, out_c)
-                    tile_out_c = oc_end - oc_start
-                    hw_out_c = oc_tile if tile_out_c < oc_tile else tile_out_c
-                    tp = _conv_params(in_c, hw_tile_h, in_w, hw_out_c, kh, kw, groups, stride)
-                    tile_wt = tw[oc_start:oc_end]
-                    if hw_out_c > tile_out_c:
-                        padded = np.zeros((hw_out_c,) + tile_wt.shape[1:], dtype=np.float16)
-                        padded[:tile_out_c] = tile_wt
-                        tile_wt = padded
-                    packed_weight = pack_weights(tile_wt, hw_out_c, in_c, kh, kw, tp["align_c"], groups)
-                    regs = [make_conv2d_regs(tp, input_mem_create.dma_addr, weight_mem_create.dma_addr,
-                                             output_mem_create.dma_addr, full_data_bank=True)]
-                    packed_input = _pack_cdma_dc_feature_input_fp16(ti, tp)
-                    out_c1 = _ceil_div(tp["align_out_c"], 8)
-                    out_count = out_c1 * tp["out_width_stride"] * 8
-                    _append_flat_1x1_desc(descs, result, n, packed_input, packed_weight, regs,
-                                          oc_start, oc_end, out_row_start, tile_out_h, hw_tile_h,
-                                          out_w, tile_out_c, hw_out_c, tp["out_width_stride"], out_count)
-            _execute_conv_tiles(descs)
-            continue
-        for tile in tiles:
-            ks, k_span = tile["k_start"], tile["k_step"]
-            ti, tn_actual = _get_input_tile(input_nchw[n], tile)
-            tw = _get_weight_tile(weight_nchw, tile)
-
-            tile_out_c = k_span
-            if is_depthwise:
-                tile_ic, tile_g = k_span, k_span
-                hw_oc = tile_out_c
-            else:
-                tile_ic, tile_g = in_c, groups
-                oc_tile_ = _pointwise_oc_tile_c(in_c)
-                hw_oc = oc_tile_ if tile_out_c < oc_tile_ else tile_out_c
-                if split_method == _SPLIT_BY_K and not is_spatial and hw_oc < tile_out_c:
-                    hw_oc = _align_up(tile_out_c, 16)
-
-            if hw_oc > tile_out_c:
-                padded = np.zeros((hw_oc,) + tw.shape[1:], dtype=np.float16)
-                padded[:tile_out_c] = tw
-                tw = padded
-
-            tp = _conv_params(tile_ic, tn_actual, in_w, hw_oc, kh, kw, tile_g, stride)
-            packed_weight = pack_weights(tw, hw_oc, tile_ic, kh, kw, tp["align_c"], tile_g)
-
-            fdb = split_method != _SPLIT_NONE or (is_spatial and groups == 1)
-            out_dma = output_mem_create.dma_addr + out_offset
-            regs = [make_conv2d_regs(tp, input_mem_create.dma_addr, weight_mem_create.dma_addr,
-                                     out_dma, full_data_bank=fdb)]
-
-            packed_input = _pack_cdma_dc_feature_input_fp16(ti, tp)
-            out_c1 = _ceil_div(tp["align_out_c"], 8)
-            out_count = out_c1 * tp["out_width_stride"] * 8
-            _append_nc1hwc2_desc(descs, result, n, packed_input, packed_weight, regs,
-                                 ks, ks + tile_out_c, tile["y_start"], tile["y_step"], tile["y_step"],
-                                 out_w, tile_out_c, tp["out_width_stride"], out_count, offset=out_offset)
-            out_offset += tp["align_out_c"] * tp["out_width_stride"] * FP16_BYTES
-        _execute_conv_tiles(descs)
+        if direct_spatial_hw_enabled():
+            if _run_direct_spatial_conv(n, input_nchw, weight_nchw, result, p,
+                                        in_c, out_c, kh, kw, in_h, in_w, groups, stride):
+                continue
+        descs = plan_conv_descriptors(n, input_nchw, weight_nchw, result,
+                                      in_c, out_c, kh, kw, input_hw, groups, stride)
+        execute_conv_descriptors(descs)
 
     return result, input_nchw, weight_nchw
 
 def compute_expected_nchw(inp, wt, batch, in_c, in_h, in_w, out_c, kh, kw, groups=1, stride=1):
-    out_h, out_w = (in_h - kh) // stride + 1, (in_w - kw) // stride + 1
+    out_h, out_w = conv_output_hw(in_h, in_w, kh, kw, stride)
     i64, w64 = inp.astype(np.float64), wt.astype(np.float64)
     expected = np.zeros((batch, out_c, out_h, out_w))
     for n in range(batch):
@@ -967,8 +1419,49 @@ def compute_expected_nchw(inp, wt, batch, in_c, in_h, in_w, out_c, kh, kw, group
                             expected[n, oc] += i64[n, ic, i:i+stride*out_h:stride, j:j+stride*out_w:stride] * w64[oc, ic - g * in_c // groups, i, j]
     return expected
 
-if __name__ == "__main__":
-    shapes = [
+def select_shapes(shapes, requested):
+    requested = set(requested)
+    if not requested:
+        return shapes
+    available = {s["name"] for s in shapes}
+    missing = sorted(requested - available)
+    if missing:
+        raise SystemExit(f"unknown conv shape(s): {', '.join(missing)}")
+    return [s for s in shapes if s["name"] in requested]
+
+def shape_stride(s):
+    return s.get("stride", 1)
+
+def shape_input_text(s):
+    return f"{s['in_c']}x{s['in_h']}x{s['in_w']}"
+
+def shape_output_text(s):
+    out_h, out_w = conv_output_hw(s["in_h"], s["in_w"], s["kh"], s["kw"], shape_stride(s))
+    return f"{s['out_c']}x{out_h}x{out_w}"
+
+def print_shape_result(s, nw, iw, ok, max_diff):
+    print(f"  {s['name']:<{nw}s} {shape_input_text(s):<{iw}s} -> {shape_output_text(s)}  {'PASS' if ok else 'FAIL'}  (max_diff={max_diff:.4f})")
+
+def run_shape_check(s):
+    stride = shape_stride(s)
+    result, inp, wt = run_conv(s["batch"], s["in_c"], s["out_c"], s["kh"], s["kw"],
+                               (s["in_h"], s["in_w"]), groups=s["groups"], stride=stride)
+    expected = compute_expected_nchw(inp, wt, s["batch"], s["in_c"], s["in_h"], s["in_w"],
+                                     s["out_c"], s["kh"], s["kw"], groups=s["groups"], stride=stride)
+    max_diff = float(np.max(np.abs(result.astype(np.float64) - expected)))
+    ok = np.allclose(result, expected, atol=0.2) and not np.any(np.isinf(result))
+    return ok, max_diff
+
+def run_shape_suite(shapes, requested):
+    shapes = select_shapes(shapes, requested)
+    name_width = max(len(s["name"]) for s in shapes)
+    input_width = max(len(shape_input_text(s)) for s in shapes)
+    for s in shapes:
+        ok, max_diff = run_shape_check(s)
+        print_shape_result(s, name_width, input_width, ok, max_diff)
+
+def conv_shapes():
+    return [
         # -- 1x1 kernels (fully supported via NHWC mode + channel slicing for ic>=5) --
         dict(name="conv2d_1x6_1x1_4x4",                batch=1, in_c=1,  in_h=4,  in_w=4,  out_c=6, weight_in_c=1, kh=1, kw=1, groups=1),
         dict(name="conv2d_3x3_1x1_4x4",                batch=1, in_c=3,  in_h=4,  in_w=4,  out_c=3, weight_in_c=3, kh=1, kw=1, groups=1),
@@ -1236,22 +1729,12 @@ if __name__ == "__main__":
         dict(name="b1_c96_h20_w20_oc273_wic96_k1x1_g1_s1_pvalid", batch=1, in_c=96, in_h=20, in_w=20, out_c=273, weight_in_c=96, kh=1, kw=1, groups=1),
         dict(name="b1_c384_h10_w10_oc546_wic384_k1x1_g1_s1_pvalid", batch=1, in_c=384, in_h=10, in_w=10, out_c=546, weight_in_c=384, kh=1, kw=1, groups=1),
     ]
-    def shape_stride(s):
-        return s.get("stride", 1)
-    nw = max(len(s["name"]) for s in shapes)
-    iw = max(len(f"{s['in_c']}x{s['in_h']}x{s['in_w']}") for s in shapes)
-    for s in shapes:
-        stride = shape_stride(s)
-        oh = (s["in_h"] - s["kh"]) // stride + 1
-        ow = (s["in_w"] - s["kw"]) // stride + 1
-        pass  # all shapes run, no skips
-        r, inp, wt = run_conv(s["batch"], s["in_c"], s["out_c"], s["kh"], s["kw"],
-                              (s["in_h"], s["in_w"]), groups=s["groups"], stride=stride)
-        e = compute_expected_nchw(inp, wt, s["batch"], s["in_c"], s["in_h"], s["in_w"],
-                                  s["out_c"], s["kh"], s["kw"], groups=s["groups"], stride=stride)
-        md = float(np.max(np.abs(r.astype(np.float64) - e)))
-        ok = np.allclose(r, e, atol=0.2) and not np.any(np.isinf(r))
-        in_str = f"{s['in_c']}x{s['in_h']}x{s['in_w']}"
-        out_str = f"{s['out_c']}x{oh}x{ow}"
-        print(f"  {s['name']:<{nw}s} {in_str:<{iw}s} -> {out_str}  {'PASS' if ok else 'FAIL'}  (max_diff={md:.4f})")
-    os.close(fd)
+
+def main(argv):
+    try:
+        run_shape_suite(conv_shapes(), argv)
+    finally:
+        os.close(fd)
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
