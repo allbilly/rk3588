@@ -18,6 +18,44 @@ CBUF_BANK_SIZE = CBUF_ENTRIES_PER_BANK * CBUF_ENTRY_BYTES
 RK_MAX_CONV_FLAT_STRIDE = 992
 PC_CHAIN_TAIL_QWORDS = 4
 DPU_CLEAR_REGS = tuple(range(0x4100, 0x4130, 4))
+DIRECT_SPATIAL_ENV = "RK3588_CONV_DIRECT_SPATIAL"
+DIRECT_SPATIAL_UNSAFE_ENV = "RK3588_CONV_DIRECT_SPATIAL_UNSAFE"
+DIRECT_SPATIAL_TASKS_ENV = "RK3588_CONV_DIRECT_SPATIAL_TASKS"
+TASK_POLICY_REG_LISTS = "reg_lists"
+TASK_POLICY_RAW_SPANS = "raw_spans"
+BUFFER_SCOPE_TILE = "tile"
+BUFFER_SCOPE_FULL = "full"
+UNPACK_KIND_NC1HWC2 = "nc1hwc2"
+UNPACK_KIND_FLAT_1X1 = "flat_1x1"
+UNPACK_KIND_DIRECT_SPATIAL = "direct_spatial"
+FAMILY_DIRECT_SPATIAL = "direct_spatial"
+FAMILY_GROUPED_SERIAL = "grouped_serial"
+FAMILY_SPATIAL_IM2COL_FALLBACK = "spatial_im2col_fallback"
+FAMILY_SPATIAL_OC_SERIAL = "spatial_oc_serial"
+FAMILY_DEPTHWISE_SPATIAL_TILED = "depthwise_spatial_tiled"
+FAMILY_POINTWISE_OC = "pointwise_oc"
+FAMILY_GENERIC_YK = "generic_yk"
+DIRECT_SPATIAL_POLICY_PC_ROOT6 = "pc_root6"
+DIRECT_SPATIAL_PC_ROOT6_RECORD_AMOUNTS = (
+    108, 108, 104, 104, 26, 104, 104, 26, 104, 104, 26, 104, 104, 26, 104, 104, 26,
+)
+DIRECT_SPATIAL_PC_ROOT6_LINK_RECORDS = (1, None, 3, 4, 6, 7, 9, 10, 12, 13, 15, 16)
+DIRECT_SPATIAL_PC_ROOT6_ROOT_RECORDS = (0, 2, 5, 8, 11, 14)
+DIRECT_SPATIAL_PC_ROOT6_STREAM_QWORDS = 1280
+DIRECT_SPATIAL_PC_ROOT6_H40_SCHEDULE = (
+    ("setup", 0, 23, 21, 0, 320),
+    ("setup", 21, 19, 17, 0, 320),
+    ("k_half", 0, 23, 21, 0, 160),
+    ("k_half", 21, 19, 17, 0, 160),
+    ("k_half", 0, 23, 21, 160, 160),
+    ("k_half", 21, 19, 17, 160, 160),
+    ("k_tile", 0, 23, 21, 0, 112),
+    ("k_tile", 21, 19, 17, 0, 112),
+    ("k_tile", 0, 23, 21, 112, 112),
+    ("k_tile", 21, 19, 17, 112, 112),
+    ("k_tile", 0, 23, 21, 224, 96),
+    ("k_tile", 21, 19, 17, 224, 96),
+)
 
 class TileDesc:
     __slots__ = (
@@ -629,11 +667,25 @@ def _plan_conv_tiles(in_c, out_c, kh, kw, in_h, in_w, groups, stride):
 
 def execute_conv_descriptors(descs):
     for d in descs:
+        _execute_conv_desc(d)
+
+def _load_desc_buffers(d):
+    if d.get("buffer_scope") == BUFFER_SCOPE_FULL:
+        _load_full_input(d["packed_input"])
+        _load_full_weight(d["packed_weight"])
+    else:
         _load_tile_input(d["packed_input"])
         _load_tile_weight(d["packed_weight"])
+
+def _execute_conv_desc(d):
+    _load_desc_buffers(d)
+    if d.get("clear_output", True):
         _clear_output()
+    if d.get("task_policy") == TASK_POLICY_RAW_SPANS:
+        _submit_raw_task_spans(d["regs"])
+    else:
         _submit_task_regs(d["regs"])
-        _unpack_tile_result(d)
+    _unpack_tile_result(d)
 
 def _store_tile_output(u, out):
     real_channels = u["oc_end"] - u["oc_start"]
@@ -651,24 +703,32 @@ def _read_flat_1x1_output(count, hw_channels, out_h, out_w, out_width_stride, of
 
 def _unpack_tile_result(d):
     u = d["unpack"]
-    if u["kind"] == "nc1hwc2":
+    if u["kind"] == UNPACK_KIND_NC1HWC2:
         out = _read_nc1hwc2_output(u["count"], u["channels"], u["hw_h"], u["out_w"],
                                    u["stride"], u.get("offset", 0))
         _store_tile_output(u, out)
-    elif u["kind"] == "flat_1x1":
+    elif u["kind"] == UNPACK_KIND_FLAT_1X1:
         out = _read_flat_1x1_output(u["count"], u["hw_channels"], u["hw_h"], u["out_w"],
                                     u["stride"], u.get("offset", 0))
         _store_tile_output(u, out)
+    elif u["kind"] == UNPACK_KIND_DIRECT_SPATIAL:
+        out = _read_nc1hwc2_output(u["count"], u["channels"], u["out_h"], u["out_w"], u["stride"])
+        u["result"][u["n"]] = out[:u["channels"]]
     else:
         raise ValueError(f"unknown unpack kind: {u['kind']}")
 
-def make_tile_exec_desc(family, packed_input, packed_weight, regs, unpack, meta=None):
+def make_tile_exec_desc(family, packed_input, packed_weight, regs, unpack, meta=None,
+                        buffer_scope=BUFFER_SCOPE_TILE, clear_output=True,
+                        task_policy=TASK_POLICY_REG_LISTS):
     return {"family": family,
             "packed_input": packed_input,
             "packed_weight": packed_weight,
             "regs": regs,
             "unpack": unpack,
-            "meta": meta or {}}
+            "meta": meta or {},
+            "buffer_scope": buffer_scope,
+            "clear_output": clear_output,
+            "task_policy": task_policy}
 
 def make_tile_unpack(kind, result, n, oc_start, oc_end, y_start, out_h, hw_h,
                      out_w, channels, out_width_stride, count, hw_channels=None, offset=0):
@@ -682,11 +742,21 @@ def make_tile_unpack(kind, result, n, oc_start, oc_end, y_start, out_h, hw_h,
         unpack["hw_channels"] = hw_channels
     return unpack
 
+def make_direct_spatial_unpack(result, n, p):
+    return {"kind": UNPACK_KIND_DIRECT_SPATIAL,
+            "result": result,
+            "n": n,
+            "count": conv_output_count(p),
+            "channels": p["out_c"],
+            "out_h": p["out_h"],
+            "out_w": p["out_w"],
+            "stride": p["out_width_stride"]}
+
 def make_nc1hwc2_tile_desc(family, result, n, packed_input, packed_weight, regs, oc_start, oc_end,
                            y_start, out_h, hw_h, out_w, channels, out_width_stride, count,
                            offset=0, meta=None):
     return make_tile_exec_desc(family, packed_input, packed_weight, regs,
-                               make_tile_unpack("nc1hwc2", result, n, oc_start, oc_end,
+                               make_tile_unpack(UNPACK_KIND_NC1HWC2, result, n, oc_start, oc_end,
                                                 y_start, out_h, hw_h, out_w, channels,
                                                 out_width_stride, count, offset=offset),
                                meta=meta)
@@ -695,7 +765,7 @@ def make_flat_1x1_tile_desc(family, result, n, packed_input, packed_weight, regs
                             y_start, out_h, hw_h, out_w, channels, hw_channels,
                             out_width_stride, count, meta=None):
     return make_tile_exec_desc(family, packed_input, packed_weight, regs,
-                               make_tile_unpack("flat_1x1", result, n, oc_start, oc_end,
+                               make_tile_unpack(UNPACK_KIND_FLAT_1X1, result, n, oc_start, oc_end,
                                                 y_start, out_h, hw_h, out_w, channels,
                                                 out_width_stride, count, hw_channels=hw_channels),
                                meta=meta)
@@ -823,9 +893,15 @@ def build_direct_spatial_descs(n, input_nchw, weight_nchw, p, in_c, out_c, kh, k
                                                   output_mem_create.dma_addr))
         regs.extend(E(reg.DPU, clear_reg, 0) for clear_reg in DPU_CLEAR_REGS)
         regs.pc_core = desc.pc_core
+        full_regs = RegList(make_rknn_full_conv2d_regs_from_desc(p, desc,
+                                                                 input_mem_create.dma_addr,
+                                                                 weight_mem_create.dma_addr,
+                                                                 output_mem_create.dma_addr))
+        full_regs.pc_core = desc.pc_core
         desc.extra = {
             "full_data_bank": True,
             "regs": [regs],
+            "full_regs": full_regs,
             "index": idx,
         }
     return descs, packed_input, packed_weight
@@ -833,6 +909,11 @@ def build_direct_spatial_descs(n, input_nchw, weight_nchw, p, in_c, out_c, kh, k
 def _submit_task_regs(task_regs):
     write_regs_to_npu_task(task_regs)
     if npu_submit(task_count=len(task_regs)) < 0:
+        raise RuntimeError("npu_submit failed")
+
+def _submit_raw_task_spans(task_spans):
+    write_raw_task_spans(task_spans)
+    if npu_submit(task_count=len(task_spans)) < 0:
         raise RuntimeError("npu_submit failed")
 
 def _bo_addr(bo_map):
@@ -868,12 +949,126 @@ def _load_full_input(packed_input):
 def _load_full_weight(packed_weight):
     _copy_packed_to_bo(packed_weight, weight_map, weight_mem_create, clear=True)
 
-def execute_direct_spatial_descriptors(descs, packed_input, packed_weight):
-    _load_full_input(packed_input)
-    _load_full_weight(packed_weight)
-    _clear_output()
-    task_regs = [desc.extra["regs"][0] for desc in descs]
-    _submit_task_regs(task_regs)
+def direct_spatial_task_policy():
+    value = os.environ.get(DIRECT_SPATIAL_TASKS_ENV, "")
+    if value == "":
+        return TASK_POLICY_REG_LISTS
+    if value == DIRECT_SPATIAL_POLICY_PC_ROOT6:
+        return DIRECT_SPATIAL_POLICY_PC_ROOT6
+    raise ValueError(f"unknown {DIRECT_SPATIAL_TASKS_ENV} policy: {value}")
+
+def direct_spatial_exec_task_policy(policy):
+    if policy == DIRECT_SPATIAL_POLICY_PC_ROOT6:
+        return TASK_POLICY_RAW_SPANS
+    return TASK_POLICY_REG_LISTS
+
+def make_direct_spatial_tile_desc(result, n, packed_input, packed_weight, descs, p):
+    policy = direct_spatial_task_policy()
+    regs = direct_spatial_task_regs(descs, policy)
+    return make_tile_exec_desc(
+        FAMILY_DIRECT_SPATIAL,
+        packed_input,
+        packed_weight,
+        regs,
+        make_direct_spatial_unpack(result, n, p),
+        meta={"direct_spatial_descs": descs, "task_policy": policy},
+        buffer_scope=BUFFER_SCOPE_FULL,
+        task_policy=direct_spatial_exec_task_policy(policy),
+    )
+
+def direct_spatial_task_regs(descs, policy):
+    if policy == DIRECT_SPATIAL_POLICY_PC_ROOT6:
+        return direct_spatial_pc_root6_task_spans(descs)
+    return [desc.extra["regs"][0] for desc in descs]
+
+def direct_spatial_desc_schedule(descs):
+    return tuple(
+        (desc.family, desc.input_y, desc.input_h, desc.output_h, desc.oc_start, desc.oc_count)
+        for desc in descs
+    )
+
+def direct_spatial_pc_root6_supported(descs):
+    return direct_spatial_desc_schedule(descs) == DIRECT_SPATIAL_PC_ROOT6_H40_SCHEDULE
+
+def validate_direct_spatial_pc_root6_descs(descs):
+    if not direct_spatial_pc_root6_supported(descs):
+        raise ValueError("pc_root6 direct-spatial policy only supports the observed 160x40 -> 320 k3x3 descriptor schedule")
+
+def _direct_spatial_pc_tail(base_qword, amount, pc_core):
+    return [
+        E(reg.PC_REG, reg.PC_BASE_ADDRESS,
+          (regcmd_mem_create.dma_addr + base_qword * ctypes.sizeof(ctypes.c_uint64)) & 0xFFFFFFF0),
+        E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, (pc_core << 16) | amount),
+    ]
+
+def direct_spatial_pc_root6_record_starts():
+    starts = []
+    cursor = 0
+    for amount in DIRECT_SPATIAL_PC_ROOT6_RECORD_AMOUNTS:
+        starts.append(cursor)
+        cursor += _align_up(amount + PC_CHAIN_TAIL_QWORDS, 16)
+    return starts
+
+def direct_spatial_pc_root6_tail(desc_idx, desc, record_starts):
+    record_idx = DIRECT_SPATIAL_PC_ROOT6_LINK_RECORDS[desc_idx]
+    if record_idx is None:
+        return []
+    amount = DIRECT_SPATIAL_PC_ROOT6_RECORD_AMOUNTS[record_idx]
+    pc_amount = _ceil_div(amount, 2) + 1
+    return _direct_spatial_pc_tail(record_starts[record_idx], pc_amount, desc.pc_core)
+
+def direct_spatial_pc_root6_boundaries(record_starts, stream_len):
+    boundaries = [record_starts[idx] for idx in DIRECT_SPATIAL_PC_ROOT6_ROOT_RECORDS]
+    boundaries.append(stream_len)
+    return boundaries
+
+def direct_spatial_pc_root6_expected_spans(stream_len=DIRECT_SPATIAL_PC_ROOT6_STREAM_QWORDS):
+    starts = direct_spatial_pc_root6_record_starts()
+    boundaries = direct_spatial_pc_root6_boundaries(starts, stream_len)
+    return [(start, end - start) for start, end in zip(boundaries, boundaries[1:])]
+
+def direct_spatial_compiler_stitched_stream(descs):
+    bodies = [desc.extra["full_regs"] for desc in descs]
+    record_starts = direct_spatial_pc_root6_record_starts()
+    stream = []
+    for desc_idx, body in enumerate(bodies):
+        tail = direct_spatial_pc_root6_tail(desc_idx, descs[desc_idx], record_starts)
+        if desc_idx == 0:
+            stream.extend(body)
+            stream.extend(tail)
+        elif desc_idx == 1:
+            stream.append(E(reg.PC, reg.OPERATION_ENABLE, 0x0d))
+            stream.extend(body)
+        elif desc_idx == 2:
+            stream.append(E(reg.PC, reg.OPERATION_ENABLE, 0x0d))
+            stream.extend(body[4:])
+            stream.extend(tail)
+        else:
+            stream.extend(body[4:])
+            stream.extend(tail)
+    assert len(stream) == DIRECT_SPATIAL_PC_ROOT6_STREAM_QWORDS, "unexpected direct-spatial compiler stream length"
+    return stream
+
+def direct_spatial_pc_root6_task_spans(descs):
+    stream, spans = direct_spatial_pc_root6_stream_and_spans(descs)
+    for idx, qword in enumerate(stream):
+        npu_regcmd[idx] = qword
+    return spans
+
+def direct_spatial_pc_root6_stream_and_spans(descs):
+    validate_direct_spatial_pc_root6_descs(descs)
+    stream = direct_spatial_compiler_stitched_stream(descs)
+    spans = direct_spatial_pc_root6_expected_spans(len(stream))
+    return stream, spans
+
+def _build_direct_spatial_from_plan(n, input_nchw, weight_nchw, result, p, plan,
+                                    in_c, out_c, kh, kw, in_h, in_w, groups, stride):
+    del plan
+    descs, packed_input, packed_weight = build_direct_spatial_descs(
+        n, input_nchw, weight_nchw, p, in_c, out_c, kh, kw, in_h, in_w, groups, stride)
+    if not descs:
+        return []
+    return [make_direct_spatial_tile_desc(result, n, packed_input, packed_weight, descs, p)]
 
 def write_regs_to_npu_task(task_regs):
     def enable_npu_units_and_set_next_pc_addr(next_offset, next_task_regs_len, pc_core=0):
@@ -912,6 +1107,15 @@ def write_regs_to_npu_task(task_regs):
             npu_regcmd[base + len(regs) + i] = qword
         npu_tasks[idx].regcmd_addr = regcmd_mem_create.dma_addr + base * ctypes.sizeof(ctypes.c_uint64)
         npu_tasks[idx].regcfg_amount = len(regs) + len(tails)
+        npu_tasks[idx].op_idx = 0
+        npu_tasks[idx].enable_mask = 0xd
+        npu_tasks[idx].int_mask = (1 << 8) | (1 << 9)
+        npu_tasks[idx].int_clear = 0x1ffff
+
+def write_raw_task_spans(task_spans):
+    for idx, (start, amount) in enumerate(task_spans):
+        npu_tasks[idx].regcmd_addr = regcmd_mem_create.dma_addr + start * ctypes.sizeof(ctypes.c_uint64)
+        npu_tasks[idx].regcfg_amount = amount
         npu_tasks[idx].op_idx = 0
         npu_tasks[idx].enable_mask = 0xd
         npu_tasks[idx].int_mask = (1 << 8) | (1 << 9)
@@ -1031,21 +1235,21 @@ def classify_conv_plan(p, in_c, out_c, kh, kw, in_h, in_w, groups, split_method,
     is_spatial, is_depthwise = p["is_spatial"], p["is_depthwise"]
     if _needs_grouped_spatial_serial(p, groups):
         # Special handle: grouped spatial weights are serialized group-by-group until native grouped descriptors are known.
-        family = "grouped_serial"
+        family = FAMILY_GROUPED_SERIAL
     elif _needs_spatial_im2col_fallback(p, in_c, out_c, kh, kw, groups):
         # Special handle: dense spatial shapes with high weight/output pressure use Python im2col as a temporary fallback.
-        family = "spatial_im2col_fallback"
+        family = FAMILY_SPATIAL_IM2COL_FALLBACK
     elif _needs_spatial_oc_serial(p, in_c, out_c, groups):
         # Special handle: dense spatial OC tiling needs full data banks; low-IC 160x160 cases depend on this.
-        family = "spatial_oc_serial"
+        family = FAMILY_SPATIAL_OC_SERIAL
     elif is_depthwise and is_spatial:
         # Special handle: depthwise spatial uses channel/Y tiling and diagonal expanded weights.
-        family = "depthwise_spatial_tiled"
+        family = FAMILY_DEPTHWISE_SPATIAL_TILED
     elif not is_spatial and not is_depthwise and groups == 1 and _needs_pointwise_oc_tile_schedule(in_c, out_c, in_h, in_w, kh, kw, groups):
         # Special handle: large pointwise OC or height tiling uses flat 1x1 unpack and padded OC tiles.
-        family = "pointwise_oc"
+        family = FAMILY_POINTWISE_OC
     else:
-        family = "generic_yk"
+        family = FAMILY_GENERIC_YK
     return {"family": family, "tiles": tiles, "split_method": split_method}
 
 def make_grouped_input_tile(input_nchw_n, group, input_per_group):
@@ -1089,7 +1293,7 @@ def build_grouped_serial_descs(n, input_nchw, weight_nchw, result, p, in_c, out_
         packed_input, packed_weight, regs, out_count = materialize_conv_tile(
             gp, input_tile, group_weight, tile_out_c, input_per_group, kh, kw, 1)
         meta = tile_meta(0, out_h, oc_start, oc_end, gp, "grouped serial group slice")
-        descs.append(make_nc1hwc2_tile_desc("grouped_serial", result, n, packed_input, packed_weight, regs,
+        descs.append(make_nc1hwc2_tile_desc(FAMILY_GROUPED_SERIAL, result, n, packed_input, packed_weight, regs,
                                             oc_start, oc_end, 0, out_h, out_h, out_w,
                                             gp["align_out_c"], gp["out_width_stride"], out_count,
                                             meta=meta))
@@ -1112,7 +1316,7 @@ def build_spatial_oc_serial_descs(n, input_nchw, weight_nchw, result, p, in_c, o
                 tp, input_tile, tile_weight, tile_out_c, in_c, kh, kw, 1, full_data_bank=True)
             meta = tile_meta(out_row_start, tile_out_h, oc_start, oc_end, tp,
                              "dense spatial output-channel serial tile")
-            descs.append(make_nc1hwc2_tile_desc("spatial_oc_serial", result, n, packed_input, packed_weight, regs,
+            descs.append(make_nc1hwc2_tile_desc(FAMILY_SPATIAL_OC_SERIAL, result, n, packed_input, packed_weight, regs,
                                                 oc_start, oc_end, out_row_start, tile_out_h, tile_out_h,
                                                 out_w, tile_out_c, tp["out_width_stride"], out_count,
                                                 meta=meta))
@@ -1156,7 +1360,7 @@ def build_depthwise_spatial_descs(n, input_nchw, weight_nchw, result, p, out_c, 
                 tile_p, input_tile, tile_weight, tile_c, tile_c, kh, kw, tile_c)
             meta = tile_meta(out_row_start, tile_out_h, ch_start, ch_end, tile_p,
                              "depthwise spatial channel and row tile")
-            descs.append(make_nc1hwc2_tile_desc("depthwise_spatial_tiled", result, n, packed_input, packed_weight, regs,
+            descs.append(make_nc1hwc2_tile_desc(FAMILY_DEPTHWISE_SPATIAL_TILED, result, n, packed_input, packed_weight, regs,
                                                 ch_start, ch_end, out_row_start, tile_out_h, hw_tile_out_h,
                                                 out_w, tile_c, tile_p["out_width_stride"], out_count,
                                                 meta=meta))
@@ -1189,7 +1393,7 @@ def build_pointwise_oc_descs(n, input_nchw, weight_nchw, result, p, in_c, out_c,
                 tp, input_tile, tile_wt, hw_out_c, in_c, kh, kw, groups, full_data_bank=True)
             meta = tile_meta(out_row_start, tile_out_h, oc_start, oc_end, tp,
                              "pointwise output-channel tile")
-            descs.append(make_flat_1x1_tile_desc("pointwise_oc", result, n, packed_input, packed_weight, regs,
+            descs.append(make_flat_1x1_tile_desc(FAMILY_POINTWISE_OC, result, n, packed_input, packed_weight, regs,
                                                  oc_start, oc_end, out_row_start, tile_out_h, hw_tile_h,
                                                  out_w, tile_out_c, hw_out_c, tp["out_width_stride"], out_count,
                                                  meta=meta))
@@ -1249,7 +1453,7 @@ def build_spatial_im2col_fallback_descs(n, input_nchw, weight_nchw, result, p, i
             meta = tile_meta(out_row_start, tile_out_h, oc_start, oc_end, tile_p,
                              "temporary software im2col fallback",
                              direct_spatial_descs=direct_meta)
-            descs.append(make_flat_1x1_tile_desc("spatial_im2col_fallback", result, n, packed_input, packed_weight, regs,
+            descs.append(make_flat_1x1_tile_desc(FAMILY_SPATIAL_IM2COL_FALLBACK, result, n, packed_input, packed_weight, regs,
                                                  oc_start, oc_end, out_row_start, tile_out_h, hw_tile_h,
                                                  out_w, tile_out_c, hw_out_c, tile_p["out_width_stride"], out_count,
                                                  meta=meta))
@@ -1319,7 +1523,7 @@ def build_generic_yk_descs(n, input_nchw, weight_nchw, result, p, plan, in_c, kh
             full_data_bank=full_data_bank)
         meta = tile_meta(ys, y_span, ks, oc_end, tp,
                          "generic RKNN-style Y/K tile planner")
-        descs.append(make_nc1hwc2_tile_desc("generic_yk", result, n, packed_input, packed_weight, regs,
+        descs.append(make_nc1hwc2_tile_desc(FAMILY_GENERIC_YK, result, n, packed_input, packed_weight, regs,
                                             ks, oc_end, ys, y_span, y_span,
                                             p["out_w"], tile_out_c, tp["out_width_stride"], out_count,
                                             offset=out_offset, meta=meta))
@@ -1351,12 +1555,13 @@ def _build_generic_yk_from_plan(n, input_nchw, weight_nchw, result, p, plan, in_
         n, input_nchw, weight_nchw, result, p, plan, in_c, kh, kw, in_h, in_w, stride)
 
 DESCRIPTOR_PRODUCERS = {
-    "grouped_serial": _build_grouped_serial_from_plan,
-    "spatial_im2col_fallback": _build_spatial_im2col_fallback_from_plan,
-    "spatial_oc_serial": _build_spatial_oc_serial_from_plan,
-    "depthwise_spatial_tiled": _build_depthwise_spatial_from_plan,
-    "pointwise_oc": _build_pointwise_oc_from_plan,
-    "generic_yk": _build_generic_yk_from_plan,
+    FAMILY_DIRECT_SPATIAL: _build_direct_spatial_from_plan,
+    FAMILY_GROUPED_SERIAL: _build_grouped_serial_from_plan,
+    FAMILY_SPATIAL_IM2COL_FALLBACK: _build_spatial_im2col_fallback_from_plan,
+    FAMILY_SPATIAL_OC_SERIAL: _build_spatial_oc_serial_from_plan,
+    FAMILY_DEPTHWISE_SPATIAL_TILED: _build_depthwise_spatial_from_plan,
+    FAMILY_POINTWISE_OC: _build_pointwise_oc_from_plan,
+    FAMILY_GENERIC_YK: _build_generic_yk_from_plan,
 }
 
 def build_conv_descriptors(plan, n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
@@ -1367,25 +1572,19 @@ def build_conv_descriptors(plan, n, input_nchw, weight_nchw, result, p, in_c, ou
 def plan_conv_descriptors(n, input_nchw, weight_nchw, result, in_c, out_c, kh, kw, input_hw, groups=1, stride=1):
     in_h, in_w = input_hw
     p, split_method, tiles = _plan_conv_tiles(in_c, out_c, kh, kw, in_h, in_w, groups, stride)
+    if direct_spatial_hw_enabled():
+        descs = build_conv_descriptors({"family": FAMILY_DIRECT_SPATIAL}, n, input_nchw, weight_nchw, result, p,
+                                       in_c, out_c, kh, kw, in_h, in_w, groups, stride)
+        if descs:
+            return descs
     plan = classify_conv_plan(p, in_c, out_c, kh, kw, in_h, in_w, groups,
                               split_method, tiles)
     return build_conv_descriptors(plan, n, input_nchw, weight_nchw, result, p,
                                   in_c, out_c, kh, kw, in_h, in_w, groups, stride)
 
-def _run_direct_spatial_conv(n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
-    descs, packed_input, packed_weight = build_direct_spatial_descs(
-        n, input_nchw, weight_nchw, p, in_c, out_c, kh, kw, in_h, in_w, groups, stride)
-    if not descs:
-        return False
-    execute_direct_spatial_descriptors(descs, packed_input, packed_weight)
-    out_count = conv_output_count(p)
-    out = _read_nc1hwc2_output(out_count, out_c, p["out_h"], p["out_w"], p["out_width_stride"])
-    result[n] = out[:out_c]
-    return True
-
 def direct_spatial_hw_enabled():
-    return (os.environ.get("RK3588_CONV_DIRECT_SPATIAL") == "1" and
-            os.environ.get("RK3588_CONV_DIRECT_SPATIAL_UNSAFE") == "1")
+    return (os.environ.get(DIRECT_SPATIAL_ENV) == "1" and
+            os.environ.get(DIRECT_SPATIAL_UNSAFE_ENV) == "1")
 
 def run_conv(batch, in_c, out_c, kh, kw, input_hw, groups=1, stride=1):
     in_h, in_w = input_hw
@@ -1396,10 +1595,6 @@ def run_conv(batch, in_c, out_c, kh, kw, input_hw, groups=1, stride=1):
     result = np.zeros((batch, out_c, out_h, out_w), dtype=np.float16)
 
     for n in range(batch):
-        if direct_spatial_hw_enabled():
-            if _run_direct_spatial_conv(n, input_nchw, weight_nchw, result, p,
-                                        in_c, out_c, kh, kw, in_h, in_w, groups, stride):
-                continue
         descs = plan_conv_descriptors(n, input_nchw, weight_nchw, result,
                                       in_c, out_c, kh, kw, input_hw, groups, stride)
         execute_conv_descriptors(descs)
@@ -1463,140 +1658,140 @@ def run_shape_suite(shapes, requested):
 def conv_shapes():
     return [
         # -- 1x1 kernels (fully supported via NHWC mode + channel slicing for ic>=5) --
-        dict(name="conv2d_1x6_1x1_4x4",                batch=1, in_c=1,  in_h=4,  in_w=4,  out_c=6, weight_in_c=1, kh=1, kw=1, groups=1),
-        dict(name="conv2d_3x3_1x1_4x4",                batch=1, in_c=3,  in_h=4,  in_w=4,  out_c=3, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="conv2d_4x2_1x1_4x4",                batch=1, in_c=4,  in_h=4,  in_w=4,  out_c=2, weight_in_c=4, kh=1, kw=1, groups=1),
-        dict(name="conv2d_b1_c4_h9_w9_oc4_wic4_k1x1_g1",  batch=1, in_c=4,  in_h=9,  in_w=9,  out_c=4, weight_in_c=4, kh=1, kw=1, groups=1),
-        dict(name="conv2d_b1_c3_h52_w52_oc6_wic3_k1x1_g1", batch=1, in_c=3,  in_h=52, in_w=52, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="conv2d_b1_c96_h56_w56_oc24_wic96_k1x1_g1", batch=1, in_c=96, in_h=56, in_w=56, out_c=24, weight_in_c=96, kh=1, kw=1, groups=1),
-        dict(name="conv2d_b1_c144_h56_w56_oc24_wic144_k1x1_g1", batch=1, in_c=144, in_h=56, in_w=56, out_c=24, weight_in_c=144, kh=1, kw=1, groups=1),
-        dict(name="conv2d_b1_c144_h28_w28_oc32_wic144_k1x1_g1", batch=1, in_c=144, in_h=28, in_w=28, out_c=32, weight_in_c=144, kh=1, kw=1, groups=1),
-        dict(name="conv2d_b1_c192_h28_w28_oc32_wic192_k1x1_g1", batch=1, in_c=192, in_h=28, in_w=28, out_c=32, weight_in_c=192, kh=1, kw=1, groups=1),
-        dict(name="conv2d_b1_c192_h28_w28_oc16_wic192_k1x1_g1", batch=1, in_c=192, in_h=28, in_w=28, out_c=16, weight_in_c=192, kh=1, kw=1, groups=1),
-        dict(name="conv2d_b1_c256_h28_w28_oc32_wic256_k1x1_g1", batch=1, in_c=256, in_h=28, in_w=28, out_c=32, weight_in_c=256, kh=1, kw=1, groups=1),
-        dict(name="conv2d_16x16_1x1_8x8",              batch=1, in_c=16, in_h=8,  in_w=8,  out_c=16, weight_in_c=16, kh=1, kw=1, groups=1),
-        dict(name="conv2d_b1_c16_h32_w32_oc16_wic16_k1x1_g1", batch=1, in_c=16, in_h=32, in_w=32, out_c=16, weight_in_c=16, kh=1, kw=1, groups=1),
+        dict(name="conv2d_1x6_1x1_4x4",                batch=1, in_c=1,  in_h=4,  in_w=4,  out_c=6, kh=1, kw=1, groups=1),
+        dict(name="conv2d_3x3_1x1_4x4",                batch=1, in_c=3,  in_h=4,  in_w=4,  out_c=3, kh=1, kw=1, groups=1),
+        dict(name="conv2d_4x2_1x1_4x4",                batch=1, in_c=4,  in_h=4,  in_w=4,  out_c=2, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c4_h9_w9_oc4_wic4_k1x1_g1",  batch=1, in_c=4,  in_h=9,  in_w=9,  out_c=4, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c3_h52_w52_oc6_wic3_k1x1_g1", batch=1, in_c=3,  in_h=52, in_w=52, out_c=6, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c96_h56_w56_oc24_wic96_k1x1_g1", batch=1, in_c=96, in_h=56, in_w=56, out_c=24, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c144_h56_w56_oc24_wic144_k1x1_g1", batch=1, in_c=144, in_h=56, in_w=56, out_c=24, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c144_h28_w28_oc32_wic144_k1x1_g1", batch=1, in_c=144, in_h=28, in_w=28, out_c=32, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c192_h28_w28_oc32_wic192_k1x1_g1", batch=1, in_c=192, in_h=28, in_w=28, out_c=32, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c192_h28_w28_oc16_wic192_k1x1_g1", batch=1, in_c=192, in_h=28, in_w=28, out_c=16, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c256_h28_w28_oc32_wic256_k1x1_g1", batch=1, in_c=256, in_h=28, in_w=28, out_c=32, kh=1, kw=1, groups=1),
+        dict(name="conv2d_16x16_1x1_8x8",              batch=1, in_c=16, in_h=8,  in_w=8,  out_c=16, kh=1, kw=1, groups=1),
+        dict(name="conv2d_b1_c16_h32_w32_oc16_wic16_k1x1_g1", batch=1, in_c=16, in_h=32, in_w=32, out_c=16, kh=1, kw=1, groups=1),
 
         # -- Non-1x1 kernels (partial output -- known NPU hardware limitation) --
-        dict(name="conv2d_b1_c4_h9_w9_oc4_wic4_k3x3_g1",  batch=1, in_c=4,  in_h=9,  in_w=9,  out_c=4, weight_in_c=4, kh=3, kw=3, groups=1),
-        dict(name="conv2d_b1_c16_h18_w18_oc16_wic16_k3x3_g1", batch=1, in_c=16, in_h=18, in_w=18, out_c=16, weight_in_c=16, kh=3, kw=3, groups=1),
-        dict(name="conv2d_b2_c4_h9_w9_oc4_wic4_k3x3_g1",  batch=2, in_c=4,  in_h=9,  in_w=9,  out_c=4, weight_in_c=4, kh=3, kw=3, groups=1),
-        dict(name="conv2d_b1_c1_h5_w7_oc6_wic1_k3x3_g1",  batch=1, in_c=1,  in_h=5,  in_w=7,  out_c=6, weight_in_c=1, kh=3, kw=3, groups=1),
+        dict(name="conv2d_b1_c4_h9_w9_oc4_wic4_k3x3_g1",  batch=1, in_c=4,  in_h=9,  in_w=9,  out_c=4, kh=3, kw=3, groups=1),
+        dict(name="conv2d_b1_c16_h18_w18_oc16_wic16_k3x3_g1", batch=1, in_c=16, in_h=18, in_w=18, out_c=16, kh=3, kw=3, groups=1),
+        dict(name="conv2d_b2_c4_h9_w9_oc4_wic4_k3x3_g1",  batch=2, in_c=4,  in_h=9,  in_w=9,  out_c=4, kh=3, kw=3, groups=1),
+        dict(name="conv2d_b1_c1_h5_w7_oc6_wic1_k3x3_g1",  batch=1, in_c=1,  in_h=5,  in_w=7,  out_c=6, kh=3, kw=3, groups=1),
 
         # Depthwise
-        dict(name="conv2d_b1_c3_h11_w28_oc3_wic1_k3x3_g3", batch=1, in_c=3, in_h=11, in_w=28, out_c=3, weight_in_c=1, kh=3, kw=3, groups=3),
+        dict(name="conv2d_b1_c3_h11_w28_oc3_wic1_k3x3_g3", batch=1, in_c=3, in_h=11, in_w=28, out_c=3, kh=3, kw=3, groups=3),
 
         # Non-square kernels
-        dict(name="conv2d_3x6_1x3_5x5", batch=1, in_c=3, in_h=5, in_w=5, out_c=6, weight_in_c=3, kh=1, kw=3, groups=1),
+        dict(name="conv2d_3x6_1x3_5x5", batch=1, in_c=3, in_h=5, in_w=5, out_c=6, kh=1, kw=3, groups=1),
 
         # -- test_ops.py _test_conv2d(cin=3): (3,5,7) @ (6,kh,kw) --
-        dict(name="conv2d_b1_c3_h5_w7_oc6_wic1_k3x3_g3", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=1, kh=3, kw=3, groups=3),
-        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k2x1_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=2, kw=1, groups=1),
-        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k2x3_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=2, kw=3, groups=1),
-        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k2x5_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=2, kw=5, groups=1),
-        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k3x1_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=3, kw=1, groups=1),
-        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k3x3_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=3, kw=3, groups=1),
-        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k3x5_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, weight_in_c=3, kh=3, kw=5, groups=1),
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic1_k3x3_g3", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, kh=3, kw=3, groups=3),
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k2x1_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, kh=2, kw=1, groups=1),
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k2x3_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, kh=2, kw=3, groups=1),
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k2x5_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, kh=2, kw=5, groups=1),
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k3x1_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, kh=3, kw=1, groups=1),
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k3x3_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, kh=3, kw=3, groups=1),
+        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k3x5_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, kh=3, kw=5, groups=1),
 
         # -- test_ops.py _test_conv2d(cin=1): (1,5,7) @ (6,kh,kw) --
-        dict(name="conv2d_1x6_2x1_5x7", batch=1, in_c=1, in_h=5, in_w=7, out_c=6, weight_in_c=1, kh=2, kw=1, groups=1),
-        dict(name="conv2d_1x6_2x3_5x7", batch=1, in_c=1, in_h=5, in_w=7, out_c=6, weight_in_c=1, kh=2, kw=3, groups=1),
-        dict(name="conv2d_1x6_3x1_5x7_b", batch=1, in_c=1, in_h=5, in_w=7, out_c=6, weight_in_c=1, kh=3, kw=1, groups=1),
-        dict(name="conv2d_1x6_3x5_5x7",   batch=1, in_c=1, in_h=5, in_w=7, out_c=6, weight_in_c=1, kh=3, kw=5, groups=1),
+        dict(name="conv2d_1x6_2x1_5x7", batch=1, in_c=1, in_h=5, in_w=7, out_c=6, kh=2, kw=1, groups=1),
+        dict(name="conv2d_1x6_2x3_5x7", batch=1, in_c=1, in_h=5, in_w=7, out_c=6, kh=2, kw=3, groups=1),
+        dict(name="conv2d_1x6_3x1_5x7_b", batch=1, in_c=1, in_h=5, in_w=7, out_c=6, kh=3, kw=1, groups=1),
+        dict(name="conv2d_1x6_3x5_5x7",   batch=1, in_c=1, in_h=5, in_w=7, out_c=6, kh=3, kw=5, groups=1),
 
         # -- Grouped convs from test_ops.py --
-        dict(name="conv2d_b1_c4_h1_w1_oc2_wic2_k1x1_g2",     batch=1,  in_c=4,  in_h=1,  in_w=1,  out_c=2,  weight_in_c=2,  kh=1, kw=1, groups=2),
-        dict(name="conv2d_4x4_1x1_1x1_g2",                   batch=1,  in_c=4,  in_h=1,  in_w=1,  out_c=4,  weight_in_c=2,  kh=1, kw=1, groups=2),
-        dict(name="conv2d_b1_c32_h32_w32_oc32_wic1_k1x1_g32", batch=1, in_c=32, in_h=32, in_w=32, out_c=32, weight_in_c=1,  kh=1, kw=1, groups=32),
-        dict(name="conv2d_b1_c15_h5_w5_oc35_wic3_k3x3_g5",   batch=1,  in_c=15, in_h=5,  in_w=5,  out_c=35, weight_in_c=3,  kh=3, kw=3, groups=5),
+        dict(name="conv2d_b1_c4_h1_w1_oc2_wic2_k1x1_g2",     batch=1,  in_c=4,  in_h=1,  in_w=1,  out_c=2,  kh=1, kw=1, groups=2),
+        dict(name="conv2d_4x4_1x1_1x1_g2",                   batch=1,  in_c=4,  in_h=1,  in_w=1,  out_c=4,  kh=1, kw=1, groups=2),
+        dict(name="conv2d_b1_c32_h32_w32_oc32_wic1_k1x1_g32", batch=1, in_c=32, in_h=32, in_w=32, out_c=32,  kh=1, kw=1, groups=32),
+        dict(name="conv2d_b1_c15_h5_w5_oc35_wic3_k3x3_g5",   batch=1,  in_c=15, in_h=5,  in_w=5,  out_c=35,  kh=3, kw=3, groups=5),
 
         # -- Batch >1 coverage --
-        dict(name="conv2d_b2_c3_h11_w28_oc3_wic1_k3x3_g3", batch=2, in_c=3,  in_h=11, in_w=28, out_c=3,  weight_in_c=1, kh=3, kw=3, groups=3),
-        dict(name="conv2d_b4_c15_h5_w5_oc35_wic3_k3x3_g5", batch=4, in_c=15, in_h=5,  in_w=5,  out_c=35, weight_in_c=3, kh=3, kw=3, groups=5),
+        dict(name="conv2d_b2_c3_h11_w28_oc3_wic1_k3x3_g3", batch=2, in_c=3,  in_h=11, in_w=28, out_c=3, kh=3, kw=3, groups=3),
+        dict(name="conv2d_b4_c15_h5_w5_oc35_wic3_k3x3_g5", batch=4, in_c=15, in_h=5,  in_w=5,  out_c=35, kh=3, kw=3, groups=5),
 
         # -- Grouped output-channel variants --
-        dict(name="conv2d_b1_c4_h5_w5_oc4_wic2_k3x3_g2",   batch=1, in_c=4,  in_h=5, in_w=5, out_c=4,  weight_in_c=2, kh=3, kw=3, groups=2),
-        dict(name="conv2d_b1_c4_h5_w5_oc8_wic2_k3x3_g2",   batch=1, in_c=4,  in_h=5, in_w=5, out_c=8,  weight_in_c=2, kh=3, kw=3, groups=2),
-        dict(name="conv2d_b1_c4_h5_w5_oc12_wic2_k3x3_g2",  batch=1, in_c=4,  in_h=5, in_w=5, out_c=12, weight_in_c=2, kh=3, kw=3, groups=2),
-        dict(name="conv2d_b1_c6_h5_w5_oc6_wic2_k3x3_g3",   batch=1, in_c=6,  in_h=5, in_w=5, out_c=6,  weight_in_c=2, kh=3, kw=3, groups=3),
-        dict(name="conv2d_b1_c6_h5_w5_oc12_wic2_k3x3_g3",  batch=1, in_c=6,  in_h=5, in_w=5, out_c=12, weight_in_c=2, kh=3, kw=3, groups=3),
-        dict(name="conv2d_b1_c6_h5_w5_oc18_wic2_k3x3_g3",  batch=1, in_c=6,  in_h=5, in_w=5, out_c=18, weight_in_c=2, kh=3, kw=3, groups=3),
-        dict(name="conv2d_b1_c15_h5_w5_oc20_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=20, weight_in_c=3, kh=3, kw=3, groups=5),
-        dict(name="conv2d_b1_c15_h5_w5_oc25_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=25, weight_in_c=3, kh=3, kw=3, groups=5),
-        dict(name="conv2d_b1_c15_h5_w5_oc30_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=30, weight_in_c=3, kh=3, kw=3, groups=5),
-        dict(name="conv2d_b1_c15_h5_w5_oc40_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=40, weight_in_c=3, kh=3, kw=3, groups=5),
-        dict(name="conv2d_2x2_1x1_4x4",  batch=1, in_c=2, in_h=4, in_w=4, out_c=2, weight_in_c=2, kh=1, kw=1, groups=1),
-        dict(name="conv2d_8x8_1x1_5x5",       batch=1, in_c=8,  in_h=5,  in_w=5,  out_c=8,  weight_in_c=8,  kh=1, kw=1, groups=1),
-        dict(name="conv2d_10x20_3x3_9x9",     batch=1, in_c=10, in_h=9,  in_w=9,  out_c=20, weight_in_c=10, kh=3, kw=3, groups=1),
-        dict(name="conv2d_16x16_3x3_9x9",     batch=1, in_c=16, in_h=9,  in_w=9,  out_c=16, weight_in_c=16, kh=3, kw=3, groups=1),
-        dict(name="conv2d_2x4_3x3_6x6",       batch=1, in_c=2,  in_h=6,  in_w=6,  out_c=4,  weight_in_c=2,  kh=3, kw=3, groups=1),
-        dict(name="conv2d_2x4_2x2_5x5",       batch=1, in_c=2,  in_h=5,  in_w=5,  out_c=4,  weight_in_c=2,  kh=2, kw=2, groups=1),
-        dict(name="conv2d_1x32_5x5_10x10",    batch=1, in_c=1,  in_h=10, in_w=10, out_c=32, weight_in_c=1,  kh=5, kw=5, groups=1),
-        dict(name="conv2d_8x4_4x4_10x10",     batch=1, in_c=8,  in_h=10, in_w=10, out_c=4,  weight_in_c=8,  kh=4, kw=4, groups=1),
+        dict(name="conv2d_b1_c4_h5_w5_oc4_wic2_k3x3_g2",   batch=1, in_c=4,  in_h=5, in_w=5, out_c=4, kh=3, kw=3, groups=2),
+        dict(name="conv2d_b1_c4_h5_w5_oc8_wic2_k3x3_g2",   batch=1, in_c=4,  in_h=5, in_w=5, out_c=8, kh=3, kw=3, groups=2),
+        dict(name="conv2d_b1_c4_h5_w5_oc12_wic2_k3x3_g2",  batch=1, in_c=4,  in_h=5, in_w=5, out_c=12, kh=3, kw=3, groups=2),
+        dict(name="conv2d_b1_c6_h5_w5_oc6_wic2_k3x3_g3",   batch=1, in_c=6,  in_h=5, in_w=5, out_c=6, kh=3, kw=3, groups=3),
+        dict(name="conv2d_b1_c6_h5_w5_oc12_wic2_k3x3_g3",  batch=1, in_c=6,  in_h=5, in_w=5, out_c=12, kh=3, kw=3, groups=3),
+        dict(name="conv2d_b1_c6_h5_w5_oc18_wic2_k3x3_g3",  batch=1, in_c=6,  in_h=5, in_w=5, out_c=18, kh=3, kw=3, groups=3),
+        dict(name="conv2d_b1_c15_h5_w5_oc20_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=20, kh=3, kw=3, groups=5),
+        dict(name="conv2d_b1_c15_h5_w5_oc25_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=25, kh=3, kw=3, groups=5),
+        dict(name="conv2d_b1_c15_h5_w5_oc30_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=30, kh=3, kw=3, groups=5),
+        dict(name="conv2d_b1_c15_h5_w5_oc40_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=40, kh=3, kw=3, groups=5),
+        dict(name="conv2d_2x2_1x1_4x4",  batch=1, in_c=2, in_h=4, in_w=4, out_c=2, kh=1, kw=1, groups=1),
+        dict(name="conv2d_8x8_1x1_5x5",       batch=1, in_c=8,  in_h=5,  in_w=5,  out_c=8,  kh=1, kw=1, groups=1),
+        dict(name="conv2d_10x20_3x3_9x9",     batch=1, in_c=10, in_h=9,  in_w=9,  out_c=20, kh=3, kw=3, groups=1),
+        dict(name="conv2d_16x16_3x3_9x9",     batch=1, in_c=16, in_h=9,  in_w=9,  out_c=16, kh=3, kw=3, groups=1),
+        dict(name="conv2d_2x4_3x3_6x6",       batch=1, in_c=2,  in_h=6,  in_w=6,  out_c=4,  kh=3, kw=3, groups=1),
+        dict(name="conv2d_2x4_2x2_5x5",       batch=1, in_c=2,  in_h=5,  in_w=5,  out_c=4,  kh=2, kw=2, groups=1),
+        dict(name="conv2d_1x32_5x5_10x10",    batch=1, in_c=1,  in_h=10, in_w=10, out_c=32,  kh=5, kw=5, groups=1),
+        dict(name="conv2d_8x4_4x4_10x10",     batch=1, in_c=8,  in_h=10, in_w=10, out_c=4,  kh=4, kw=4, groups=1),
 
         # MobileNet layers
         # first spatial conv (RGB->32ch)
-        dict(name="conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1", batch=1, in_c=3, in_h=224, in_w=224, out_c=32, weight_in_c=3, kh=3, kw=3, groups=1),
+        dict(name="conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1", batch=1, in_c=3, in_h=224, in_w=224, out_c=32, kh=3, kw=3, groups=1),
         #  depthwise conv (3x3 sep)
-        dict(name="conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32", batch=1, in_c=32, in_h=112, in_w=112, out_c=32, weight_in_c=1, kh=3, kw=3, groups=32),
+        dict(name="conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32", batch=1, in_c=32, in_h=112, in_w=112, out_c=32, kh=3, kw=3, groups=32),
         # pointwise (1x1 projection)
-        dict(name="conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1", batch=1, in_c=32, in_h=112, in_w=112, out_c=64, weight_in_c=32, kh=1, kw=1, groups=1),
+        dict(name="conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1", batch=1, in_c=32, in_h=112, in_w=112, out_c=64, kh=1, kw=1, groups=1),
         # depthwise conv (64ch)
-        dict(name="conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64", batch=1, in_c=64, in_h=112, in_w=112, out_c=64, weight_in_c=1, kh=3, kw=3, groups=64),
+        dict(name="conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64", batch=1, in_c=64, in_h=112, in_w=112, out_c=64, kh=3, kw=3, groups=64),
         # pointwise expansion
-        dict(name="conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1", batch=1, in_c=64, in_h=56, in_w=56, out_c=128, weight_in_c=64, kh=1, kw=1, groups=1),
+        dict(name="conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1", batch=1, in_c=64, in_h=56, in_w=56, out_c=128, kh=1, kw=1, groups=1),
         # depthwise conv (128ch)
-        dict(name="conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128", batch=1, in_c=128, in_h=56, in_w=56, out_c=128, weight_in_c=1, kh=3, kw=3, groups=128),
+        dict(name="conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128", batch=1, in_c=128, in_h=56, in_w=56, out_c=128, kh=3, kw=3, groups=128),
         # pointwise (1x1 projection, same-channel)
-        dict(name="conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1", batch=1, in_c=128, in_h=56, in_w=56, out_c=128, weight_in_c=128, kh=1, kw=1, groups=1),
+        dict(name="conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1", batch=1, in_c=128, in_h=56, in_w=56, out_c=128, kh=1, kw=1, groups=1),
         # Pointwise 128->256
-        dict(name="conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1", batch=1, in_c=128, in_h=28, in_w=28, out_c=256, weight_in_c=128, kh=1, kw=1, groups=1),
+        dict(name="conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1", batch=1, in_c=128, in_h=28, in_w=28, out_c=256, kh=1, kw=1, groups=1),
         # Depthwise 256x28
-        dict(name="conv2d_cc_b1_c256_h28_w28_oc256_wic1_k3x3_g256", batch=1, in_c=256, in_h=28, in_w=28, out_c=256, weight_in_c=1, kh=3, kw=3, groups=256),
+        dict(name="conv2d_cc_b1_c256_h28_w28_oc256_wic1_k3x3_g256", batch=1, in_c=256, in_h=28, in_w=28, out_c=256, kh=3, kw=3, groups=256),
         # Pointwise 256->256
-        dict(name="conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1", batch=1, in_c=256, in_h=28, in_w=28, out_c=256, weight_in_c=256, kh=1, kw=1, groups=1),
+        dict(name="conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1", batch=1, in_c=256, in_h=28, in_w=28, out_c=256, kh=1, kw=1, groups=1),
         # Pointwise 256->512
-        dict(name="conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1", batch=1, in_c=256, in_h=14, in_w=14, out_c=512, weight_in_c=256, kh=1, kw=1, groups=1),
+        dict(name="conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1", batch=1, in_c=256, in_h=14, in_w=14, out_c=512, kh=1, kw=1, groups=1),
         # Depthwise 512x14
-        dict(name="conv2d_cc_b1_c512_h14_w14_oc512_wic1_k3x3_g512", batch=1, in_c=512, in_h=14, in_w=14, out_c=512, weight_in_c=1, kh=3, kw=3, groups=512),
+        dict(name="conv2d_cc_b1_c512_h14_w14_oc512_wic1_k3x3_g512", batch=1, in_c=512, in_h=14, in_w=14, out_c=512, kh=3, kw=3, groups=512),
         # Pointwise 512->512
-        dict(name="conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1", batch=1, in_c=512, in_h=14, in_w=14, out_c=512, weight_in_c=512, kh=1, kw=1, groups=1),
+        dict(name="conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1", batch=1, in_c=512, in_h=14, in_w=14, out_c=512, kh=1, kw=1, groups=1),
         # 7x7 and classifier-head fixes
-        dict(name="conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1", batch=1, in_c=512, in_h=7, in_w=7, out_c=1024, weight_in_c=512, kh=1, kw=1, groups=1),
-        dict(name="conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024", batch=1, in_c=1024, in_h=7, in_w=7, out_c=1024, weight_in_c=1, kh=3, kw=3, groups=1024),
-        dict(name="conv2d_cc_b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1", batch=1, in_c=1024, in_h=7, in_w=7, out_c=1024, weight_in_c=1024, kh=1, kw=1, groups=1),
-        dict(name="conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024", batch=1, in_c=1024, in_h=7, in_w=7, out_c=1024, weight_in_c=1, kh=7, kw=7, groups=1024),
-        dict(name="conv2d_cc_b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1", batch=1, in_c=1024, in_h=1, in_w=1, out_c=1001, weight_in_c=1024, kh=1, kw=1, groups=1),
+        dict(name="conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1", batch=1, in_c=512, in_h=7, in_w=7, out_c=1024, kh=1, kw=1, groups=1),
+        dict(name="conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024", batch=1, in_c=1024, in_h=7, in_w=7, out_c=1024, kh=3, kw=3, groups=1024),
+        dict(name="conv2d_cc_b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1", batch=1, in_c=1024, in_h=7, in_w=7, out_c=1024, kh=1, kw=1, groups=1),
+        dict(name="conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024", batch=1, in_c=1024, in_h=7, in_w=7, out_c=1024, kh=7, kw=7, groups=1024),
+        dict(name="conv2d_cc_b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1", batch=1, in_c=1024, in_h=1, in_w=1, out_c=1001, kh=1, kw=1, groups=1),
 
         # conv1d expressed as conv2d: input H=1, W=input_size; kernel H=1, W=kernel_size.
-        dict(name="conv1d_bs1_as_conv2d", batch=1, in_c=1, in_h=1, in_w=11, out_c=6, weight_in_c=1, kh=1, kw=1, groups=1),
-        dict(name="conv1d_bs8_as_conv2d", batch=8, in_c=1, in_h=1, in_w=11, out_c=6, weight_in_c=1, kh=1, kw=1, groups=1),
-        dict(name="conv1d_bs1_612_as_conv2d", batch=1, in_c=1, in_h=1, in_w=11, out_c=6, weight_in_c=1, kh=1, kw=2, groups=1),
-        dict(name="conv1d_bs1_615_as_conv2d", batch=1, in_c=1, in_h=1, in_w=11, out_c=6, weight_in_c=1, kh=1, kw=5, groups=1),
-        dict(name="conv1d_bs1_1311_631_as_conv2d", batch=1, in_c=3, in_h=1, in_w=11, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="conv1d_bs1_1311_632_as_conv2d", batch=1, in_c=3, in_h=1, in_w=11, out_c=6, weight_in_c=3, kh=1, kw=2, groups=1),
-        dict(name="conv1d_bs1_1311_635_as_conv2d", batch=1, in_c=3, in_h=1, in_w=11, out_c=6, weight_in_c=3, kh=1, kw=5, groups=1),
-        dict(name="conv1d_bs1_1311_615_g3_as_conv2d", batch=1, in_c=3, in_h=1, in_w=11, out_c=6, weight_in_c=1, kh=1, kw=5, groups=3),
-        dict(name="conv1d_bs8_8111_611_as_conv2d", batch=8, in_c=1, in_h=1, in_w=11, out_c=6, weight_in_c=1, kh=1, kw=1, groups=1),
-        dict(name="conv1d_bs8_8111_612_a_as_conv2d", batch=8, in_c=1, in_h=1, in_w=11, out_c=6, weight_in_c=1, kh=1, kw=2, groups=1),
-        dict(name="conv1d_bs8_8111_612_b_as_conv2d", batch=8, in_c=1, in_h=1, in_w=11, out_c=6, weight_in_c=1, kh=1, kw=2, groups=1),
-        dict(name="conv1d_bs8_8111_615_as_conv2d", batch=8, in_c=1, in_h=1, in_w=11, out_c=6, weight_in_c=1, kh=1, kw=5, groups=1),
-        dict(name="conv1d_bs8_8311_631_as_conv2d", batch=8, in_c=3, in_h=1, in_w=11, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="conv1d_bs8_8311_632_as_conv2d", batch=8, in_c=3, in_h=1, in_w=11, out_c=6, weight_in_c=3, kh=1, kw=2, groups=1),
-        dict(name="conv1d_bs8_8311_635_a_as_conv2d", batch=8, in_c=3, in_h=1, in_w=11, out_c=6, weight_in_c=3, kh=1, kw=5, groups=1),
-        dict(name="conv1d_bs8_8311_635_g3_as_conv2d", batch=8, in_c=3, in_h=1, in_w=11, out_c=6, weight_in_c=1, kh=1, kw=5, groups=3),
+        dict(name="conv1d_bs1_as_conv2d", batch=1, in_c=1, in_h=1, in_w=11, out_c=6, kh=1, kw=1, groups=1),
+        dict(name="conv1d_bs8_as_conv2d", batch=8, in_c=1, in_h=1, in_w=11, out_c=6, kh=1, kw=1, groups=1),
+        dict(name="conv1d_bs1_612_as_conv2d", batch=1, in_c=1, in_h=1, in_w=11, out_c=6, kh=1, kw=2, groups=1),
+        dict(name="conv1d_bs1_615_as_conv2d", batch=1, in_c=1, in_h=1, in_w=11, out_c=6, kh=1, kw=5, groups=1),
+        dict(name="conv1d_bs1_1311_631_as_conv2d", batch=1, in_c=3, in_h=1, in_w=11, out_c=6, kh=1, kw=1, groups=1),
+        dict(name="conv1d_bs1_1311_632_as_conv2d", batch=1, in_c=3, in_h=1, in_w=11, out_c=6, kh=1, kw=2, groups=1),
+        dict(name="conv1d_bs1_1311_635_as_conv2d", batch=1, in_c=3, in_h=1, in_w=11, out_c=6, kh=1, kw=5, groups=1),
+        dict(name="conv1d_bs1_1311_615_g3_as_conv2d", batch=1, in_c=3, in_h=1, in_w=11, out_c=6, kh=1, kw=5, groups=3),
+        dict(name="conv1d_bs8_8111_611_as_conv2d", batch=8, in_c=1, in_h=1, in_w=11, out_c=6, kh=1, kw=1, groups=1),
+        dict(name="conv1d_bs8_8111_612_a_as_conv2d", batch=8, in_c=1, in_h=1, in_w=11, out_c=6, kh=1, kw=2, groups=1),
+        dict(name="conv1d_bs8_8111_612_b_as_conv2d", batch=8, in_c=1, in_h=1, in_w=11, out_c=6, kh=1, kw=2, groups=1),
+        dict(name="conv1d_bs8_8111_615_as_conv2d", batch=8, in_c=1, in_h=1, in_w=11, out_c=6, kh=1, kw=5, groups=1),
+        dict(name="conv1d_bs8_8311_631_as_conv2d", batch=8, in_c=3, in_h=1, in_w=11, out_c=6, kh=1, kw=1, groups=1),
+        dict(name="conv1d_bs8_8311_632_as_conv2d", batch=8, in_c=3, in_h=1, in_w=11, out_c=6, kh=1, kw=2, groups=1),
+        dict(name="conv1d_bs8_8311_635_a_as_conv2d", batch=8, in_c=3, in_h=1, in_w=11, out_c=6, kh=1, kw=5, groups=1),
+        dict(name="conv1d_bs8_8311_635_g3_as_conv2d", batch=8, in_c=3, in_h=1, in_w=11, out_c=6, kh=1, kw=5, groups=3),
 
         # -- Large spatial 1x1 conv where IC=3, OC=6 (fixed; promoted above) --
-        dict(name="1x3_54x54_k1",  batch=1, in_c=3, in_h=54, in_w=54, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="1x3_56x56_k1",  batch=1, in_c=3, in_h=56, in_w=56, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="1x3_58x58_k1",  batch=1, in_c=3, in_h=58, in_w=58, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="1x3_60x60_k1",  batch=1, in_c=3, in_h=60, in_w=60, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="1x3_62x62_k1",  batch=1, in_c=3, in_h=62, in_w=62, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="1x3_64x64_k1",  batch=1, in_c=3, in_h=64, in_w=64, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="1x3_66x66_k1",  batch=1, in_c=3, in_h=66, in_w=66, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="1x3_68x68_k1",  batch=1, in_c=3, in_h=68, in_w=68, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="1x3_70x70_k1",  batch=1, in_c=3, in_h=70, in_w=70, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
-        dict(name="1x3_72x72_k1",  batch=1, in_c=3, in_h=72, in_w=72, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1),
+        dict(name="1x3_54x54_k1",  batch=1, in_c=3, in_h=54, in_w=54, out_c=6, kh=1, kw=1, groups=1),
+        dict(name="1x3_56x56_k1",  batch=1, in_c=3, in_h=56, in_w=56, out_c=6, kh=1, kw=1, groups=1),
+        dict(name="1x3_58x58_k1",  batch=1, in_c=3, in_h=58, in_w=58, out_c=6, kh=1, kw=1, groups=1),
+        dict(name="1x3_60x60_k1",  batch=1, in_c=3, in_h=60, in_w=60, out_c=6, kh=1, kw=1, groups=1),
+        dict(name="1x3_62x62_k1",  batch=1, in_c=3, in_h=62, in_w=62, out_c=6, kh=1, kw=1, groups=1),
+        dict(name="1x3_64x64_k1",  batch=1, in_c=3, in_h=64, in_w=64, out_c=6, kh=1, kw=1, groups=1),
+        dict(name="1x3_66x66_k1",  batch=1, in_c=3, in_h=66, in_w=66, out_c=6, kh=1, kw=1, groups=1),
+        dict(name="1x3_68x68_k1",  batch=1, in_c=3, in_h=68, in_w=68, out_c=6, kh=1, kw=1, groups=1),
+        dict(name="1x3_70x70_k1",  batch=1, in_c=3, in_h=70, in_w=70, out_c=6, kh=1, kw=1, groups=1),
+        dict(name="1x3_72x72_k1",  batch=1, in_c=3, in_h=72, in_w=72, out_c=6, kh=1, kw=1, groups=1),
 
         # -- 1x1 conv large input channel >> output channel (wrong numerical result) --
         # From mobilenetv2 depthwise expand/project layers
@@ -1606,128 +1801,129 @@ def conv_shapes():
         # fixed/promoted above: b1_c192_h28_w28_oc32_wic192_k1x1_g1
         # fixed/promoted above: b1_c192_h28_w28_oc16_wic192_k1x1_g1
         # fixed/promoted above: b1_c256_h28_w28_oc32_wic256_k1x1_g1
-        dict(name="b1_c256_h14_w14_oc512_wic256_k1x1_g1",  batch=1, in_c=256, in_h=14,  in_w=14,  out_c=512, weight_in_c=256, kh=1, kw=1, groups=1),
-        dict(name="b1_c384_h14_w14_oc96_wic384_k1x1_g1",   batch=1, in_c=384, in_h=14,  in_w=14,  out_c=96,  weight_in_c=384, kh=1, kw=1, groups=1),
-        dict(name="b1_c480_h14_w14_oc96_wic480_k1x1_g1",   batch=1, in_c=480, in_h=14,  in_w=14,  out_c=96,  weight_in_c=480, kh=1, kw=1, groups=1),
-        dict(name="b1_c480_h14_w14_oc16_wic480_k1x1_g1",   batch=1, in_c=480, in_h=14,  in_w=14,  out_c=16,  weight_in_c=480, kh=1, kw=1, groups=1),
-        dict(name="b1_c512_h14_w14_oc112_wic512_k1x1_g1",  batch=1, in_c=512, in_h=14,  in_w=14,  out_c=112, weight_in_c=512, kh=1, kw=1, groups=1),
-        dict(name="b1_c512_h14_w14_oc24_wic512_k1x1_g1",   batch=1, in_c=512, in_h=14,  in_w=14,  out_c=24,  weight_in_c=512, kh=1, kw=1, groups=1),
-        dict(name="b1_c512_h14_w14_oc32_wic512_k1x1_g1",   batch=1, in_c=512, in_h=14,  in_w=14,  out_c=32,  weight_in_c=512, kh=1, kw=1, groups=1),
-        dict(name="b1_c512_h14_w14_oc512_wic512_k1x1_g1",  batch=1, in_c=512, in_h=14,  in_w=14,  out_c=512, weight_in_c=512, kh=1, kw=1, groups=1),
-        dict(name="b1_c512_h7_w7_oc1024_wic512_k1x1_g1",   batch=1, in_c=512, in_h=7,   in_w=7,   out_c=1024, weight_in_c=512, kh=1, kw=1, groups=1),
-        dict(name="b1_c528_h14_w14_oc256_wic528_k1x1_g1",  batch=1, in_c=528, in_h=14,  in_w=14,  out_c=256, weight_in_c=528, kh=1, kw=1, groups=1),
-        dict(name="b1_c528_h14_w14_oc160_wic528_k1x1_g1",  batch=1, in_c=528, in_h=14,  in_w=14,  out_c=160, weight_in_c=528, kh=1, kw=1, groups=1),
-        dict(name="b1_c528_h14_w14_oc32_wic528_k1x1_g1",   batch=1, in_c=528, in_h=14,  in_w=14,  out_c=32,  weight_in_c=528, kh=1, kw=1, groups=1),
-        dict(name="b1_c528_h14_w14_oc128_wic528_k1x1_g1",  batch=1, in_c=528, in_h=14,  in_w=14,  out_c=128, weight_in_c=528, kh=1, kw=1, groups=1),
-        dict(name="b1_c576_h14_w14_oc96_wic576_k1x1_g1",   batch=1, in_c=576, in_h=14,  in_w=14,  out_c=96,  weight_in_c=576, kh=1, kw=1, groups=1),
-        dict(name="b1_c832_h7_w7_oc48_wic832_k1x1_g1",     batch=1, in_c=832, in_h=7,   in_w=7,   out_c=48,  weight_in_c=832, kh=1, kw=1, groups=1),
-        dict(name="b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1", batch=1, in_c=1024, in_h=7,  in_w=7,   out_c=1024, weight_in_c=1024, kh=1, kw=1, groups=1),
-        dict(name="b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1", batch=1, in_c=1024, in_h=1,  in_w=1,   out_c=1001, weight_in_c=1024, kh=1, kw=1, groups=1),
-        dict(name="b1_c1280_h10_w10_oc24_wic1280_k1x1_g1", batch=1, in_c=1280, in_h=10, in_w=10,  out_c=24,  weight_in_c=1280, kh=1, kw=1, groups=1),
-        dict(name="b1_c1280_h10_w10_oc546_wic1280_k1x1_g1", batch=1, in_c=1280, in_h=10, in_w=10, out_c=546, weight_in_c=1280, kh=1, kw=1, groups=1),
+        dict(name="b1_c256_h14_w14_oc512_wic256_k1x1_g1",  batch=1, in_c=256, in_h=14,  in_w=14,  out_c=512, kh=1, kw=1, groups=1),
+        dict(name="b1_c384_h14_w14_oc96_wic384_k1x1_g1",   batch=1, in_c=384, in_h=14,  in_w=14,  out_c=96, kh=1, kw=1, groups=1),
+        dict(name="b1_c480_h14_w14_oc96_wic480_k1x1_g1",   batch=1, in_c=480, in_h=14,  in_w=14,  out_c=96, kh=1, kw=1, groups=1),
+        dict(name="b1_c480_h14_w14_oc16_wic480_k1x1_g1",   batch=1, in_c=480, in_h=14,  in_w=14,  out_c=16, kh=1, kw=1, groups=1),
+        dict(name="b1_c512_h14_w14_oc112_wic512_k1x1_g1",  batch=1, in_c=512, in_h=14,  in_w=14,  out_c=112, kh=1, kw=1, groups=1),
+        dict(name="b1_c512_h14_w14_oc24_wic512_k1x1_g1",   batch=1, in_c=512, in_h=14,  in_w=14,  out_c=24, kh=1, kw=1, groups=1),
+        dict(name="b1_c512_h14_w14_oc32_wic512_k1x1_g1",   batch=1, in_c=512, in_h=14,  in_w=14,  out_c=32, kh=1, kw=1, groups=1),
+        dict(name="b1_c512_h14_w14_oc512_wic512_k1x1_g1",  batch=1, in_c=512, in_h=14,  in_w=14,  out_c=512, kh=1, kw=1, groups=1),
+        dict(name="b1_c512_h7_w7_oc1024_wic512_k1x1_g1",   batch=1, in_c=512, in_h=7,   in_w=7,   out_c=1024, kh=1, kw=1, groups=1),
+        dict(name="b1_c528_h14_w14_oc256_wic528_k1x1_g1",  batch=1, in_c=528, in_h=14,  in_w=14,  out_c=256, kh=1, kw=1, groups=1),
+        dict(name="b1_c528_h14_w14_oc160_wic528_k1x1_g1",  batch=1, in_c=528, in_h=14,  in_w=14,  out_c=160, kh=1, kw=1, groups=1),
+        dict(name="b1_c528_h14_w14_oc32_wic528_k1x1_g1",   batch=1, in_c=528, in_h=14,  in_w=14,  out_c=32, kh=1, kw=1, groups=1),
+        dict(name="b1_c528_h14_w14_oc128_wic528_k1x1_g1",  batch=1, in_c=528, in_h=14,  in_w=14,  out_c=128, kh=1, kw=1, groups=1),
+        dict(name="b1_c576_h14_w14_oc96_wic576_k1x1_g1",   batch=1, in_c=576, in_h=14,  in_w=14,  out_c=96, kh=1, kw=1, groups=1),
+        dict(name="b1_c832_h7_w7_oc48_wic832_k1x1_g1",     batch=1, in_c=832, in_h=7,   in_w=7,   out_c=48, kh=1, kw=1, groups=1),
+        dict(name="b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1", batch=1, in_c=1024, in_h=7,  in_w=7,   out_c=1024, kh=1, kw=1, groups=1),
+        dict(name="b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1", batch=1, in_c=1024, in_h=1,  in_w=1,   out_c=1001, kh=1, kw=1, groups=1),
+        dict(name="b1_c1280_h10_w10_oc24_wic1280_k1x1_g1", batch=1, in_c=1280, in_h=10, in_w=10,  out_c=24, kh=1, kw=1, groups=1),
+        dict(name="b1_c1280_h10_w10_oc546_wic1280_k1x1_g1", batch=1, in_c=1280, in_h=10, in_w=10, out_c=546, kh=1, kw=1, groups=1),
 
-        dict(name="b1_c32_h112_w112_oc32_wic1_k3x3_g32",   batch=1, in_c=32,  in_h=112, in_w=112, out_c=32,  weight_in_c=1,  kh=3, kw=3, groups=32),
-        dict(name="b1_c64_h112_w112_oc64_wic1_k3x3_g64",   batch=1, in_c=64,  in_h=112, in_w=112, out_c=64,  weight_in_c=1,  kh=3, kw=3, groups=64),
-        dict(name="b1_c128_h56_w56_oc128_wic1_k3x3_g128",  batch=1, in_c=128, in_h=56,  in_w=56,  out_c=128, weight_in_c=1,  kh=3, kw=3, groups=128),
-        dict(name="b1_c256_h28_w28_oc256_wic1_k3x3_g256",  batch=1, in_c=256, in_h=28,  in_w=28,  out_c=256, weight_in_c=1,  kh=3, kw=3, groups=256),
-        dict(name="b1_c512_h14_w14_oc512_wic1_k3x3_g512",  batch=1, in_c=512, in_h=14,  in_w=14,  out_c=512, weight_in_c=1,  kh=3, kw=3, groups=512),
-        dict(name="b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024", batch=1, in_c=1024, in_h=7,  in_w=7,   out_c=1024, weight_in_c=1,  kh=3, kw=3, groups=1024),
-        dict(name="b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024", batch=1, in_c=1024, in_h=7,  in_w=7,   out_c=1024, weight_in_c=1,  kh=7, kw=7, groups=1024),
+        dict(name="b1_c32_h112_w112_oc32_wic1_k3x3_g32",   batch=1, in_c=32,  in_h=112, in_w=112, out_c=32,  kh=3, kw=3, groups=32),
+        dict(name="b1_c64_h112_w112_oc64_wic1_k3x3_g64",   batch=1, in_c=64,  in_h=112, in_w=112, out_c=64,  kh=3, kw=3, groups=64),
+        dict(name="b1_c128_h56_w56_oc128_wic1_k3x3_g128",  batch=1, in_c=128, in_h=56,  in_w=56,  out_c=128,  kh=3, kw=3, groups=128),
+        dict(name="b1_c256_h28_w28_oc256_wic1_k3x3_g256",  batch=1, in_c=256, in_h=28,  in_w=28,  out_c=256,  kh=3, kw=3, groups=256),
+        dict(name="b1_c512_h14_w14_oc512_wic1_k3x3_g512",  batch=1, in_c=512, in_h=14,  in_w=14,  out_c=512,  kh=3, kw=3, groups=512),
+        dict(name="b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024", batch=1, in_c=1024, in_h=7,  in_w=7,   out_c=1024,  kh=3, kw=3, groups=1024),
+        dict(name="b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024", batch=1, in_c=1024, in_h=7,  in_w=7,   out_c=1024,  kh=7, kw=7, groups=1024),
 
-        dict(name="b1_c32_h112_w112_oc16_wic32_k1x1_g1",   batch=1, in_c=32,  in_h=112, in_w=112, out_c=16,  weight_in_c=32,  kh=1, kw=1, groups=1),
-        dict(name="b1_c32_h112_w112_oc64_wic32_k1x1_g1",   batch=1, in_c=32,  in_h=112, in_w=112, out_c=64,  weight_in_c=32,  kh=1, kw=1, groups=1),
-        dict(name="b1_c64_h56_w56_oc128_wic64_k1x1_g1",    batch=1, in_c=64,  in_h=56,  in_w=56,  out_c=128, weight_in_c=64,  kh=1, kw=1, groups=1),
-        dict(name="b1_c128_h56_w56_oc128_wic128_k1x1_g1",  batch=1, in_c=128, in_h=56,  in_w=56,  out_c=128, weight_in_c=128, kh=1, kw=1, groups=1),
-        dict(name="b1_c128_h28_w28_oc256_wic128_k1x1_g1",  batch=1, in_c=128, in_h=28,  in_w=28,  out_c=256, weight_in_c=128, kh=1, kw=1, groups=1),
-        dict(name="b1_c256_h28_w28_oc256_wic256_k1x1_g1",  batch=1, in_c=256, in_h=28,  in_w=28,  out_c=256, weight_in_c=256, kh=1, kw=1, groups=1),
-        dict(name="b1_c3_h224_w224_oc32_wic3_k3x3_g1",     batch=1, in_c=3,   in_h=224, in_w=224, out_c=32,  weight_in_c=3,   kh=3, kw=3, groups=1),
+        dict(name="b1_c32_h112_w112_oc16_wic32_k1x1_g1",   batch=1, in_c=32,  in_h=112, in_w=112, out_c=16,  kh=1, kw=1, groups=1),
+        dict(name="b1_c32_h112_w112_oc64_wic32_k1x1_g1",   batch=1, in_c=32,  in_h=112, in_w=112, out_c=64,  kh=1, kw=1, groups=1),
+        dict(name="b1_c64_h56_w56_oc128_wic64_k1x1_g1",    batch=1, in_c=64,  in_h=56,  in_w=56,  out_c=128,  kh=1, kw=1, groups=1),
+        dict(name="b1_c128_h56_w56_oc128_wic128_k1x1_g1",  batch=1, in_c=128, in_h=56,  in_w=56,  out_c=128, kh=1, kw=1, groups=1),
+        dict(name="b1_c128_h28_w28_oc256_wic128_k1x1_g1",  batch=1, in_c=128, in_h=28,  in_w=28,  out_c=256, kh=1, kw=1, groups=1),
+        dict(name="b1_c256_h28_w28_oc256_wic256_k1x1_g1",  batch=1, in_c=256, in_h=28,  in_w=28,  out_c=256, kh=1, kw=1, groups=1),
+        dict(name="b1_c3_h224_w224_oc32_wic3_k3x3_g1",     batch=1, in_c=3,   in_h=224, in_w=224, out_c=32,   kh=3, kw=3, groups=1),
 
-        dict(name="b1_c96_h112_w112_oc96_wic1_k3x3_g96_s1_pvalid", batch=1, in_c=96, in_h=112, in_w=112, out_c=96, weight_in_c=1, kh=3, kw=3, groups=96),
-        dict(name="b1_c144_h56_w56_oc144_wic1_k3x3_g144_s1_pvalid", batch=1, in_c=144, in_h=56, in_w=56, out_c=144, weight_in_c=1, kh=3, kw=3, groups=144),
-        dict(name="b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid", batch=1, in_c=192, in_h=28, in_w=28, out_c=96, weight_in_c=192, kh=1, kw=1, groups=1),
-        dict(name="b1_c32_h14_w14_oc64_wic32_k3x3_g1_s1_pvalid", batch=1, in_c=32, in_h=14, in_w=14, out_c=64, weight_in_c=32, kh=3, kw=3, groups=1),
-        dict(name="b1_c528_h14_w14_oc256_wic528_k1x1_g1_s1_pvalid", batch=1, in_c=528, in_h=14, in_w=14, out_c=256, weight_in_c=528, kh=1, kw=1, groups=1),
-        dict(name="b1_c528_h14_w14_oc160_wic528_k1x1_g1_s1_pvalid", batch=1, in_c=528, in_h=14, in_w=14, out_c=160, weight_in_c=528, kh=1, kw=1, groups=1),
-        dict(name="b1_c160_h14_w14_oc320_wic160_k3x3_g1_s1_pvalid", batch=1, in_c=160, in_h=14, in_w=14, out_c=320, weight_in_c=160, kh=3, kw=3, groups=1),
-        dict(name="b1_c528_h14_w14_oc32_wic528_k1x1_g1_s1_pvalid", batch=1, in_c=528, in_h=14, in_w=14, out_c=32, weight_in_c=528, kh=1, kw=1, groups=1),
-        dict(name="b1_c32_h14_w14_oc128_wic32_k3x3_g1_s1_pvalid", batch=1, in_c=32, in_h=14, in_w=14, out_c=128, weight_in_c=32, kh=3, kw=3, groups=1),
-        dict(name="b1_c528_h14_w14_oc128_wic528_k1x1_g1_s1_pvalid", batch=1, in_c=528, in_h=14, in_w=14, out_c=128, weight_in_c=528, kh=1, kw=1, groups=1),
-        dict(name="b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid", batch=1, in_c=160, in_h=7, in_w=7, out_c=320, weight_in_c=160, kh=3, kw=3, groups=1),
-        dict(name="b1_c32_h7_w7_oc128_wic32_k3x3_g1_s1_pvalid", batch=1, in_c=32, in_h=7, in_w=7, out_c=128, weight_in_c=32, kh=3, kw=3, groups=1),
-        dict(name="b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid", batch=1, in_c=192, in_h=7, in_w=7, out_c=384, weight_in_c=192, kh=3, kw=3, groups=1),
-        dict(name="b1_c832_h7_w7_oc48_wic832_k1x1_g1_s1_pvalid", batch=1, in_c=832, in_h=7, in_w=7, out_c=48, weight_in_c=832, kh=1, kw=1, groups=1),
-        dict(name="b1_c32_h150_w150_oc32_wic1_k3x3_g32_s1_pvalid", batch=1, in_c=32, in_h=150, in_w=150, out_c=32, weight_in_c=1, kh=3, kw=3, groups=32),
-        dict(name="b1_c32_h150_w150_oc16_wic32_k1x1_g1_s1_pvalid", batch=1, in_c=32, in_h=150, in_w=150, out_c=16, weight_in_c=32, kh=1, kw=1, groups=1),
-        dict(name="b1_c16_h150_w150_oc96_wic16_k1x1_g1_s1_pvalid", batch=1, in_c=16, in_h=150, in_w=150, out_c=96, weight_in_c=16, kh=1, kw=1, groups=1),
-        dict(name="b1_c96_h150_w150_oc96_wic1_k3x3_g96_s1_pvalid", batch=1, in_c=96, in_h=150, in_w=150, out_c=96, weight_in_c=1, kh=3, kw=3, groups=96),
-        dict(name="b1_c96_h75_w75_oc24_wic96_k1x1_g1_s1_pvalid", batch=1, in_c=96, in_h=75, in_w=75, out_c=24, weight_in_c=96, kh=1, kw=1, groups=1),
-        dict(name="b1_c144_h75_w75_oc144_wic1_k3x3_g144_s1_pvalid", batch=1, in_c=144, in_h=75, in_w=75, out_c=144, weight_in_c=1, kh=3, kw=3, groups=144),
-        dict(name="b1_c144_h75_w75_oc24_wic144_k1x1_g1_s1_pvalid", batch=1, in_c=144, in_h=75, in_w=75, out_c=24, weight_in_c=144, kh=1, kw=1, groups=1),
-        dict(name="b1_c144_h38_w38_oc32_wic144_k1x1_g1_s1_pvalid", batch=1, in_c=144, in_h=38, in_w=38, out_c=32, weight_in_c=144, kh=1, kw=1, groups=1),
-        dict(name="b1_c192_h38_w38_oc192_wic1_k3x3_g192_s1_pvalid", batch=1, in_c=192, in_h=38, in_w=38, out_c=192, weight_in_c=1, kh=3, kw=3, groups=192),
-        dict(name="b1_c192_h38_w38_oc32_wic192_k1x1_g1_s1_pvalid", batch=1, in_c=192, in_h=38, in_w=38, out_c=32, weight_in_c=192, kh=1, kw=1, groups=1),
-        dict(name="b1_c384_h19_w19_oc384_wic1_k3x3_g384_s1_pvalid", batch=1, in_c=384, in_h=19, in_w=19, out_c=384, weight_in_c=1, kh=3, kw=3, groups=384),
-        dict(name="b1_c384_h19_w19_oc64_wic384_k1x1_g1_s1_pvalid", batch=1, in_c=384, in_h=19, in_w=19, out_c=64, weight_in_c=384, kh=1, kw=1, groups=1),
-        dict(name="b1_c384_h19_w19_oc96_wic384_k1x1_g1_s1_pvalid", batch=1, in_c=384, in_h=19, in_w=19, out_c=96, weight_in_c=384, kh=1, kw=1, groups=1),
-        dict(name="b1_c576_h19_w19_oc576_wic1_k3x3_g576_s1_pvalid", batch=1, in_c=576, in_h=19, in_w=19, out_c=576, weight_in_c=1, kh=3, kw=3, groups=576),
-        dict(name="b1_c576_h19_w19_oc96_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=19, in_w=19, out_c=96, weight_in_c=576, kh=1, kw=1, groups=1),
-        dict(name="b1_c576_h19_w19_oc12_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=19, in_w=19, out_c=12, weight_in_c=576, kh=1, kw=1, groups=1),
-        dict(name="b1_c576_h19_w19_oc273_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=19, in_w=19, out_c=273, weight_in_c=576, kh=1, kw=1, groups=1),
-        dict(name="b1_c960_h10_w10_oc960_wic1_k3x3_g960_s1_pvalid", batch=1, in_c=960, in_h=10, in_w=10, out_c=960, weight_in_c=1, kh=3, kw=3, groups=960),
-        dict(name="b1_c1280_h10_w10_oc24_wic1280_k1x1_g1_s1_pvalid", batch=1, in_c=1280, in_h=10, in_w=10, out_c=24, weight_in_c=1280, kh=1, kw=1, groups=1),
-        dict(name="b1_c1280_h10_w10_oc546_wic1280_k1x1_g1_s1_pvalid", batch=1, in_c=1280, in_h=10, in_w=10, out_c=546, weight_in_c=1280, kh=1, kw=1, groups=1),
-        dict(name="b1_c256_h10_w10_oc512_wic256_k3x3_g1_s1_pvalid", batch=1, in_c=256, in_h=10, in_w=10, out_c=512, weight_in_c=256, kh=3, kw=3, groups=1),
-        dict(name="b1_c128_h5_w5_oc256_wic128_k3x3_g1_s1_pvalid", batch=1, in_c=128, in_h=5, in_w=5, out_c=256, weight_in_c=128, kh=3, kw=3, groups=1),
-        dict(name="b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=3, in_w=3, out_c=24, weight_in_c=256, kh=1, kw=1, groups=1),
-        dict(name="b1_c256_h3_w3_oc546_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=3, in_w=3, out_c=546, weight_in_c=256, kh=1, kw=1, groups=1),
-        dict(name="b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=3, in_w=3, out_c=128, weight_in_c=256, kh=1, kw=1, groups=1),
-        dict(name="b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid", batch=1, in_c=128, in_h=3, in_w=3, out_c=256, weight_in_c=128, kh=3, kw=3, groups=1),
-        dict(name="b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=2, in_w=2, out_c=24, weight_in_c=256, kh=1, kw=1, groups=1),
-        dict(name="b1_c256_h2_w2_oc546_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=2, in_w=2, out_c=546, weight_in_c=256, kh=1, kw=1, groups=1),
-        dict(name="b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=2, in_w=2, out_c=64, weight_in_c=256, kh=1, kw=1, groups=1),
-        dict(name="b1_c128_h1_w1_oc24_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=1, in_w=1, out_c=24, weight_in_c=128, kh=1, kw=1, groups=1),
-        dict(name="b1_c3_h320_w320_oc32_wic3_k3x3_g1_s1_pvalid", batch=1, in_c=3, in_h=320, in_w=320, out_c=32, weight_in_c=3, kh=3, kw=3, groups=1),
-        dict(name="b1_c32_h160_w160_oc8_wic32_k1x1_g1_s1_pvalid", batch=1, in_c=32, in_h=160, in_w=160, out_c=8, weight_in_c=32, kh=1, kw=1, groups=1),
-        dict(name="b1_c8_h160_w160_oc16_wic8_k3x3_g1_s1_pvalid", batch=1, in_c=8, in_h=160, in_w=160, out_c=16, weight_in_c=8, kh=3, kw=3, groups=1),
-        dict(name="b1_c16_h160_w160_oc128_wic16_k3x3_g1_s1_pvalid", batch=1, in_c=16, in_h=160, in_w=160, out_c=128, weight_in_c=16, kh=3, kw=3, groups=1),
-        dict(name="b1_c128_h80_w80_oc16_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=80, in_w=80, out_c=16, weight_in_c=128, kh=1, kw=1, groups=1),
-        dict(name="b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid", batch=1, in_c=16, in_h=80, in_w=80, out_c=64, weight_in_c=16, kh=3, kw=3, groups=1),
-        dict(name="b1_c64_h80_w80_oc16_wic64_k1x1_g1_s1_pvalid", batch=1, in_c=64, in_h=80, in_w=80, out_c=16, weight_in_c=64, kh=1, kw=1, groups=1),
-        dict(name="b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid", batch=1, in_c=16, in_h=80, in_w=80, out_c=128, weight_in_c=16, kh=3, kw=3, groups=1),
-        dict(name="b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid", batch=1, in_c=16, in_h=80, in_w=80, out_c=128, weight_in_c=16, kh=5, kw=5, groups=1),
-        dict(name="b1_c128_h40_w40_oc40_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=40, in_w=40, out_c=40, weight_in_c=128, kh=1, kw=1, groups=1),
-        dict(name="b1_c40_h40_w40_oc160_wic40_k3x3_g1_s1_pvalid", batch=1, in_c=40, in_h=40, in_w=40, out_c=160, weight_in_c=40, kh=3, kw=3, groups=1),
-        dict(name="b1_c160_h40_w40_oc40_wic160_k1x1_g1_s1_pvalid", batch=1, in_c=160, in_h=40, in_w=40, out_c=40, weight_in_c=160, kh=1, kw=1, groups=1),
-        dict(name="b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid", batch=1, in_c=40, in_h=40, in_w=40, out_c=320, weight_in_c=40, kh=1, kw=1, groups=1),
-        dict(name="b1_c320_h40_w40_oc320_wic1_k3x3_g320_s1_pvalid", batch=1, in_c=320, in_h=40, in_w=40, out_c=320, weight_in_c=1, kh=3, kw=3, groups=320),
-        dict(name="b1_c320_h20_w20_oc72_wic320_k1x1_g1_s1_pvalid", batch=1, in_c=320, in_h=20, in_w=20, out_c=72, weight_in_c=320, kh=1, kw=1, groups=1),
-        dict(name="b1_c72_h20_w20_oc576_wic72_k1x1_g1_s1_pvalid", batch=1, in_c=72, in_h=20, in_w=20, out_c=576, weight_in_c=72, kh=1, kw=1, groups=1),
-        dict(name="b1_c576_h20_w20_oc576_wic1_k3x3_g576_s1_pvalid", batch=1, in_c=576, in_h=20, in_w=20, out_c=576, weight_in_c=1, kh=3, kw=3, groups=576),
-        dict(name="b1_c576_h20_w20_oc72_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=20, in_w=20, out_c=72, weight_in_c=576, kh=1, kw=1, groups=1),
-        dict(name="b1_c72_h20_w20_oc288_wic72_k3x3_g1_s1_pvalid", batch=1, in_c=72, in_h=20, in_w=20, out_c=288, weight_in_c=72, kh=3, kw=3, groups=1),
-        dict(name="b1_c288_h20_w20_oc72_wic288_k1x1_g1_s1_pvalid", batch=1, in_c=288, in_h=20, in_w=20, out_c=72, weight_in_c=288, kh=1, kw=1, groups=1),
-        dict(name="b1_c576_h20_w20_oc576_wic1_k5x5_g576_s1_pvalid", batch=1, in_c=576, in_h=20, in_w=20, out_c=576, weight_in_c=1, kh=5, kw=5, groups=576),
-        dict(name="b1_c576_h20_w20_oc96_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=20, in_w=20, out_c=96, weight_in_c=576, kh=1, kw=1, groups=1),
-        dict(name="b1_c768_h20_w20_oc768_wic1_k5x5_g768_s1_pvalid", batch=1, in_c=768, in_h=20, in_w=20, out_c=768, weight_in_c=1, kh=5, kw=5, groups=768),
-        dict(name="b1_c768_h20_w20_oc96_wic768_k1x1_g1_s1_pvalid", batch=1, in_c=768, in_h=20, in_w=20, out_c=96, weight_in_c=768, kh=1, kw=1, groups=1),
-        dict(name="b1_c768_h20_w20_oc768_wic1_k3x3_g768_s1_pvalid", batch=1, in_c=768, in_h=20, in_w=20, out_c=768, weight_in_c=1, kh=3, kw=3, groups=768),
-        dict(name="b1_c768_h10_w10_oc120_wic768_k1x1_g1_s1_pvalid", batch=1, in_c=768, in_h=10, in_w=10, out_c=120, weight_in_c=768, kh=1, kw=1, groups=1),
-        dict(name="b1_c960_h10_w10_oc120_wic960_k1x1_g1_s1_pvalid", batch=1, in_c=960, in_h=10, in_w=10, out_c=120, weight_in_c=960, kh=1, kw=1, groups=1),
-        dict(name="b1_c480_h10_w10_oc480_wic1_k5x5_g480_s1_pvalid", batch=1, in_c=480, in_h=10, in_w=10, out_c=480, weight_in_c=1, kh=5, kw=5, groups=480),
-        dict(name="b1_c480_h10_w10_oc120_wic480_k1x1_g1_s1_pvalid", batch=1, in_c=480, in_h=10, in_w=10, out_c=120, weight_in_c=480, kh=1, kw=1, groups=1),
-        dict(name="b1_c960_h10_w10_oc960_wic1_k5x5_g960_s1_pvalid", batch=1, in_c=960, in_h=10, in_w=10, out_c=960, weight_in_c=1, kh=5, kw=5, groups=960),
-        dict(name="b1_c256_h10_w10_oc256_wic1_k3x3_g256_s1_pvalid", batch=1, in_c=256, in_h=10, in_w=10, out_c=256, weight_in_c=1, kh=3, kw=3, groups=256),
-        dict(name="b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=3, in_w=3, out_c=256, weight_in_c=128, kh=1, kw=1, groups=1),
-        dict(name="b1_c128_h3_w3_oc128_wic1_k3x3_g128_s1_pvalid", batch=1, in_c=128, in_h=3, in_w=3, out_c=128, weight_in_c=1, kh=3, kw=3, groups=128),
-        dict(name="b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=2, in_w=2, out_c=256, weight_in_c=128, kh=1, kw=1, groups=1),
-        dict(name="b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid", batch=1, in_c=64, in_h=1, in_w=1, out_c=128, weight_in_c=64, kh=1, kw=1, groups=1),
-        dict(name="b1_c96_h20_w20_oc96_wic1_k3x3_g96_s1_pvalid", batch=1, in_c=96, in_h=20, in_w=20, out_c=96, weight_in_c=1, kh=3, kw=3, groups=96),
-        dict(name="b1_c384_h10_w10_oc384_wic1_k3x3_g384_s1_pvalid", batch=1, in_c=384, in_h=10, in_w=10, out_c=384, weight_in_c=1, kh=3, kw=3, groups=384),
-        dict(name="b1_c512_h5_w5_oc512_wic1_k3x3_g512_s1_pvalid", batch=1, in_c=512, in_h=5, in_w=5, out_c=512, weight_in_c=1, kh=3, kw=3, groups=512),
-        dict(name="b1_c256_h3_w3_oc256_wic1_k3x3_g256_s1_pvalid", batch=1, in_c=256, in_h=3, in_w=3, out_c=256, weight_in_c=1, kh=3, kw=3, groups=256),
-        dict(name="b1_c96_h20_w20_oc12_wic96_k1x1_g1_s1_pvalid", batch=1, in_c=96, in_h=20, in_w=20, out_c=12, weight_in_c=96, kh=1, kw=1, groups=1),
-        dict(name="b1_c96_h20_w20_oc273_wic96_k1x1_g1_s1_pvalid", batch=1, in_c=96, in_h=20, in_w=20, out_c=273, weight_in_c=96, kh=1, kw=1, groups=1),
-        dict(name="b1_c384_h10_w10_oc546_wic384_k1x1_g1_s1_pvalid", batch=1, in_c=384, in_h=10, in_w=10, out_c=546, weight_in_c=384, kh=1, kw=1, groups=1),
+        dict(name="b1_c96_h112_w112_oc96_wic1_k3x3_g96_s1_pvalid", batch=1, in_c=96, in_h=112, in_w=112, out_c=96, kh=3, kw=3, groups=96),
+        dict(name="b1_c144_h56_w56_oc144_wic1_k3x3_g144_s1_pvalid", batch=1, in_c=144, in_h=56, in_w=56, out_c=144, kh=3, kw=3, groups=144),
+        dict(name="b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid", batch=1, in_c=192, in_h=28, in_w=28, out_c=96, kh=1, kw=1, groups=1),
+        dict(name="b1_c32_h14_w14_oc64_wic32_k3x3_g1_s1_pvalid", batch=1, in_c=32, in_h=14, in_w=14, out_c=64, kh=3, kw=3, groups=1),
+        dict(name="b1_c528_h14_w14_oc256_wic528_k1x1_g1_s1_pvalid", batch=1, in_c=528, in_h=14, in_w=14, out_c=256, kh=1, kw=1, groups=1),
+        dict(name="b1_c528_h14_w14_oc160_wic528_k1x1_g1_s1_pvalid", batch=1, in_c=528, in_h=14, in_w=14, out_c=160, kh=1, kw=1, groups=1),
+        dict(name="b1_c160_h14_w14_oc320_wic160_k3x3_g1_s1_pvalid", batch=1, in_c=160, in_h=14, in_w=14, out_c=320, kh=3, kw=3, groups=1),
+        dict(name="b1_c160_h40_w40_oc320_wic160_k3x3_g1_s1_pvalid", batch=1, in_c=160, in_h=40, in_w=40, out_c=320, kh=3, kw=3, groups=1),
+        dict(name="b1_c528_h14_w14_oc32_wic528_k1x1_g1_s1_pvalid", batch=1, in_c=528, in_h=14, in_w=14, out_c=32, kh=1, kw=1, groups=1),
+        dict(name="b1_c32_h14_w14_oc128_wic32_k3x3_g1_s1_pvalid", batch=1, in_c=32, in_h=14, in_w=14, out_c=128, kh=3, kw=3, groups=1),
+        dict(name="b1_c528_h14_w14_oc128_wic528_k1x1_g1_s1_pvalid", batch=1, in_c=528, in_h=14, in_w=14, out_c=128, kh=1, kw=1, groups=1),
+        dict(name="b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid", batch=1, in_c=160, in_h=7, in_w=7, out_c=320, kh=3, kw=3, groups=1),
+        dict(name="b1_c32_h7_w7_oc128_wic32_k3x3_g1_s1_pvalid", batch=1, in_c=32, in_h=7, in_w=7, out_c=128, kh=3, kw=3, groups=1),
+        dict(name="b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid", batch=1, in_c=192, in_h=7, in_w=7, out_c=384, kh=3, kw=3, groups=1),
+        dict(name="b1_c832_h7_w7_oc48_wic832_k1x1_g1_s1_pvalid", batch=1, in_c=832, in_h=7, in_w=7, out_c=48, kh=1, kw=1, groups=1),
+        dict(name="b1_c32_h150_w150_oc32_wic1_k3x3_g32_s1_pvalid", batch=1, in_c=32, in_h=150, in_w=150, out_c=32, kh=3, kw=3, groups=32),
+        dict(name="b1_c32_h150_w150_oc16_wic32_k1x1_g1_s1_pvalid", batch=1, in_c=32, in_h=150, in_w=150, out_c=16, kh=1, kw=1, groups=1),
+        dict(name="b1_c16_h150_w150_oc96_wic16_k1x1_g1_s1_pvalid", batch=1, in_c=16, in_h=150, in_w=150, out_c=96, kh=1, kw=1, groups=1),
+        dict(name="b1_c96_h150_w150_oc96_wic1_k3x3_g96_s1_pvalid", batch=1, in_c=96, in_h=150, in_w=150, out_c=96, kh=3, kw=3, groups=96),
+        dict(name="b1_c96_h75_w75_oc24_wic96_k1x1_g1_s1_pvalid", batch=1, in_c=96, in_h=75, in_w=75, out_c=24, kh=1, kw=1, groups=1),
+        dict(name="b1_c144_h75_w75_oc144_wic1_k3x3_g144_s1_pvalid", batch=1, in_c=144, in_h=75, in_w=75, out_c=144, kh=3, kw=3, groups=144),
+        dict(name="b1_c144_h75_w75_oc24_wic144_k1x1_g1_s1_pvalid", batch=1, in_c=144, in_h=75, in_w=75, out_c=24, kh=1, kw=1, groups=1),
+        dict(name="b1_c144_h38_w38_oc32_wic144_k1x1_g1_s1_pvalid", batch=1, in_c=144, in_h=38, in_w=38, out_c=32, kh=1, kw=1, groups=1),
+        dict(name="b1_c192_h38_w38_oc192_wic1_k3x3_g192_s1_pvalid", batch=1, in_c=192, in_h=38, in_w=38, out_c=192, kh=3, kw=3, groups=192),
+        dict(name="b1_c192_h38_w38_oc32_wic192_k1x1_g1_s1_pvalid", batch=1, in_c=192, in_h=38, in_w=38, out_c=32, kh=1, kw=1, groups=1),
+        dict(name="b1_c384_h19_w19_oc384_wic1_k3x3_g384_s1_pvalid", batch=1, in_c=384, in_h=19, in_w=19, out_c=384, kh=3, kw=3, groups=384),
+        dict(name="b1_c384_h19_w19_oc64_wic384_k1x1_g1_s1_pvalid", batch=1, in_c=384, in_h=19, in_w=19, out_c=64, kh=1, kw=1, groups=1),
+        dict(name="b1_c384_h19_w19_oc96_wic384_k1x1_g1_s1_pvalid", batch=1, in_c=384, in_h=19, in_w=19, out_c=96, kh=1, kw=1, groups=1),
+        dict(name="b1_c576_h19_w19_oc576_wic1_k3x3_g576_s1_pvalid", batch=1, in_c=576, in_h=19, in_w=19, out_c=576, kh=3, kw=3, groups=576),
+        dict(name="b1_c576_h19_w19_oc96_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=19, in_w=19, out_c=96, kh=1, kw=1, groups=1),
+        dict(name="b1_c576_h19_w19_oc12_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=19, in_w=19, out_c=12, kh=1, kw=1, groups=1),
+        dict(name="b1_c576_h19_w19_oc273_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=19, in_w=19, out_c=273, kh=1, kw=1, groups=1),
+        dict(name="b1_c960_h10_w10_oc960_wic1_k3x3_g960_s1_pvalid", batch=1, in_c=960, in_h=10, in_w=10, out_c=960, kh=3, kw=3, groups=960),
+        dict(name="b1_c1280_h10_w10_oc24_wic1280_k1x1_g1_s1_pvalid", batch=1, in_c=1280, in_h=10, in_w=10, out_c=24, kh=1, kw=1, groups=1),
+        dict(name="b1_c1280_h10_w10_oc546_wic1280_k1x1_g1_s1_pvalid", batch=1, in_c=1280, in_h=10, in_w=10, out_c=546, kh=1, kw=1, groups=1),
+        dict(name="b1_c256_h10_w10_oc512_wic256_k3x3_g1_s1_pvalid", batch=1, in_c=256, in_h=10, in_w=10, out_c=512, kh=3, kw=3, groups=1),
+        dict(name="b1_c128_h5_w5_oc256_wic128_k3x3_g1_s1_pvalid", batch=1, in_c=128, in_h=5, in_w=5, out_c=256, kh=3, kw=3, groups=1),
+        dict(name="b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=3, in_w=3, out_c=24, kh=1, kw=1, groups=1),
+        dict(name="b1_c256_h3_w3_oc546_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=3, in_w=3, out_c=546, kh=1, kw=1, groups=1),
+        dict(name="b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=3, in_w=3, out_c=128, kh=1, kw=1, groups=1),
+        dict(name="b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid", batch=1, in_c=128, in_h=3, in_w=3, out_c=256, kh=3, kw=3, groups=1),
+        dict(name="b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=2, in_w=2, out_c=24, kh=1, kw=1, groups=1),
+        dict(name="b1_c256_h2_w2_oc546_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=2, in_w=2, out_c=546, kh=1, kw=1, groups=1),
+        dict(name="b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=2, in_w=2, out_c=64, kh=1, kw=1, groups=1),
+        dict(name="b1_c128_h1_w1_oc24_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=1, in_w=1, out_c=24, kh=1, kw=1, groups=1),
+        dict(name="b1_c3_h320_w320_oc32_wic3_k3x3_g1_s1_pvalid", batch=1, in_c=3, in_h=320, in_w=320, out_c=32, kh=3, kw=3, groups=1),
+        dict(name="b1_c32_h160_w160_oc8_wic32_k1x1_g1_s1_pvalid", batch=1, in_c=32, in_h=160, in_w=160, out_c=8, kh=1, kw=1, groups=1),
+        dict(name="b1_c8_h160_w160_oc16_wic8_k3x3_g1_s1_pvalid", batch=1, in_c=8, in_h=160, in_w=160, out_c=16, kh=3, kw=3, groups=1),
+        dict(name="b1_c16_h160_w160_oc128_wic16_k3x3_g1_s1_pvalid", batch=1, in_c=16, in_h=160, in_w=160, out_c=128, kh=3, kw=3, groups=1),
+        dict(name="b1_c128_h80_w80_oc16_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=80, in_w=80, out_c=16, kh=1, kw=1, groups=1),
+        dict(name="b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid", batch=1, in_c=16, in_h=80, in_w=80, out_c=64, kh=3, kw=3, groups=1),
+        dict(name="b1_c64_h80_w80_oc16_wic64_k1x1_g1_s1_pvalid", batch=1, in_c=64, in_h=80, in_w=80, out_c=16, kh=1, kw=1, groups=1),
+        dict(name="b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid", batch=1, in_c=16, in_h=80, in_w=80, out_c=128, kh=3, kw=3, groups=1),
+        dict(name="b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid", batch=1, in_c=16, in_h=80, in_w=80, out_c=128, kh=5, kw=5, groups=1),
+        dict(name="b1_c128_h40_w40_oc40_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=40, in_w=40, out_c=40, kh=1, kw=1, groups=1),
+        dict(name="b1_c40_h40_w40_oc160_wic40_k3x3_g1_s1_pvalid", batch=1, in_c=40, in_h=40, in_w=40, out_c=160, kh=3, kw=3, groups=1),
+        dict(name="b1_c160_h40_w40_oc40_wic160_k1x1_g1_s1_pvalid", batch=1, in_c=160, in_h=40, in_w=40, out_c=40, kh=1, kw=1, groups=1),
+        dict(name="b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid", batch=1, in_c=40, in_h=40, in_w=40, out_c=320, kh=1, kw=1, groups=1),
+        dict(name="b1_c320_h40_w40_oc320_wic1_k3x3_g320_s1_pvalid", batch=1, in_c=320, in_h=40, in_w=40, out_c=320, kh=3, kw=3, groups=320),
+        dict(name="b1_c320_h20_w20_oc72_wic320_k1x1_g1_s1_pvalid", batch=1, in_c=320, in_h=20, in_w=20, out_c=72, kh=1, kw=1, groups=1),
+        dict(name="b1_c72_h20_w20_oc576_wic72_k1x1_g1_s1_pvalid", batch=1, in_c=72, in_h=20, in_w=20, out_c=576, kh=1, kw=1, groups=1),
+        dict(name="b1_c576_h20_w20_oc576_wic1_k3x3_g576_s1_pvalid", batch=1, in_c=576, in_h=20, in_w=20, out_c=576, kh=3, kw=3, groups=576),
+        dict(name="b1_c576_h20_w20_oc72_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=20, in_w=20, out_c=72, kh=1, kw=1, groups=1),
+        dict(name="b1_c72_h20_w20_oc288_wic72_k3x3_g1_s1_pvalid", batch=1, in_c=72, in_h=20, in_w=20, out_c=288, kh=3, kw=3, groups=1),
+        dict(name="b1_c288_h20_w20_oc72_wic288_k1x1_g1_s1_pvalid", batch=1, in_c=288, in_h=20, in_w=20, out_c=72, kh=1, kw=1, groups=1),
+        dict(name="b1_c576_h20_w20_oc576_wic1_k5x5_g576_s1_pvalid", batch=1, in_c=576, in_h=20, in_w=20, out_c=576, kh=5, kw=5, groups=576),
+        dict(name="b1_c576_h20_w20_oc96_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=20, in_w=20, out_c=96, kh=1, kw=1, groups=1),
+        dict(name="b1_c768_h20_w20_oc768_wic1_k5x5_g768_s1_pvalid", batch=1, in_c=768, in_h=20, in_w=20, out_c=768, kh=5, kw=5, groups=768),
+        dict(name="b1_c768_h20_w20_oc96_wic768_k1x1_g1_s1_pvalid", batch=1, in_c=768, in_h=20, in_w=20, out_c=96, kh=1, kw=1, groups=1),
+        dict(name="b1_c768_h20_w20_oc768_wic1_k3x3_g768_s1_pvalid", batch=1, in_c=768, in_h=20, in_w=20, out_c=768, kh=3, kw=3, groups=768),
+        dict(name="b1_c768_h10_w10_oc120_wic768_k1x1_g1_s1_pvalid", batch=1, in_c=768, in_h=10, in_w=10, out_c=120, kh=1, kw=1, groups=1),
+        dict(name="b1_c960_h10_w10_oc120_wic960_k1x1_g1_s1_pvalid", batch=1, in_c=960, in_h=10, in_w=10, out_c=120, kh=1, kw=1, groups=1),
+        dict(name="b1_c480_h10_w10_oc480_wic1_k5x5_g480_s1_pvalid", batch=1, in_c=480, in_h=10, in_w=10, out_c=480, kh=5, kw=5, groups=480),
+        dict(name="b1_c480_h10_w10_oc120_wic480_k1x1_g1_s1_pvalid", batch=1, in_c=480, in_h=10, in_w=10, out_c=120, kh=1, kw=1, groups=1),
+        dict(name="b1_c960_h10_w10_oc960_wic1_k5x5_g960_s1_pvalid", batch=1, in_c=960, in_h=10, in_w=10, out_c=960, kh=5, kw=5, groups=960),
+        dict(name="b1_c256_h10_w10_oc256_wic1_k3x3_g256_s1_pvalid", batch=1, in_c=256, in_h=10, in_w=10, out_c=256, kh=3, kw=3, groups=256),
+        dict(name="b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=3, in_w=3, out_c=256, kh=1, kw=1, groups=1),
+        dict(name="b1_c128_h3_w3_oc128_wic1_k3x3_g128_s1_pvalid", batch=1, in_c=128, in_h=3, in_w=3, out_c=128, kh=3, kw=3, groups=128),
+        dict(name="b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=2, in_w=2, out_c=256, kh=1, kw=1, groups=1),
+        dict(name="b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid", batch=1, in_c=64, in_h=1, in_w=1, out_c=128, kh=1, kw=1, groups=1),
+        dict(name="b1_c96_h20_w20_oc96_wic1_k3x3_g96_s1_pvalid", batch=1, in_c=96, in_h=20, in_w=20, out_c=96, kh=3, kw=3, groups=96),
+        dict(name="b1_c384_h10_w10_oc384_wic1_k3x3_g384_s1_pvalid", batch=1, in_c=384, in_h=10, in_w=10, out_c=384, kh=3, kw=3, groups=384),
+        dict(name="b1_c512_h5_w5_oc512_wic1_k3x3_g512_s1_pvalid", batch=1, in_c=512, in_h=5, in_w=5, out_c=512, kh=3, kw=3, groups=512),
+        dict(name="b1_c256_h3_w3_oc256_wic1_k3x3_g256_s1_pvalid", batch=1, in_c=256, in_h=3, in_w=3, out_c=256, kh=3, kw=3, groups=256),
+        dict(name="b1_c96_h20_w20_oc12_wic96_k1x1_g1_s1_pvalid", batch=1, in_c=96, in_h=20, in_w=20, out_c=12, kh=1, kw=1, groups=1),
+        dict(name="b1_c96_h20_w20_oc273_wic96_k1x1_g1_s1_pvalid", batch=1, in_c=96, in_h=20, in_w=20, out_c=273, kh=1, kw=1, groups=1),
+        dict(name="b1_c384_h10_w10_oc546_wic384_k1x1_g1_s1_pvalid", batch=1, in_c=384, in_h=10, in_w=10, out_c=546, kh=1, kw=1, groups=1),
     ]
 
 def main(argv):
