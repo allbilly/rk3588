@@ -1,0 +1,61 @@
+Breakpoint 1 at 0x6f644
+Function "__libc_dlopen_mode" not defined.
+Breakpoint 2 (__libc_dlopen_mode) pending.
+Function "_dl_debug_state" not defined.
+Breakpoint 3 (_dl_debug_state) pending.
+trace_librknnc_regcmd_emit.gdb loaded
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/aarch64-linux-gnu/libthread_db.so.1".
+[New Thread 0x7feb64f120 (LWP 103788)]
+[New Thread 0x7feae3f120 (LWP 103789)]
+[New Thread 0x7fe862f120 (LWP 103790)]
+[New Thread 0x7fe7e1f120 (LWP 103791)]
+[New Thread 0x7fe360f120 (LWP 103792)]
+[New Thread 0x7fe0dff120 (LWP 103793)]
+[New Thread 0x7fde5ef120 (LWP 103794)]
+[New Thread 0x7fd7f1f120 (LWP 103795)]
+[New Thread 0x7fd770f120 (LWP 103796)]
+[New Thread 0x7fd4eff120 (LWP 103797)]
+[New Thread 0x7fd26ef120 (LWP 103798)]
+[New Thread 0x7fcfedf120 (LWP 103799)]
+[New Thread 0x7fcd6cf120 (LWP 103800)]
+[New Thread 0x7fcaebf120 (LWP 103801)]
+[Detaching after vfork from child process 103802]
+librknnc base=0x7fc1360000
+  trace emit_loop_a_value_ready=0x7fc1f752f0
+Breakpoint 4 at 0x7fc1f752f0
+  trace emit_loop_a_append=0x7fc1f75300
+Breakpoint 5 at 0x7fc1f75300
+  trace emit_loop_b_value_ready=0x7fc1f754c4
+Breakpoint 6 at 0x7fc1f754c4
+  trace emit_loop_b_append=0x7fc1f754d4
+Breakpoint 7 at 0x7fc1f754d4
+  trace emit_qword_append_late=0x7fc1f75ff4
+Breakpoint 8 at 0x7fc1f75ff4
+[New Thread 0x7faf61f120 (LWP 103803)]
+[New Thread 0x7faee0f120 (LWP 103804)]
+[New Thread 0x7fae5ff120 (LWP 103805)]
+[New Thread 0x7faddef120 (LWP 103806)]
+[New Thread 0x7fad5df120 (LWP 103807)]
+[New Thread 0x7facdcf120 (LWP 103808)]
+[New Thread 0x7fac5bf120 (LWP 103809)]
+[Detaching after vfork from child process 103810]
+I rknn-toolkit2 version: 2.3.2
+[New Thread 0x7fa1997120 (LWP 103811)]
+I Loading :   0%|                                                             | 0/2 [00:00<?, ?it/s]I Loading : 100%|█████████████████████████████████████████████████████| 2/2 [00:00<00:00, 29.83it/s]
+[1;33mW[0m [1;33mload_onnx: The config.mean_values is None, zeros will be set for input 0![0m
+[1;33mW[0m [1;33mload_onnx: The config.std_values is None, ones will be set for input 0![0m
+[0;93m2026-05-23 03:21:58.672318834 [W:onnxruntime:Default, device_discovery.cc:164 DiscoverDevicesForPlatform] GPU device discovery failed: device_discovery.cc:89 ReadFileContents Failed to open file: "/sys/class/drm/card1/device/vendor"[m
+I OpFusing 0:   0%|                                                         | 0/100 [00:00<?, ?it/s]I OpFusing 0: 100%|███████████████████████████████████████████| 100/100 [00:00<00:00, 172747.28it/s]I OpFusing 1 :   0%|                                                        | 0/100 [00:00<?, ?it/s]I OpFusing 1 : 100%|███████████████████████████████████████████| 100/100 [00:00<00:00, 67628.25it/s]I OpFusing 2 :   0%|                                                        | 0/100 [00:00<?, ?it/s]I OpFusing 2 : 100%|███████████████████████████████████████████| 100/100 [00:00<00:00, 53828.34it/s]I OpFusing 2 : 100%|███████████████████████████████████████████| 100/100 [00:00<00:00, 47896.59it/s]
+I rknn building ...
+I rknn building done.
+
+
+=== DONE ===
+[Thread 0x7fa1997120 (LWP 103811) exited]
+[trace-summary] emit_loop_a_value_ready hits=0 printed=0
+[trace-summary] emit_loop_a_append hits=0 printed=0
+[trace-summary] emit_loop_b_value_ready hits=0 printed=0
+[trace-summary] emit_loop_b_append hits=0 printed=0
+[trace-summary] emit_qword_append_late hits=0 printed=0
+[trace] process exit; quitting

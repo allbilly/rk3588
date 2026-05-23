@@ -1,0 +1,14 @@
+Breakpoint 1 at 0x13c4
+trace_librknnrt_reuse.gdb loaded; run an RKNN conv model that triggers F2 ChannelTile
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/aarch64-linux-gnu/libthread_db.so.1".
+librknnrt base=0x7ff78c0000
+indexed helper=0x7ff7bafd38
+pair helper=0x7ff7bafce0
+bfi helper=0x7ff79c0a40
+Breakpoint 2 at 0x7ff7bafd38
+Breakpoint 3 at 0x7ff7bafce0
+inputs=1 outputs=1
+Input[0] dims=1x8x8x160 size=20480 type=1
+rknn_run OK
+[Inferior 1 (process 99692) exited normally]

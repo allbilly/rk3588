@@ -1,0 +1,26 @@
+Breakpoint 1 at 0x6f774
+Breakpoint 2 at 0x701f4
+Function "std::basic_ostream<char, std::char_traits<char> >::write(char const*, long)" not defined.
+Breakpoint 3 (std::basic_ostream<char, std::char_traits<char> >::write(char const*, long)) pending.
+Breakpoint 4 at 0x6ec34
+Breakpoint 5 at 0x70244
+trace_librknnc_export_qwords.gdb loaded
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/aarch64-linux-gnu/libthread_db.so.1".
+[New Thread 0x7feb64f120 (LWP 102054)]
+[New Thread 0x7feae3f120 (LWP 102055)]
+[New Thread 0x7fea62f120 (LWP 102056)]
+[New Thread 0x7fe5e1f120 (LWP 102057)]
+[New Thread 0x7fe360f120 (LWP 102058)]
+[New Thread 0x7fe0dff120 (LWP 102059)]
+[New Thread 0x7fde5ef120 (LWP 102060)]
+[New Thread 0x7fd7f1f120 (LWP 102332)]
+[New Thread 0x7fd770f120 (LWP 102333)]
+[New Thread 0x7fd4eff120 (LWP 102334)]
+[New Thread 0x7fd26ef120 (LWP 102335)]
+[New Thread 0x7fcfedf120 (LWP 102336)]
+[New Thread 0x7fcd6cf120 (LWP 102337)]
+[New Thread 0x7fcaebf120 (LWP 102338)]
+
+Thread 1 "python3" received signal SIGINT, Interrupt.
+0x0000007ff7d9ab00 in ?? () from /lib/aarch64-linux-gnu/libc.so.6

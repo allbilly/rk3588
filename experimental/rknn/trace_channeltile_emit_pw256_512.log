@@ -1,0 +1,30 @@
+Breakpoint 1 at 0x13c4
+Breakpoint 2 at 0x1324
+trace_channeltile_emit.gdb loaded
+Breakpoints: ABC_T, KC_T, indexed_patch, pair_patch, emit, bank_config
+Run a multi-tile RKNN model to capture ChannelTile register emissions
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/aarch64-linux-gnu/libthread_db.so.1".
+librknnrt base=0x7ff78c0000
+Breakpoint 3 at 0x7ff7e57828
+  BP abc_t at 0x7ff7e57828
+Breakpoint 4 at 0x7ff7e58468
+  BP kc_t at 0x7ff7e58468
+Breakpoint 5 at 0x7ff7bafd38
+  BP indexed_patch at 0x7ff7bafd38
+Breakpoint 6 at 0x7ff7bafce0
+  BP pair_patch at 0x7ff7bafce0
+Breakpoint 7 at 0x7ff7e558c8
+  BP emit_5958c8 at 0x7ff7e558c8
+Breakpoint 8 at 0x7ff7e86b50
+  BP bank_config at 0x7ff7e86b50
+inputs=1 outputs=1
+Input[0] dims=1x14x14x256 size=100352 type=1
+rknn_run OK
+
+============================================================
+RKNN_DESTROY - dumping patch log (0 entries)
+============================================================
+
+  Total ABC_T tiles: 0
+[Inferior 1 (process 100990) exited normally]

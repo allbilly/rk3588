@@ -1005,6 +1005,88 @@ Dynamic trace experiment status:
   path exposes the final row layout. The runtime
   `experimental/trace_librknnrt_reuse.gdb` remains useful after compiler command
   emission is mapped.
+- Local disassembly now identifies the next compiler publish path to trace:
+  after the 16-byte stack record write at `0x257f00`, the compiler copies a
+  larger row object and advances a vector slot by `0x1a8` bytes. Key offsets:
+  `0x258444` (`x21 += 0x48`), `0x2584b8` (first scalar write to the destination
+  row at `x19`), `0x2589d0..0x2589ec` (tail record copy), and `0x258a14`
+  (advance `[x21+8]` by `0x1a8`).
+- Added and ran `experimental/trace_librknnc_row_publish.gdb` on the remote
+  official RKNN host for the small proxy and stress shapes:
+  `/tmp/rknnc_row_publish_small.log` and
+  `/tmp/rknnc_row_publish_stress.log`. Both builds completed normally and
+  exported RKNN files. The trace confirms the published row descriptor is 424
+  bytes. Offsets `0x40/0x58/0x70` hold current input/output/weight window
+  vectors, while `0xa0/0xb8/0xd0` hold full input/output/weight shapes. The
+  small proxy row exposes Y tiling as `(1,32,6,14) -> (1,128,4,12)`, and the
+  stress rows expose OC tiling as output windows `112` then `96` with full
+  output `(1,320,12,12)`. This strongly suggests stress OC split boundaries
+  `[0,112,224,320]`, produced later than the earlier `[0,320]` boundary writer.
+  Reuse bits and final command emission are still not mapped.
+- Added and ran `experimental/trace_librknnc_row_consumers.gdb` on the stress
+  shape. In `/tmp/rknnc_row_consumers_stress.log`, only `row_scan_a`
+  (`librknnc.so+0x635ce8`) fired: 54 hits. It walks the same `0x1a8` row-vector
+  stride and counts rows whose first dword matches a 1-based loop index. The
+  scan sees compact row families such as `row[0..2]=(3,7,6)` with tail OC
+  offsets `0x70` and `0xe0`, again matching the inferred `[0,112,224,320]`
+  split. The next target is the caller/downstream code around
+  `0x634748..0x635d10`, which consumes these per-row counts.
+- Added and ran `experimental/trace_librknnc_row_to_task.gdb` on the stress
+  shape. In `/tmp/rknnc_row_to_task_stress.log`, the row-to-task caller selected
+  six `0x1a8` rows and built six stack task descriptors. The selected rows
+  preserve the compact row families:
+  setup `(10,0,1,0,4)`, metadata `(10,0,2,3,6)` and `(10,1,2,3,6)`, then
+  multi-tile rows `(10,0,3,7,6)`, `(10,1,3,7,6)`, `(10,2,3,7,6)`.
+  Current output/weight windows for the multi-tile rows are
+  `112/112`, `112/112`, and `96/96` output/weight channels, with scalar OC
+  offsets `0`, `0x70`, and `0xe0`. Only two rows hit the traced 16-byte push
+  site at `0x6358d8`, and the attempted helper path at `0x5aea40` did not fire.
+  This confirms the compiler has the `[0,112,224,320]` channel split in the
+  row-to-task stage, but final regcmd emission/reuse-bit naming is still the
+  remaining gap.
+- Copied the exported stress RKNN model from the remote compiler host and
+  scanned it for Rocket regcmd qwords. The file itself contains six aligned
+  decoded command runs at offsets `0x2640`, `0x29b8`, `0x2e40`, `0x32c0`,
+  `0x3740`, and `0x3bc0`, matching the six selected compact rows. The
+  multi-tile rows emit CNA `CONV_CON2=0x500000f0`, CNA `WEIGHT_SIZE2` kernel
+  counts `0x70`, `0x70`, `0x60`, and CNA `DCOMP_ADDR0` offsets `0`,
+  `0x4ec00`, `0x9d800`. This makes the final compiler register stream for the
+  stress shape ground truth without needing a later regcmd-store breakpoint.
+- Added `experimental/rknn_parse_regcmd_runs.py` and generated a four-model
+  compiler comparison set under `/tmp/rknnc_compare_models_local`: small
+  spatial `32->128`, stress spatial `160->320`, pointwise `528->32`, and
+  depthwise `32->32 g32`. Across these exported RKNN files, the same command
+  schema appears. `CNA_DCOMP_ADDR0` advances for OC/weight splits,
+  `CNA_FEATURE_DATA_ADDR` advances for Y tiles, and `DPU_DST_BASE_ADDR` tracks the
+  output tile offset. `CNA_CONV_CON2` high bits identify tile family:
+  `0x0...` full/setup, `0x1...` depthwise middle-Y family, `0x2...` Y tile,
+  `0x4...` channel-half/metadata, and `0x5...` stress OC multi-tile. This
+  supports a single tile-descriptor-driven emitter instead of shape-name
+  special cases.
+- Extended `experimental/rknn_parse_regcmd_runs.py --descriptors` to reduce
+  exported regcmd runs to emitter inputs:
+  `family_bits`, `grain_bits`, `input_h`, `output_h/w`, `oc_count`,
+  `feature_off`, `weight_off`, `output_off`, `weight_bytes`, and `cbuf0`.
+  This makes the current `conv.py` mismatch concrete: `make_conv2d_regs()`
+  still takes only base DMA addresses and simple booleans, but compiler-like
+  emission needs per-run offsets and `CONV_CON2 = family_bits | grain_bits`.
+- Generated mixed-schedule compiler models under `/tmp/rknnc_mixed_models_local`.
+  The important shape is `160x40x40 -> 320x38x38`, `3x3`: it emits 12 runs.
+  For each family (`setup`, `k_half`, `k_tile`), the compiler iterates K windows
+  and then Y windows. In the `k_tile` family, OC tiles `112,112,96` each have
+  two Y rows (`21` and `17` output rows). Offsets are additive:
+  `feature_off` depends only on Y, `weight_off` depends only on K, and
+  `output_off = output_k_base + output_y_base` (`0x52160 = 0x4ef80 + 0x31e0`,
+  `0xa10e0 = 0x9df00 + 0x31e0`). This directly supports independent Y/K window
+  generation feeding one descriptor-driven emitter.
+- Added `experimental/rknn_descriptor_plan.py`, a checker that compares
+  estimated descriptors from current `examples/kernel_6_18/conv.py` helpers
+  against compiler-exported descriptors. It exposes the biggest current
+  implementation mismatch: the existing planner still takes the `spatial_im2col`
+  workaround for large spatial conv and predicts many 2-row/48-OC descriptors,
+  while compiler ground truth for `160x40x40 -> 320x38x38` is 12 descriptors
+  with Y windows `21,17` and OC windows `112,112,96`. Clean `conv.py` needs the
+  RKNN family-descriptor planner, not the old im2col planning branch.
 
 Static TRM register map for the later trace:
 

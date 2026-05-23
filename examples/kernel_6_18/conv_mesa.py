@@ -9,7 +9,7 @@ Byte-for-byte BO and regcmd dumps against Mesa are the validation
 strategy before any numerical comparison.
 """
 
-import ast, ctypes, glob, mmap, os, struct, sys, time
+import argparse, ast, ctypes, glob, mmap, os, struct, sys, time
 from dataclasses import dataclass, field
 from fcntl import ioctl
 from math import ceil, log, fabs
@@ -609,6 +609,162 @@ def pack_input_like_mesa(input_nhwc, input_width, input_height, input_channels,
                         raw[n] = (input_zero_point - 0x80) & 0xFF
                     n += 1
     return raw
+
+def translateCRSToFeatureData(input_crs, channelsPerGroup=0, width_stride=None,
+                              pad_value=0, order="hw", output_size=None,
+                              output_fill_value=0):
+    """
+    Pack CRS/NCRS int8 data into feature format.
+    Default parameters mirror nvdla/sw translateCRSToFeatureData() for INT8:
+    C1 x H x W x C2, C2=32, zero padding, no width stride.
+    """
+    if input_crs.ndim == 3:
+        src = input_crs[np.newaxis, ...]
+    elif input_crs.ndim == 4:
+        src = input_crs
+    else:
+        raise ValueError("translateCRSToFeatureData expects CRS/NCRS input with shape (C, H, W) or (N, C, H, W)")
+
+    batch, channels, height, width = src.shape
+    cf = channelsPerGroup if channelsPerGroup != 0 else WEIGHT_ATOMIC_SIZE
+    cfg = channels // cf
+    cp = channels % cf
+    cpg = 1 if cp else 0
+    groups = cfg + cpg
+    width_stride = width if width_stride is None else width_stride
+    if width_stride < width:
+        raise ValueError(f"width_stride {width_stride} is smaller than width {width}")
+    if order not in ("hw", "wh"):
+        raise ValueError("order must be 'hw' or 'wh'")
+
+    ff_size = batch * groups * cf * width_stride * height
+    out_size = ff_size if output_size is None else output_size
+    if out_size < ff_size:
+        raise ValueError(f"output_size {out_size} is smaller than packed size {ff_size}")
+
+    src = src.astype(np.int8, copy=False)
+    dest = np.full(out_size, output_fill_value, dtype=np.int8)
+    n = 0
+
+    for ind_n in range(batch):
+        for ind_cfg in range(groups):
+            outer_extent = height if order == "hw" else width_stride
+            inner_extent = width_stride if order == "hw" else height
+            for outer in range(outer_extent):
+                for inner in range(inner_extent):
+                    ind_r = outer if order == "hw" else inner
+                    ind_s = inner if order == "hw" else outer
+                    for ind_c in range(ind_cfg * cf, ind_cfg * cf + cf):
+                        if ind_s < width and ind_c < channels:
+                            dest[n] = src[ind_n, ind_c, ind_r, ind_s]
+                        else:
+                            dest[n] = pad_value
+                        n += 1
+
+    if n != ff_size:
+        raise RuntimeError(f"translateCRSToFeatureData packed {n} bytes, expected {ff_size}")
+
+    return dest.view(np.uint8)
+
+def pack_input_translate_crs_int8(input_nhwc, input_zero_point):
+    """Convert NHWC uint8 activations to signed CRS int8, then pack C1 x H x W x C2."""
+    del input_zero_point
+    input_crs = input_nhwc.transpose(0, 3, 1, 2).astype(np.int16)
+    input_crs = (input_crs - 0x80).astype(np.int8)
+    return translateCRSToFeatureData(input_crs)
+
+def pack_input_translate_crs_int8_like_mesa(input_nhwc, input_width, input_height,
+                                            input_channels, input_zero_point,
+                                            output_channels, addition_input, add_tensor):
+    single_channel = (output_channels == 1 and input_channels == 1
+                      and not addition_input and add_tensor == -1)
+    if single_channel:
+        raw = np.zeros(calc_input_size(input_width, input_height, input_channels), dtype=np.uint8)
+        raw[:input_nhwc.size] = input_nhwc.ravel()
+        return raw
+
+    if input_channels == 1:
+        raw = np.zeros(calc_input_size(input_width, input_height, input_channels), dtype=np.uint8)
+        n = 0
+        for x in range(input_width):
+            for y in range(max(input_height, FEATURE_ATOMIC_SIZE)):
+                if y < input_height:
+                    raw[n] = input_nhwc[0, y, x, 0]
+                else:
+                    raw[n] = input_zero_point
+                n += 1
+        return raw
+
+    input_crs = input_nhwc.transpose(0, 3, 1, 2).astype(np.int16)
+    input_crs = (input_crs - 0x80).astype(np.int8)
+    pad_value = input_zero_point - 0x80
+    return translateCRSToFeatureData(
+        input_crs, channelsPerGroup=FEATURE_ATOMIC_SIZE, pad_value=pad_value,
+        order="wh", output_size=calc_input_size(input_width, input_height, input_channels),
+        output_fill_value=0)
+
+def pack_cdma_dc_feature_input_int8(input_nhwc, width_stride=None, channelsPerGroup=0,
+                                    pad_value=0, use_nhwc=False):
+    if input_nhwc.ndim != 4:
+        raise ValueError("pack_cdma_dc_feature_input_int8 expects NHWC input")
+    batch, in_h, in_w, in_c = input_nhwc.shape
+    width_stride = in_w if width_stride is None else width_stride
+    if use_nhwc:
+        out = np.full((batch, in_h, width_stride, in_c), pad_value, dtype=np.int8)
+        out[:, :, :in_w, :] = input_nhwc.astype(np.int8, copy=False)
+        return out.view(np.uint8).ravel()
+
+    input_crs = input_nhwc.transpose(0, 3, 1, 2).astype(np.int8, copy=False)
+    return translateCRSToFeatureData(
+        input_crs, channelsPerGroup=channelsPerGroup, width_stride=width_stride,
+        pad_value=pad_value, order="hw")
+
+def pack_input_by_name(input_packer, input_nhwc, op):
+    if input_packer == "mesa":
+        return pack_input_like_mesa(
+            input_nhwc, op.input_width, op.input_height, op.input_channels,
+            op.input_zero_point, op.output_channels, op.addition_input, op.add_tensor)
+    if input_packer == "translate_crs_int8":
+        return pack_input_translate_crs_int8(input_nhwc, op.input_zero_point)
+    if input_packer == "translate_crs_int8_mesa":
+        return pack_input_translate_crs_int8_like_mesa(
+            input_nhwc, op.input_width, op.input_height, op.input_channels,
+            op.input_zero_point, op.output_channels, op.addition_input, op.add_tensor)
+    raise ValueError(f"unknown input_packer: {input_packer}")
+
+def compare_packed_input_bytes(input_nhwc, op, max_diffs=16, max_bytes=64):
+    mesa = pack_input_by_name("mesa", input_nhwc, op)
+    crs = pack_input_by_name("translate_crs_int8", input_nhwc, op)
+    crs_mesa = pack_input_by_name("translate_crs_int8_mesa", input_nhwc, op)
+    min_len = min(mesa.nbytes, crs.nbytes)
+    mismatch = np.flatnonzero(mesa[:min_len] != crs[:min_len])
+    mesa_min_len = min(mesa.nbytes, crs_mesa.nbytes)
+    mesa_mismatch = np.flatnonzero(mesa[:mesa_min_len] != crs_mesa[:mesa_min_len])
+    same_size = mesa.nbytes == crs.nbytes
+    same_bytes = same_size and mismatch.size == 0
+    mesa_same_size = mesa.nbytes == crs_mesa.nbytes
+    mesa_same_bytes = mesa_same_size and mesa_mismatch.size == 0
+
+    print("Packed input byte compare before submit:")
+    print(f"  input_shape={tuple(input_nhwc.shape)}")
+    print(f"  mesa_bytes={mesa.nbytes} translate_crs_int8_bytes={crs.nbytes}")
+    print(f"  same_size={same_size} same_bytes={same_bytes}")
+    print(f"  translate_crs_int8_mesa_bytes={crs_mesa.nbytes}")
+    print(f"  mesa_compatible_same_size={mesa_same_size} mesa_compatible_same_bytes={mesa_same_bytes}")
+    print(f"  mesa_first_{max_bytes}={mesa[:max_bytes].tolist()}")
+    print(f"  translate_crs_first_{max_bytes}={crs[:max_bytes].tolist()}")
+    print(f"  translate_crs_mesa_first_{max_bytes}={crs_mesa[:max_bytes].tolist()}")
+    if mismatch.size:
+        print(f"  first_{min(max_diffs, mismatch.size)}_diffs:")
+        for off in mismatch[:max_diffs]:
+            print(f"    @{int(off)} mesa={int(mesa[off])} translate_crs={int(crs[off])}")
+    if mesa_mismatch.size:
+        print(f"  first_{min(max_diffs, mesa_mismatch.size)}_mesa_compatible_diffs:")
+        for off in mesa_mismatch[:max_diffs]:
+            print(f"    @{int(off)} mesa={int(mesa[off])} translate_crs_mesa={int(crs_mesa[off])}")
+    if mesa.nbytes != crs.nbytes:
+        print(f"  extra_bytes={abs(mesa.nbytes - crs.nbytes)}")
+    return same_bytes, mesa_same_bytes
 
 # ---------------------------------------------------------------------------
 # Weight packing (rkt_coefs.c:rkt_fill_weights)
@@ -1280,8 +1436,6 @@ def emit_regcmd_like_mesa(op, task_num, input_phys_addr, output_phys_addr,
         E(reg.PC, reg.OPERATION_ENABLE,
           PC_OPERATION_ENABLE_RESERVED_0(14) | PC_OPERATION_ENABLE_OP_EN(1)),
     ]
-    print(npu_regs)
-
     return npu_regs
 
 def _get_target(reg_addr):
@@ -1465,7 +1619,8 @@ def create_operation_from_args(input_nhwc, weight_ohwi, biases_in,
 # ---------------------------------------------------------------------------
 # Allocate buffers and set up all BOs
 # ---------------------------------------------------------------------------
-def setup_bos(fd, op, input_data_nhwc, weight_ohwi, biases_data):
+def setup_bos(fd, op, input_data_nhwc, weight_ohwi, biases_data,
+              input_packer="mesa"):
     """Allocate input, weight, bias, output, and regcmd BOs for an operation."""
 
     input_size = calc_input_size(op.input_width, op.input_height, op.input_channels)
@@ -1479,9 +1634,11 @@ def setup_bos(fd, op, input_data_nhwc, weight_ohwi, biases_data):
     output_buf, output_bo = _rocket_mem_allocate(fd, output_size)
     regcmd_buf, regcmd_bo = _rocket_mem_allocate(fd, 512 * 1024)
 
-    packed_input = pack_input_like_mesa(
-        input_data_nhwc, op.input_width, op.input_height, op.input_channels,
-        op.input_zero_point, op.output_channels, op.addition_input, op.add_tensor)
+    packed_input = pack_input_by_name(input_packer, input_data_nhwc, op)
+
+    if packed_input.nbytes > input_size:
+        raise ValueError(
+            f"packed input ({packed_input.nbytes} bytes) exceeds input BO ({input_size} bytes)")
     ctypes.memmove(ctypes.addressof(ctypes.c_char.from_buffer(input_buf)),
                    packed_input.ctypes.data, packed_input.nbytes)
 
@@ -1527,7 +1684,8 @@ def run_mesa_conv(fd, input_nhwc, weight_ohwi, biases,
                    weight_zero_point=0, weight_scale=1.0/255,
                    output_zero_point=0, output_scale=1.0/255,
                    pad_top=0, pad_bottom=0, pad_left=0, pad_right=0,
-                   stride=1, depthwise=False, _allow_im2col=True):
+                   stride=1, depthwise=False, _allow_im2col=True,
+                   input_packer="mesa"):
     """
     Run one convolution through the Mesa-equivalent pipeline.
     Returns output NHWC uint8 tensor.
@@ -1550,7 +1708,7 @@ def run_mesa_conv(fd, input_nhwc, weight_ohwi, biases,
             input_zero_point=input_zero_point, input_scale=input_scale,
             weight_zero_point=weight_zero_point, weight_scale=weight_scale,
             output_zero_point=output_zero_point, output_scale=output_scale,
-            depthwise=depthwise)
+            depthwise=depthwise, input_packer=input_packer)
         return result, op
 
     if depthwise and input_nhwc.shape[3] > 64 and (input_nhwc.shape[3] % 64) != 0:
@@ -1564,7 +1722,7 @@ def run_mesa_conv(fd, input_nhwc, weight_ohwi, biases,
                 weight_scale=weight_scale, output_zero_point=output_zero_point,
                 output_scale=output_scale, pad_top=pad_top, pad_bottom=pad_bottom,
                 pad_left=pad_left, pad_right=pad_right, stride=stride, depthwise=depthwise,
-                _allow_im2col=False)
+                _allow_im2col=False, input_packer=input_packer)
             outputs.append(chunk_out)
 
         op = create_operation_from_args(
@@ -1588,7 +1746,7 @@ def run_mesa_conv(fd, input_nhwc, weight_ohwi, biases,
 
     split_tasks_like_mesa(op)
 
-    bos = setup_bos(fd, op, input_nhwc, weight_ohwi, biases)
+    bos = setup_bos(fd, op, input_nhwc, weight_ohwi, biases, input_packer=input_packer)
     (input_buf, input_bo), (weight_buf, weight_bo), (bias_buf, bias_bo), \
         (output_buf, output_bo), (regcmd_buf, regcmd_bo) = bos
 
@@ -1624,7 +1782,7 @@ def run_mesa_conv_im2col(fd, input_nhwc, weight_ohwi, biases,
                          input_zero_point=0, input_scale=1.0/255,
                          weight_zero_point=0, weight_scale=1.0/255,
                          output_zero_point=0, output_scale=1.0/255,
-                         depthwise=False):
+                         depthwise=False, input_packer="mesa"):
     """Lower fragile spatial/1D cases to a 1x1 NPU conv; no CPU convolution."""
     _, in_h, in_w, in_c = input_nhwc.shape
     oc, kw, kh, _ = weight_ohwi.shape
@@ -1679,7 +1837,8 @@ def run_mesa_conv_im2col(fd, input_nhwc, weight_ohwi, biases,
             input_zero_point=input_zero_point, input_scale=input_scale,
             weight_zero_point=weight_zero_point, weight_scale=weight_scale,
             output_zero_point=output_zero_point, output_scale=output_scale,
-            stride=1, depthwise=False, _allow_im2col=False)
+            stride=1, depthwise=False, _allow_im2col=False,
+            input_packer=input_packer)
         outputs.append(result[:, :, :output_channels])
 
     return np.concatenate(outputs, axis=0), last_op
@@ -1690,7 +1849,8 @@ def run_mesa_case(fd, input_nhwc, weight_ohwi, biases,
                   weight_zero_point=0, weight_scale=1.0/255,
                   output_zero_point=0, output_scale=1.0/255,
                   pad_top=0, pad_bottom=0, pad_left=0, pad_right=0,
-                  stride=1, depthwise=False, groups=1):
+                  stride=1, depthwise=False, groups=1,
+                  input_packer="mesa"):
     """Run batch/grouped cases as serial NPU convolutions."""
     batch, _, _, in_c = input_nhwc.shape
     out_c = in_c if depthwise else weight_ohwi.shape[0]
@@ -1707,7 +1867,8 @@ def run_mesa_case(fd, input_nhwc, weight_ohwi, biases,
                 output_zero_point=output_zero_point, output_scale=output_scale,
                 pad_top=pad_top, pad_bottom=pad_bottom,
                 pad_left=pad_left, pad_right=pad_right,
-                stride=stride, depthwise=depthwise)
+                stride=stride, depthwise=depthwise,
+                input_packer=input_packer)
         else:
             input_per_group = in_c // groups
             output_per_group = out_c // groups
@@ -1725,7 +1886,8 @@ def run_mesa_case(fd, input_nhwc, weight_ohwi, biases,
                     output_zero_point=output_zero_point, output_scale=output_scale,
                     pad_top=pad_top, pad_bottom=pad_bottom,
                     pad_left=pad_left, pad_right=pad_right,
-                    stride=stride, depthwise=False)
+                    stride=stride, depthwise=False,
+                    input_packer=input_packer)
                 group_outputs.append(group_result)
             result = np.concatenate(group_outputs, axis=2)
         batch_outputs.append(result)
@@ -1866,7 +2028,7 @@ def conv_py_shape_to_mesa_case(shape):
                 bias_shape=bias_shape, pad=0, stride=1, depthwise=depthwise,
                 groups=groups), None
 
-def run_quantized_case(fd, shape):
+def run_quantized_case(fd, shape, input_packer="mesa"):
     np.random.seed(42)
     input_nhwc = np.random.randint(0, 256, shape["input_shape"], dtype=np.uint8)
     weight_ohwi = np.random.randint(0, 256, shape["weight_shape"], dtype=np.uint8)
@@ -1877,7 +2039,7 @@ def run_quantized_case(fd, shape):
         pad_top=shape["pad"], pad_bottom=shape["pad"],
         pad_left=shape["pad"], pad_right=shape["pad"],
         stride=shape["stride"], depthwise=shape["depthwise"],
-        groups=shape.get("groups", 1))
+        groups=shape.get("groups", 1), input_packer=input_packer)
 
     expected = compute_expected_quantized(
         input_nhwc, weight_ohwi, biases, 0, 0, 0,
@@ -1889,7 +2051,28 @@ def run_quantized_case(fd, shape):
     diff = int(np.max(np.abs(result.astype(np.int32) - expected.astype(np.int32))))
     return diff
 
-def shape_matrix_runner(fd):
+def make_quantized_case_tensors(shape):
+    np.random.seed(42)
+    input_nhwc = np.random.randint(0, 256, shape["input_shape"], dtype=np.uint8)
+    weight_ohwi = np.random.randint(0, 256, shape["weight_shape"], dtype=np.uint8)
+    biases = np.random.randint(-128, 128, shape["bias_shape"], dtype=np.int32)
+    return input_nhwc, weight_ohwi, biases
+
+def compare_packed_input_case(case):
+    input_nhwc, weight_ohwi, biases = make_quantized_case_tensors(case)
+    op = create_operation_from_args(
+        input_nhwc, weight_ohwi, biases,
+        0, 1.0 / 255,
+        0, 1.0 / 255,
+        0, 1.0 / 255,
+        pad_top=case["pad"], pad_bottom=case["pad"],
+        pad_left=case["pad"], pad_right=case["pad"],
+        stride=case["stride"], depthwise=case["depthwise"])
+    split_tasks_like_mesa(op)
+    print(f"Case: {case['name']}")
+    return compare_packed_input_bytes(input_nhwc, op)
+
+def shape_matrix_runner(fd, input_packer="mesa"):
     """Run a list of known TFLite conv shapes through the Mesa-equivalent pipeline."""
 
     shapes = [
@@ -1913,7 +2096,7 @@ def shape_matrix_runner(fd):
         sys.stdout.flush()
 
         try:
-            diff = run_quantized_case(fd, s)
+            diff = run_quantized_case(fd, s, input_packer=input_packer)
             ok = diff <= 1
             status = "PASS" if ok else f"FAIL (max_diff={diff})"
             print(f" {status}")
@@ -1923,7 +2106,7 @@ def shape_matrix_runner(fd):
             failed += 1
     print(f"Built-in matrix: {len(shapes) - failed} PASS, {failed} FAIL")
 
-def conv_py_shape_matrix_runner(fd):
+def conv_py_shape_matrix_runner(fd, input_packer="mesa"):
     """Run every conv.py test row that has Mesa-equivalent quantized semantics."""
     conv_shapes = load_conv_py_shapes()
     cases = []
@@ -1941,7 +2124,7 @@ def conv_py_shape_matrix_runner(fd):
         print(f"  {case['name']:<{name_width}s} ...", end=" ")
         sys.stdout.flush()
         try:
-            diff = run_quantized_case(fd, case)
+            diff = run_quantized_case(fd, case, input_packer=input_packer)
             ok = diff <= 1
             if ok:
                 passed += 1
@@ -1959,8 +2142,54 @@ def conv_py_shape_matrix_runner(fd):
     print(f"conv.py-derived Mesa matrix: {passed} PASS, {failed} FAIL, {len(skipped)} SKIP")
     return failed
 
+def conv_py_shape_cases():
+    conv_shapes = load_conv_py_shapes()
+    cases = []
+    skipped = []
+    for s in conv_shapes:
+        case, reason = conv_py_shape_to_mesa_case(s)
+        if case is None:
+            skipped.append((s["name"], reason))
+        else:
+            cases.append(case)
+    return cases, skipped
+
+def select_conv_py_shape_case(selector):
+    cases, _ = conv_py_shape_cases()
+    if selector is None:
+        return cases[0]
+    try:
+        return cases[int(selector)]
+    except ValueError:
+        pass
+    for case in cases:
+        if case["name"] == selector:
+            return case
+    raise ValueError(f"unknown conv.py case selector: {selector}")
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--use-translate-crs-int8", action="store_true",
+        help="pack input activations with translateCRSToFeatureData int8 layout instead of Mesa layout")
+    parser.add_argument(
+        "--input-packer", choices=("mesa", "translate_crs_int8", "translate_crs_int8_mesa"),
+        help="select input packer; overrides --use-translate-crs-int8")
+    parser.add_argument(
+        "--compare-packed-input", nargs="?", const="0", metavar="CASE",
+        help="compare Mesa and translateCRSToFeatureData packed input bytes before submit, then exit")
+    args = parser.parse_args()
+
+    input_packer = args.input_packer
+    if input_packer is None:
+        input_packer = "translate_crs_int8" if args.use_translate_crs_int8 else "mesa"
+    print(f"Input packer: {input_packer}")
+
+    if args.compare_packed_input is not None:
+        compare_packed_input_case(select_conv_py_shape_case(args.compare_packed_input))
+        sys.exit(0)
+
     fd = _open_rocket_device()
-    shape_matrix_runner(fd)
-    conv_py_shape_matrix_runner(fd)
+    shape_matrix_runner(fd, input_packer=input_packer)
+    conv_py_shape_matrix_runner(fd, input_packer=input_packer)
     os.close(fd)

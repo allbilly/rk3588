@@ -1,0 +1,40 @@
+33277:The setCoreMask interface is only valid on RK3588 platforms.
+33347:RKNPU f2
+33450:Cannot find uniform split solution for size %d with limit %d and macC %d
+33465:For rk3588/rk3576, core mask for matmul api will fall back to RKNN_NPU_CORE_AUTO mode
+33543:St23_Sp_counted_ptr_inplaceIN4rknn19RKNNRegisterTask_f2ESaIS1_ELN9__gnu_cxx12_Lock_policyE2EE
+33551:  CNA feature group0: %d
+33552:  CNA feature group1: %d
+33553:  CNA weight  group0: %d
+33554:  CNA weight  group1: %d
+33555:  CNA csc     group0: %d
+33556:  CNA csc     group1: %d
+33571:N4rknn19RKNNRegisterTask_f2E
+33722:failed to update data and weight reuse!
+34054:RKNPU F2
+34065:min_weight_banks > 3 && m_Target == RKNNTarget::RKNPU_F2, do conv with ChannelTile
+34066:min_weight_banks > 7 && m_Target == RKNNTarget::RKNPU_F3, do conv with ChannelTile
+34067:min_weight_banks > 8 && m_Target == RKNNTarget::RKNPU_W2, do conv with ChannelTile
+34068:min_weight_banks > 7 && m_Target == RKNNTarget::RKNPU_W1, do conv with ChannelTile
+34251:RK3588
+36876:N4rknn7runtime12RKNPUEmitterE
+36878:N4rknn7runtime14RKNPUEmitterF2E
+36879:N4rknn7runtime16RKNPUEmitterLiteE
+36880:N4rknn7runtime14RKNPUEmitterT4E
+36881:N4rknn7runtime14RKNPUEmitterV2E
+36883:St23_Sp_counted_ptr_inplaceIN4rknn7runtime16RKNPUEmitterLiteESaIS2_ELN9__gnu_cxx12_Lock_policyE2EE
+36884:St23_Sp_counted_ptr_inplaceIN4rknn7runtime14RKNPUEmitterV2ESaIS2_ELN9__gnu_cxx12_Lock_policyE2EE
+36885:St23_Sp_counted_ptr_inplaceIN4rknn7runtime14RKNPUEmitterT4ESaIS2_ELN9__gnu_cxx12_Lock_policyE2EE
+36886:St23_Sp_counted_ptr_inplaceIN4rknn7runtime14RKNPUEmitterF2ESaIS2_ELN9__gnu_cxx12_Lock_policyE2EE
+36901:banks num invalid, input_bank_num: %d, weight_bank_num: %d
+36902:Invalid reuse strategy!
+36903:buffer overflow!!!
+36904:Feature is too large
+36912:grade 2 group failed for core_num %d
+36914:Conv min_weight_banks > 3, OutputName : %s
+36916:MC K Tile Failed, min kernel step %d, but get %d
+36923:Unknown split Method -> %d
+36924:|xstart  |ystart  |kstart  | data reuse | weight reuse | mc_treat_by_y_tile | mc_treat_by_k_tile | mc_treat_by_1c_y_tile | mc_treat_by_1c_k_tile |
+36926:Failed to config layer: '%s', illegal tiling method %d
+36937:X tile buffer overflow! Failed to config layer: '%s', Fatal Error input W too large
+36954:RK3588 library do not support generate RK3566/RK3568 rknn model, exit now

@@ -33,6 +33,310 @@ Remaining gaps after GDB trace:
 | 4 | **Reuse patching register targets** (`fcn.002efd38`/`002efce0`) | **DMA address patching confirmed** — `fcn.002efce0` never hit (single-tile model) | Run on multi-tile model to trigger fcn.002efce0 |
 | 5 | **CNA group mask producer** | **Still unknown** — no xref found statically | May resolve from ABC_T trace on multi-tile model |
 
+Runtime submit metadata update (2026-05-23): read-only remote GDB tracing with
+`experimental/capture_rknpu_submit.gdb` on the exact copied ChannelTile `sweep`
+and `mix` RKNN exports showed one `DRM_IOCTL_RKNPU_SUBMIT` per inference with
+`task_number=6`. Subcores 0, 1, and 2 each receive two tasks; subcores 3 and 4
+receive none. A follow-up read-only ioctl trace
+(`experimental/capture_rknpu_ioctl_readonly.gdb`) correlated the sweep
+`task_obj_addr` with a 680-byte RKNPU memory object synced to device before
+submit. Copying the remote `dump.py` confirmed the task-record layout is
+`<8IQ` (40 bytes), and a smaller read-only GEM scanner decoded the live GEM as a
+17-record backing table. Those 17 records are not all active work: submit
+`task_number` and `subcore_task[*].task_start/task_number` are the active range
+selectors. For this trace, global `task_number=6` implies records 0..5 if read
+linearly, while the populated subcore ranges each point at records 0..1. Records
+outside the submitted ranges are extra backing-table/cached records and should
+not be used to build a local submit mapping. The global linear interpretation is
+`conv, conv, conv, conv, separator, conv`; each populated subcore range selects
+only the first two conv records. Neither interpretation equals the candidate
+six-task/two-body grouping used by local Rocket experiments. This supersedes the
+earlier 3-task assumption for these exact exports. The decoded backing table
+also has a stable record shape: conv records are spaced by 112 qwords and carry
+`enable_mask=0x0d`, `int_mask=0x300`; separator/fence-like records are spaced by
+32 qwords and carry `enable_mask=0x60`, `int_mask=0xc00`. That backing structure
+is now checked by `experimental/compare_conv_direct_regs.py
+--verify-observed-task-gem`, but it remains distinct from the active task range.
+The companion `--verify-observed-task-gem-log` mode parses the saved sweep GEM
+capture directly and checks those amounts, normalized regcmd offsets, enable
+masks, and interrupt masks against the local observed-task model.
+`--verify-observed-active-ranges` checks the two active-range interpretations
+explicitly, and can run in log-backed mode using the saved submit and GEM dump
+captures.
+`--verify-runtime-task-boundaries` goes one step further: it combines the exact
+exported `.rknn` command stream with the saved submit metadata and task-GEM dump,
+then reconstructs candidate command intervals from observed `regcmd_addr` and
+`regcfg_amount` records. It preserves the separator/fence-like records instead
+of assuming equal descriptor grouping. The current result is an intentional
+failure: global `task_number=6`, concatenated repeated `subcore_task[0..2]=(0,2)`,
+and unique subcore ranges select different command intervals. That failure is
+the safe state; no local Rocket job/task mapping is proven from this trace.
+
+Driver-side interpretation is still the direct-spatial submit blocker. The
+available vendor source in `ref/rknpu_driver/rknpu_job.c` treats `core_mask=0`
+as `RKNPU_CORE_AUTO_MASK`: scheduling rewrites it to one physical core and sets
+`use_core_num=1`. For one- or two-core jobs, PC commit reads
+`subcore_task[core_index]`; `subcore_task[core_index + 2]` is used only for
+explicit three-core jobs. Under that model, the captured `core_mask=0` metadata
+selects one repeated `(0,2)` range, not all six global tasks and not all three
+repeated subcore ranges. Do not turn this RKNN trace into a local Rocket
+direct-spatial submit until the vendor PC-linked task table is translated into
+the local Rocket job/task ABI.
+`--verify-rknpu-driver-source-semantics` makes this source evidence executable:
+it parses `ref/rknpu_driver/include/rknpu_job.h` for the core-mask constants and
+checks `ref/rknpu_driver/rknpu_job.c` for the auto core-mask rewrite,
+`use_core_num` calculation, and the `subcore_task[core_index]` versus
+`subcore_task[core_index + 2]` PC-commit branches. This check is now part of the
+safe preflight.
+`--verify-rk3588-vendor-config-semantics` adds the RK3588 config side of that
+proof: `ref/rknpu_driver/rknpu_drv.c` binds `rockchip,rk3588-rknpu` to
+`rk3588_rknpu_config`, the IRQ table has three subcore IRQ handlers, and the
+config carries `core_mask=0x7`, `pc_data_amount_scale=2`,
+`pc_task_number_bits=12`, and `pc_task_number_mask=0xfff`. So the checked-in
+vendor RK3588 path really uses the multi-IRQ/subcore task-selection branch.
+`--verify-vendor-runtime-task-selection` now encodes this source model and
+passes on the saved sweep logs, selecting records `0..1` under an empty-queue
+core-0 model. This narrows the vendor active-range interpretation but is not a
+complete local Rocket mapping of the full 1280-qword compiler stream.
+`--verify-vendor-pc-commit-register-model` applies the same source path through
+`rknpu_job_subcore_commit_pc()`: for `subcore_task[0]=(0,2)`, the vendor commit
+would program `PC_DATA_ADDR=0x0`, `PC_DATA_AMOUNT=0x37`,
+`PC_TASK_CONTROL=0x6002`, and `INT_MASK=INT_CLEAR=0x300`, with the first fetch
+covering qwords `[0:112]`. That is concrete evidence that the vendor-selected
+submit starts from record 0 and does not directly describe a full-stream local
+Rocket job.
+`--verify-vendor-selected-rocket-rejection` makes the local Rocket consequence
+explicit. If the source-selected `(0,2)` range were copied into Rocket, the job
+would have only two tasks, raw spans `[0:108]` and `[112:220]`, covering
+`216/1280` qwords. With the vendor fetch rule it reaches only `[0:224]`, or
+`224/1280` qwords. This is now a checked rejection of the "submit the selected
+subcore range" shortcut.
+`--verify-global-task-number-rocket-rejection` rejects the global
+`task_number=6` shortcut as well: records `0..5` cover `554/1280` qwords raw and
+`578/1280` qwords with the vendor fetch rule, include a separator record, and
+include two conv records whose starts are not PC-chain targets.
+
+Local kernel 6.18 uses the upstream/mainline Rocket ABI rather than the vendor
+`rknpu_submit` ABI. On this board `rocket.ko` is loaded from
+`/lib/modules/6.18.24-current-rockchip64/kernel/drivers/accel/rocket/rocket.ko`,
+and the local `rocket_runtime.py`/`ref/librocket/include/rocket_accel.h` UAPI is
+`drm_rocket_submit -> drm_rocket_job -> drm_rocket_task`, with each task carrying
+only `{regcmd, regcmd_count}`. There is no local Rocket `core_mask`,
+`subcore_task`, `task_start`, or vendor `task_number` field. The new
+`--verify-local-rocket-uapi` check records this distinction from the Python
+ctypes model, and `--verify-local-rocket-uapi-source` checks the same distinction
+against `ref/librocket/include/rocket_accel.h`. The direct-spatial submit blocker
+is therefore exact Rocket job/task-boundary translation from the RKNN
+compiler/runtime traces, not copying vendor submit fields.
+
+The direct-spatial HW probe path remains guarded by both
+`RK3588_CONV_DIRECT_SPATIAL=1` and `RK3588_CONV_DIRECT_SPATIAL_UNSAFE=1`. This is
+now enforced by the offline `--verify-direct-spatial-gate` check in
+`experimental/compare_conv_direct_regs.py`, which exercises the env-var truth
+table without submitting work to hardware.
+
+The consolidated offline checklist is
+`experimental/compare_conv_direct_regs.py --verify-safe-direct-spatial-preflight`.
+It runs the gate, RKNN span/stream/boundary, candidate 6-task, observed task GEM,
+exact sweep/mix export-pair check, log-backed observed task GEM, submit log
+consistency, task-object sync correlation, task-object record count, observed
+active-range, runtime task/fetch coverage, task-gap and row-overlap summaries,
+backing-span, PC-base link, PC-amount length, driver PC-fetch span, vendor
+core-mask, vendor driver-source, vendor runtime-selection, and local Rocket UAPI
+verifiers in one sequence. Passing this checklist is required before any future
+guarded direct-spatial HW probe, but it is still not evidence that a Rocket
+submit mapping is safe.
+
+`--verify-exact-export-pair` checks both copied exact exports. Current result:
+`sweep` and `mix` both pass the RKNN span, stream, and compiler-boundary checks
+and share the same 1280-qword compiler-stitched command stream.
+
+`--verify-submit-log-consistency` parses the saved sweep and mix read-only submit
+logs and verifies both have exactly one `DRM_IOCTL_RKNPU_SUBMIT` with
+`cmd=0xc0686441`, `size=104`, `flags=0x5`, `timeout=6000`, `task_start=0`,
+`task_number=6`, `core_mask=0`, `fence_fd=-1`, and
+`subcore_task[0..2]=(0,2)` while subcores 3/4 are unused.
+
+`--verify-task-object-sync-correlation` parses
+`experimental/rknn/capture_rknpu_ioctl_sweep_readonly.log` and verifies the
+submitted `task_obj_addr` is the object synced as a 680-byte task buffer with
+`MEM_SYNC` flags `0x3` and `0x1` before submit. This ties the task-GEM model to
+the actual submitted task object.
+
+`--verify-task-object-record-count` parses
+`ref/rknpu_driver/include/rknpu_ioctl.h` to confirm packed `struct rknpu_task` is
+40 bytes, then verifies the 680-byte submitted task object corresponds to
+exactly 17 decoded task records.
+
+The stricter Phase D mapping guard is now:
+
+```sh
+python3 experimental/compare_conv_direct_regs.py sweep_b1_c160_h40_w40_oc320_wic160_k3x3_g1 \
+  --verify-runtime-task-boundaries \
+  --submit-log experimental/rknn/capture_rknpu_submit_sweep_readonly.log \
+  --task-gem-log experimental/rknn/capture_rknpu_submit_dump_gems_sweep.log
+```
+
+It currently exits nonzero with `FAIL ambiguous observed runtime task boundaries`.
+It also flags records from the global interpretation that are not PC-chain task
+starts. Do not change `examples/kernel_6_18/conv.py` submit behavior or run
+another direct-spatial hardware probe until this ambiguity is resolved offline.
+
+The companion `--verify-runtime-task-coverage` mode is diagnostic and currently
+shows:
+
+- global `task_number=6` covers 554/1280 qwords of the exact RKNN stream
+- concatenated repeated subcore ranges cover 216/1280 qwords
+- unique subcore range covers 216/1280 qwords
+- all interpretations first leave the stream uncovered at qword 108
+
+This makes the remaining gap concrete: the captured task-record intervals are
+not, by themselves, a complete local Rocket command stream. A safe mapping must
+explain the missing PC-tail/fence/stream regions before any hardware submit.
+
+The companion `--verify-pc-linked-task-graph` mode follows `PC_BASE_ADDRESS`
+links from the observed submit-selected records. Current log-backed result:
+global entries `[0..5]` reach records `[0..7]`, repeated or unique
+`subcore_task=(0,2)` entries reach only `[0,1]`, and records with starts inside
+the exact 1280-qword stream include `[0..14]`. The submit-selected entries plus
+PC chaining therefore still do not cover the full compiler stream.
+
+The companion `--verify-pc-chain-components` mode computes roots of the
+PC-linked backing table. Current log-backed result: active records with starts
+inside the stream are `[0..14]`, while PC-chain roots are `[0,2,5,8,11,14]`.
+The root count is six, matching global `task_number=6`, but the root set is not
+the observed global entry range `[0..5]` and not the unique subcore entry range
+`[0,1]`. This is useful translator structure, not a local Rocket submit recipe.
+
+The companion `--verify-pc-chain-component-coverage` mode maps those root
+components back to compiler row segments using the vendor `regcfg_amount + 4`
+fetch rule. Current log-backed result intentionally fails: component fetches
+cover `1240/1280` qwords and leave gaps such as `[332:336]`, `[444:448]`,
+`[478:480]`, and later repeated alignment/body gaps. Therefore even the six
+PC-chain roots are not by themselves a complete local Rocket command stream.
+
+The companion `--verify-pc-root-contiguous-rocket-candidate` mode partitions the
+exact compiler stream at the six PC-chain root starts. Current log-backed result
+passes offline with candidate Rocket task spans `[0:224]`, `[224:480]`,
+`[480:736]`, `[736:992]`, `[992:1248]`, and `[1248:1280]`
+(`224,256,256,256,256,32` qwords). This candidate is still not directly proven
+by the observed RKNN submit metadata, but it is now implemented as the local
+runtime default for the exact supported descriptor schedule once both unsafe
+direct-spatial gates are set. `RK3588_CONV_DIRECT_SPATIAL_TASKS=reg_lists`
+remains an explicit diagnostic override, and
+`RK3588_CONV_DIRECT_SPATIAL_TASKS=pc_root6` remains a strict explicit raw-span
+request that rejects unsupported schedules before submit. The runtime
+implementation derives record starts and PC tail amounts from the observed
+17-record backing-table amounts instead of embedding every tail address
+directly.
+
+`--verify-runtime-pc-root6-stream` checks the actual `conv.py` runtime
+implementation. It builds the runtime `pc_root6` stream/spans, normalizes local
+BO DMA bases and `PC_BASE_ADDRESS` values to offsets, and compares the result
+against the exact RKNN compiler stream plus expected six raw Rocket spans. This
+check is part of `--verify-safe-direct-spatial-preflight` and currently passes
+with `1280` qwords and spans `(0,224), (224,256), (480,256), (736,256),
+(992,256), (1248,32)`.
+
+`--verify-runtime-pc-root6-guard` checks the runtime shape guard. The guard
+accepts the exact known 40x40 descriptor schedule and rejects all other currently
+mirrored `160->320`, `3x3` sweep schedules before any submit. This check is part of
+`--verify-safe-direct-spatial-preflight`.
+
+`--verify-direct-spatial-task-policy` checks direct-spatial task-policy
+selection. Empty/unset `RK3588_CONV_DIRECT_SPATIAL_TASKS` still reports the
+global default `reg_lists` policy when no descriptor schedule is supplied, but
+the exact supported descriptor schedule defaults to `pc_root6`. Explicit
+`reg_lists` keeps the diagnostic reg-list path available, explicit `pc_root6`
+selects the raw-span candidate, and any other value is rejected before submit.
+This check is part of
+`--verify-safe-direct-spatial-preflight`.
+
+`--verify-observed-descriptor-sweep` checks descriptor planning separately from
+submit safety. It compares `conv.py`'s observed spatial planner against
+`experimental/rknn_descriptor_plan.py` for the `160->320`, `3x3`, groups-1 square
+sweep at `H=16,20,24,28,32,36,40`. Current result: all seven shapes pass,
+covering 60 descriptor records. The parity keys include family, `grain_bits`,
+`CBUF_CON0`, `input_y`, `input_h`, output dimensions, `oc_start`, `oc_count`,
+`pc_core`, and feature/weight/output offsets. This proves the direct-spatial
+descriptor producer has broader planning coverage than the current exact-shape
+`pc_root6` hardware policy while still checking key RKNN-observed resource
+fields and PC-tail core routing.
+
+`--verify-direct-spatial-planner-routing` checks the actual
+`plan_conv_descriptors()` routing. It verifies that fallback descriptors remain
+the default unless both direct-spatial env gates are set, that the double-gated
+default path returns a raw-span `pc_root6` direct-spatial descriptor for the
+exact supported 40x40 schedule, that
+`RK3588_CONV_DIRECT_SPATIAL_TASKS=reg_lists` returns the diagnostic reg-list
+descriptor, and that an unsupported mirrored 36x36 schedule raises before
+submit when `pc_root6` is explicitly requested. This check is part of
+`--verify-safe-direct-spatial-preflight`.
+
+The companion `--verify-pc-root-candidate-boundaries` mode checks that
+candidate's boundaries. Current log-backed result intentionally fails:
+boundaries `224`, `480`, `736`, `992`, and `1248` are observed task-record
+starts, but they are not `PC_BASE_ADDRESS` targets and they cut through compiler
+body segments. This remains a conservative offline warning rather than a
+hardware result: the guarded `pc_root6` probe on the exact `160x40 -> 320`,
+`3x3`, groups-1 target passed on the local Rocket driver with `max_diff=0.0625`,
+and `examples/kernel_6_18/simple_add.py` passed immediately afterward.
+
+The companion `--verify-direct-spatial-blockers` mode is the explicit
+expected-failure guard. It runs `--verify-runtime-task-boundaries`,
+`--verify-pc-chain-component-coverage`, and
+`--verify-pc-root-candidate-boundaries`, and passes only while all three remain
+blocked for the known offline reasons. It is included in the safe preflight so a
+previously unsafe mapping cannot silently become accepted.
+
+The companion `--verify-runtime-task-gaps` mode decodes those uncovered regions.
+The first missing range for all submit interpretations is qwords `108:112`:
+`PC_BASE_ADDRESS`, `PC_REGISTER_AMOUNTS`, `PC_OPERATION_ENABLE`, and then the
+next body's `CBUF_CON0`. Later gaps contain ordinary body fragments too, including
+`CONV_CON2`, `DATA_SIZE*`, `WEIGHT_SIZE*`, DCOMP, and CORE setup commands. That
+means the missing mapping is not merely "observed task records plus PC tails";
+it crosses stitched compiler-run body boundaries.
+
+The companion `--verify-runtime-task-row-overlaps` mode maps each observed task
+record back to the compiler descriptor rows. Current result: record 0 is exactly
+row 1 body, record 1 spans row 2 body plus row 3 `prev_enable`, later records
+span body/tail fragments across adjacent rows, and the separator record is a
+slice of row 5 body. The runtime task table is therefore a segmentation of the
+stitched command stream, not a descriptor-row table.
+
+The companion `--verify-task-backing-span` mode compares the entire observed
+17-record backing table to the exact compiler stream. Current result: the
+compiler stream is 1280 qwords, while the backing table spans 1498 qwords; records
+14, 15, and 16 extend past the compiler stream. This is additional evidence that
+the whole backing table is cached/backing storage, not the active work list.
+
+The companion `--verify-pc-base-task-links` mode checks the PC-chain addresses in
+the exported stream against observed task-record starts. Current result: all 11
+`PC_BASE_ADDRESS` values target task-record starts, and the last two target
+records 15 and 16 beyond the 1280-qword exact stream. This supports a
+PC-linked stitched-stream task-table model, but active work still has to be
+selected from submit metadata.
+
+The companion `--verify-pc-amount-task-lengths` mode checks the adjacent
+`PC_REGISTER_AMOUNTS` values. Current result: for all 11 PC links,
+`PC_REGISTER_AMOUNTS.low * 2 - 2` equals the linked task record's
+`regcfg_amount`, while the high bits carry the core index. This proves the PC
+tail is linked to the task table by both address and fetch length.
+
+The companion `--verify-driver-pc-fetch-spans` mode encodes the vendor driver's
+`RKNPU_PC_DATA_EXTRA_AMOUNT=4` fetch rule. Current result: each record fetches
+`regcfg_amount + 4` qwords. That lands 108-qword records exactly on the next
+112-qword boundary, leaves 4 qwords of alignment padding after 104-qword records,
+and leaves 2 qwords after 26-qword separator records. This explains the observed
+task-record spacing without treating padding as active commands.
+
+The companion `--verify-runtime-fetch-coverage` mode applies the same fetch rule
+to the submit-selected interpretations. Current result: global `task_number=6`
+fetches 578/1280 qwords with alignment gaps, while repeated or unique
+`subcore_task=(0,2)` fetches contiguous qwords `[0:224]`. This is the closest
+current offline model of vendor PC DMA coverage, but it still does not prove a
+local Rocket mapping for the full command stream.
+
 Command style used:
 
 ```sh
@@ -2149,59 +2453,16 @@ As of May 2026, this document covers approximately **60%** of the conv tiling lo
 
 | Gap | Functions | What's missing | Impact |
 |-----|-----------|---------------|--------|
-| **ConvStreaming** | `fcn.002ba2c0` et al. (58KB) | Weight streaming conv operator — loads weights in chunks when they don't fit CBUF | Python driver will fail for large-weight spatial convs (3x3 with 160+ channels) that trigger this path |
-| **Register emission** | `fcn.005a41f0` (ABC_T/BAC), `fcn.005a4e18` (KC_T/C1K1C2K2C3) | These convert planner tile records into actual register command streams. Planner (§005f38f0, §005f51c0) produces tile vectors → these emit functions turn them into register writes. | Without these, we can generate tile lists but not the correct register programming for complex tilings |
-| **Type-specific splits** | `fcn.00404930` et al. (4× ~6-7KB) | Template instantiations of split logic for different data types (FP16, FP32, INT8, INT4). Each has different alignment/limit values. | Our Python driver only handles FP16; INT8 models would need different split logic |
+| **ConvStreaming** | `fcn.002ba2c0` et al. | Weight streaming conv operator — loads weights in chunks when they don't fit CBUF. Pseudo-code starts in Appendix H, but it is not traced enough to implement. | Python driver will fall back to slow im2col or fail for large-weight spatial convs that trigger this path |
+| **Register emission** | `fcn.005a41f0` (ABC_T/BAC), `fcn.005a4e18` (KC_T/C1K1C2K2C3), variants `fcn.005a5388`, `fcn.005a6068`, `fcn.005a6c90`, `fcn.005a7200`, `fcn.005a7e28` | These convert planner tile records into actual register command streams. Planner (§005f38f0, §005f51c0) produces tile vectors → these emit functions turn them into register writes. Exact register destinations still need runtime trace. | Without these, we can generate tile lists but not the correct register programming for complex tilings |
+| **Reuse patch targets** | `fcn.002efd38`, `fcn.002efce0`, callers `fcn.00307198`, `fcn.00312328` | Patch mechanics are known, but true ChannelTile command indices → `(target, reg)` destinations are not decoded. | Chained tiles can have correct math but still fail because RKNN patches different data/weight/reuse register entries |
+| **CNA group mask producer** | Formatter `fcn.00101be8`; producer unknown | The 14-bit feature/weight/CSC/ACCU/DPU/PPU mask format is known, but the computation/programming site is not. | Python does not model RKNN's resource-group state for multi-tile conv |
+| **Split-method selection details** | `fcn.005d4ac0`, `fcn.005f38f0`, `fcn.005f51c0` | Planner structure is known, but the exact layer-attribute-to-method mapping around target-limit derivation is still not fully named. | `conv.py` still uses several strategy booleans instead of one RKNN tile-record planner |
+| **Multicore tiling integration** | `fcn.005d78e0`/`fcn.005d7bc8` → `fcn.005d4ac0` | The multicore wrapper creates per-core tile lists and PC-chain routing. We have register-capture evidence for core index in `PC_REGISTER_AMOUNTS`, but no full decomp. | Single-core Python driver does not match RKNN multicore execution |
 | **CNA_DCOMP* padding** | Live EMIT capture shows `CNA_DCOMP_AMOUNT0..15`, `CNA_DCOMP_CTRL`, `CNA_DCOMP_REGNUM` | These are used as PADDING/FILLER registers in the sparse register encoding | Without padding, the register stream has wrong positions. The hardware expects specific register addresses at specific offsets |
 | **CNA_PAD_CON1** | Live EMIT shows `REG_CNA_PAD_CON1` | RKNN models include padding registers; our Python driver assumes padding=0 | Not fatal for `padding=0` cases, but wrong for models with padding |
 | **DCOMP_* registers** | `CNA_DCOMP_ADDR0`, `CNA_DCOMP_AMOUNT0.15`, `CNA_DCOMP_CTRL`, `CNA_DCOMP_REGNUM` | Weight decompression registers. Even for uncompressed weights, these must be emitted as padding to maintain correct register stream positions | Python driver emits registers sequentially by address; RKNN emits registers in a specific positional order with padding between them |
-| **Multicore tiling integration** | `fcn.005d78e0`/`fcn.005d7bc8` → `fcn.005d4ac0` | The multicore wrapper creates 3 copies of the tile lists, one per core, with PC-chain linking them. The PC chain's core routing is encoded in `PC_REGISTER_AMOUNTS` via the `RESERVED_0` field (actually core index 1 or 2). | Single-core Python driver wouldn't need this, but multicore requires exact PC chain with core routing |
 | **Register address ordering** | Live EMIT shows registers NOT in address-sorted order | The register emission follows a specific structural order: RDMA setup, CNA compute, CORE, DPU output, PPU postproc, PC tail. Within each group, registers are at fixed positions with padding. | Python driver emits in arbitrary address order, which may work but doesn't match RKNN's exact layout |
-
-### Answering the key questions:
-
-**Q1: Is the pseudo-code complete for all conv tiling methods?**
-**NO.** It covers the math helpers (bank estimators, ChannelTile predicates, split selector helpers) and the general planner structure (fcn.005d4ac0, fcn.005f38f0, fcn.005f51c0), but it completely misses:
-- The register emission layer (ABC_T/BAC, KC_T/C1K1C2K2C3) — how tile lists → register writes
-- The ConvStreaming operator — a completely separate conv implementation
-- The type-specific split templates (4× ~7KB functions)
-- The padding/positional register layout
-
-**Q2: Is it enough to write a runnable Python draft script?**
-**PARTIALLY.** A Python script could:
-- ✓ Generate tile records similar to `fcn.005d4ac0` (already done in `conv_new_clean.py`)
-- ✓ Select split methods (already done in `conv_new_clean.py` strategies)
-- ✓ Emit CNA/CORE/DPU register commands (already done in `make_conv2d_regs`)
-- ✗ Not correctly emit PPU registers (missing from Python driver)
-- ✗ Not use the correct sparse/padded register ordering
-- ✗ Not handle the ConvStreaming case (large-weight spatial convs would fail)
-- ✗ Not correctly chain multi-tile executions with proper register patching
-
-**Bottom line**: The existing `conv_new_clean.py` is already a reasonable draft, but it would fail on:
-- Large spatial convs that trigger ConvStreaming (160→320 3×3)
-- Models with padding
-- Models needing PPU post-processing
-- Any model requiring the exact RKNN register layout
-
-**Q3: Do we need to SSH-run test shapes for each strategy?**
-**YES.** Currently we've only captured EMIT output for 4 test models. We need to:
-1. Run ALL 16+ conv models on the remote NPU
-2. For each model, capture the EMIT output to determine which tiling strategy was used
-3. Build a decision tree: which shapes trigger ChannelTile vs simple vs ConvStreaming
-4. Validate the register ordering and padding pattern for each case
-
-### Minimum viable Python draft requirements
-
-To produce a self-contained Python script that works for ALL FP16 conv shapes:
-
-1. **Add PPU register programming** (PPU_S_POINTER, PPU_DST_BASE_ADDR, PPU_DST_SURF_STRIDE, PPU_DATA_CUBE_OUT_CHANNEL, PPU_RDMA_*)
-2. **Add register padding** (CNA_DCOMP_AMOUNT0..15, CNA_DCOMP_CTRL, CNA_DCOMP_REGNUM at zero)
-3. **Add CNA_PAD_CON1** register for padding support
-4. **Fix register ordering** to match RKNN's structural order (not address order)
-5. **Fix PC-chain amount encoding** to match `ceil(body_len/2)+1` with core index in bits 12-15
-6. **Add reuse flag programming** per tile based on adjacency analysis
-
-Without items 1-6, the Python driver will fail on real-world models that trigger ConvStreaming or ChannelTile, even though it works for simple shapes.
 
 ## Appendix F: Conv debug string index for r2 reverse engineering
 
@@ -2236,19 +2497,6 @@ The following strings from the RKNN runtime debug output (enabled via `RKNN_LOG_
 | `RKNNConfig: getBanksForFullWeights type_bytes is 0, use 4 bits` | `0x0060f328` | bank config | Weight bank calculation |
 | `Unsupport weight data type!` | `0x0060cfe0` | `fcn.00312328` | Weight format unsupported |
 | `exConvStreaming` | `0x0060b720` | `fcn.002ba2c0`, `fcn.002be528`, `fcn.002efda4`, `fcn.002f8d68`, `fcn.002ff3d0` | Weight streaming conv operator |
-
-### Final assessment: completeness scorecard
-
-| Component | Coverage | Lines of pseudo-code | Ready for Python? |
-|-----------|----------|---------------------|-------------------|
-| ChannelTile predicate + estimators | **100%** | ~600 lines | ✓ Ready |
-| General Y/K planner (fcn.005d4ac0/38f0/51c0) | **~70%** | ~400 lines | ✓ Partial (structure known, details from conv_new_clean.py) |
-| Register emission (ABC_T/BAC, KC_T) | **~20%** | ~0 lines | ✗ Missing — how tile lists → register commands |
-| Type-specific split templates (0x40XXXX) | **~10%** | ~0 lines | ✗ Missing — data-type-dependent split logic |
-| ConvStreaming operator | **~5%** | ~0 lines | ✗ Missing — separate operator for large weights |
-| Reuse update (fcn.00307198/12328) | **~60%** | ~200 lines | ✓ Partial (mechanics known, register targets unknown) |
-| PPU post-process registers | **N/A (dead code for conv)** | — | ✓ Not needed for conv |
-| **TOTAL** | **~60%** | **~1200 lines** | **Sufficient for simple shapes, insufficient for complex spatial + ChannelTile** |
 
 ### What the Python draft (conv_new_clean.py) already handles correctly
 
@@ -2388,46 +2636,7 @@ Input: conv shape (N, C, H, W, OC, KH, KW, groups, target)
 
 This decision tree covers all known conv tiling paths in `librknnrt.so` as of May 2026.
 
-## Appendix H: Final gap analysis — what's still missing to complete the reverse engineering
-
-### Question 1: Do we have ALL conv tiling used by RKNN?
-
-**NO.** We have the planner layer (fcn.005d4ac0/38f0/51c0, ~36KB) and the estimators (ChannelTile, bank math, ~6KB), but we're missing the **register emission layer** (ABC_T/BAC + KC_T, ~8KB combined) and the **ConvStreaming operator** (fcn.002ba2c0, ~5.6KB).
-
-**What's covered (~60% of total ~200KB tiling code):**
-
-| Component | Lines in this doc | Status |
-|-----------|------------------|--------|
-| ChannelTile predicates | ~350 lines pseudo-code | **Complete** |
-| Bank/data estimators | ~300 lines pseudo-code | **Complete** |
-| Layer-level planner (fcn.005d4ac0) | ~150 lines pseudo-code | **Structure known, details from live EMIT** |
-| Split vector composer (fcn.005f38f0) | ~200 lines pseudo-code | **Dispatch logic complete** |
-| Top-level tiler (fcn.005f51c0) | ~150 lines pseudo-code | **Structure known** |
-| Reuse update mechanics | ~200 lines pseudo-code | **Mechanism known, register targets unknown** |
-| Strategy mapping (Appendix A) | ~80 lines | **Complete** |
-| Tiling method dispatch (Appendix B) | ~80 lines | **Complete** |
-| Live register capture (Appendix C) | ~100 lines | **Fixed for single-core ChannelTile** |
-| Conv debug strings index (Appendix F) | ~60 lines | **Complete** |
-| Strategy inventory (Appendix G) | ~80 lines | **Corrected — 1 unified planner, not 6 methods** |
-
-**What's NOT covered (~40%):**
-
-| Component | Size | Status | What's needed to close the gap |
-|-----------|------|--------|-------------------------------|
-| **ABC_T/BAC emit** (fcn.005a41f0) | 1.9KB | **Blocked** | This function converts tile vectors into register command streams with dimension reordering (A→B, C→A, B→C). Needs runtime GDB trace to see which register addresses it writes and how it permutes dimensions. |
-| **KC_T/C1K1C2K2C3 emit** (fcn.005a4e18) | 1.3KB | **Blocked** | This function handles multi-level K+C tiling with 3 levels. Needs runtime trace. |
-| **ABC_T/KC_T variants** (fcn.005a5388, 5a6068, 5a6c90, 5a7200, 5a7e28) | ~6KB total | **Blocked** | Multiple entry points for different data types/register task variants. |
-| **ConvStreaming** (fcn.002ba2c0) | 5.6KB | **Not started** | Separate operator with own tiling. Only triggers when weights heavily exceed CBUF. Needs a test case that triggers it, then full decompilation. |
-| **Multicore dispatch** (fcn.005d78e0/7bc8) | ~15KB | **Not started** | Creates 3× tile lists with PC-chain routing. Needs a multicore .rknn model to test. |
-| **Type-specific split templates** (0x40XXXX) | ~27KB total | **Investigated — not needed** | These are ONNX Split/Tile operators (not conv tiling). Tracked down to "Meet unsupported split" and "Meet unsupported Tile" which are for general tensor ops. |
-
-### Question 2: Is the pseudo-code enough to write a runnable Python draft?
-
-**YES — Now supplemented with the emission layer and ConvStreaming pseudo-code below.**
-
-The existing `conv_new_clean.py` works for ~200/217 shapes. With the three big missing pieces now pseudo-coded, a unified draft is achievable.
-
-## Appendix I: Filled-in pseudo-code for the missing 40%
+## Appendix H: Draft pseudo-code for remaining emit/streaming paths
 
 ### 1. ABC_T/BAC register emission (fcn.005a41f0, 1.9KB)
 
@@ -3593,9 +3802,1922 @@ ending at `6` and `10`; the last tile clamps to input height `14`.
   payload. They preserve the row-index fields and build several nested vectors,
   but this trace is not sufficient to assign names to the reuse-bit fields.
 
-Next target after this trace:
+### Tile record format at 0x257f00
 
-- Trace the consumer/insertion immediately after `0x257ef8` to find where the
-  staged row object is appended to the final tile table. That should make the
-  final row layout observable and is the right place to name fields such as
-  `ystart`, `kstart`, `data reuse`, and `weight reuse`.
+The trace `experimental/trace_librknnc_tile_records.gdb` captured the exact tile record write.
+
+At `0x257f00`:
+```asm
+stp w0, w23, [x7, #-8]   ; records[0] = w0, records[1] = w23
+stp w28, w24, [x7]        ; records[2] = w28, records[3] = w24
+```
+
+Each tile record is **16 bytes** (4 dwords) staged at `x7-8..x7+7`. This is
+still stack staging, not the final vector slot. Local disassembly shows the
+later publish path copies a larger row object:
+
+```asm
+0x258444: add x21, x21, #0x48
+...
+0x2584b8: str w0, [x19]        ; current destination row slot
+...
+0x2589d8: str w1, [x19, #376]
+0x2589e8: stp w4, w3, [x6, #-8]
+0x2589ec: stp w2, w1, [x6]
+...
+0x258a14: str x0, [x21, #8]    ; advance vector end by 0x1a8
+```
+
+So the final row payload is a `0x1a8`-byte object in a vector-like holder. The
+compiler advances the current row cursor by `0x48` before copying scalar/vector
+fields and then advances the row-vector end pointer by `0x1a8`.
+
+**Record field values observed across all hits**
+(shape `b1_c32_h14_w14_oc128_wic32_k3x3_g1`):
+
+| Hit | w0 | w23 | w28 | w24 | Conservative interpretation |
+|-----|----|-----|-----|-----|---------------------------|
+| 1 | 11 | 0 | 1 | 0 | Setup/seed-family row |
+| 2 | 11 | 0 | 2 | 3 | Shape/metadata-family row |
+| 3 | 11 | 1 | 2 | 3 | Shape/metadata-family row, row index 1 |
+| 4 | 11 | 0 | 3 | 7 | Multi-tile-family row, row index 0 |
+| 5 | 11 | 1 | 3 | 7 | Multi-tile-family row, row index 1 |
+| 6 | 11 | 2 | 3 | 7 | Multi-tile-family row, row index 2 |
+
+**w0 (value 11)**: not yet named. It is not the same as the `qbuild_interval`
+halo-adjusted source end (`6`, `10`, `14` for the small proxy), so do not use it
+as `src_end` in `conv.py`.
+
+**w23 (tile_index)**: 0 for first tile, 1 for second, 2 for third.  Matches
+`x3` from `qbuild_interval`.
+
+**w28 (row family/type candidate)**:
+- `1` = initial setup/seed family
+- `2` = shape/metadata family
+- `3` = multi-tile family
+
+**w24 (flags)**:
+- `0` = initial call
+- `3` = shape tuple
+- `7` = multi-tile (3 Y tiles)
+
+### Temporary output vectors
+
+The function uses `std::vector::_M_assign_aux` to build two output vectors at
+stack offsets `[sp+0x850]` and `[sp+0x868]`:
+
+**Vector [sp+0x850]** (observed contents):
+| Hit | Content | Meaning |
+|-----|---------|---------|
+| 1 | `(1, 32, 14, 14)` | Input shape (N, C, H, W) |
+| 2 | `(1, 32, 14, 14)` | Input shape (same) |
+| 3 | `(1, 32, 14, 14)` | Input shape (same) |
+| 4 | `(1, 32, 6, 14)` | Y-tiled input shape (height=6 for kernel overlap) |
+| 5 | `(1, 32, 6, 14)` | Y-tiled input shape |
+| 6 | `(1, 32, 6, 14)` | Y-tiled input shape |
+
+**Vector [sp+0x868]** (observed contents, still partly unnamed):
+| Hit | Content | Meaning |
+|-----|---------|---------|
+| 1 | (empty) | Shape tuple for second output |
+| 2 | `(1, 1, ?, ?)` | Output shape or metadata |
+| 3 | (empty/overwritten) | — |
+| 4-6 | `(?, ?, 4, 12)` | Y-tile boundaries or output shape |
+
+When the trace moves from the single-Y-tile conv (hits 1-3) to the 3-Y-tile conv
+(hits 4-6), the shape vector height changes from 14 to 6, confirming this is a
+Y-tiled input window per tile.
+
+### Current model
+
+The RKNN compiler path observed so far does not expose a simple final
+`{xstart, ystart, kstart, data_reuse, weight_reuse}` array at `0x257f00`. At
+that point it has:
+
+1. Boundary vectors (`y_boundary`, `k_boundary`) that define split points.
+2. Shape/window vectors for the current tile or row family.
+3. A 4-dword stack record `(w0, w23, w28, w24)`.
+4. A later `0x1a8`-byte row object copied into a vector-like destination.
+
+`experimental/trace_librknnc_row_publish.gdb` was then run on the remote
+official RKNN host with `RKNN_LOG_LEVEL=3` explicitly exported from the
+`~/.bashrc` line. Logs:
+
+```text
+/tmp/rknnc_row_publish_small.log
+/tmp/rknnc_row_publish_stress.log
+```
+
+Both builds completed normally and produced RKNN files:
+
+```text
+/tmp/rknnc_trace_models/conv2d_trace_b1_c32_h14_w14_oc128_wic32_k3x3_g1.rknn
+/tmp/rknnc_trace_models/conv2d_trace_b1_c160_h14_w14_oc320_wic160_k3x3_g1.rknn
+```
+
+The dynamic trace confirms that `0x258a14` advances a destination vector by
+`0x1a8` bytes, so the published object is a 424-byte row descriptor. The row is
+not just the 16-byte `(w0,w23,w28,w24)` staging record; that record is copied
+into the scalar tail around offset `0x178`.
+
+Confirmed row layout skeleton:
+
+| Row offset | Meaning from trace |
+|------------|--------------------|
+| `0x000..0x03f` | Scalar/header fields. Still partly unnamed. |
+| `0x040` | Current input/window shape vector. |
+| `0x058` | Current output/window shape vector. |
+| `0x070` | Current weight/window shape vector. |
+| `0x088` | Empty in these FP16 conv traces. |
+| `0x0a0` | Full input shape vector. |
+| `0x0b8` | Full output shape vector. |
+| `0x0d0` | Full weight shape vector. |
+| `0x0e8` | Empty in these FP16 conv traces. |
+| `0x100` | 8-byte metadata vector, observed `[1,1]`. |
+| `0x118` | 8-byte metadata vector, observed `[1,1]`. |
+| `0x130` | 16-byte metadata vector, observed all zero. |
+| `0x178` | Tail scalar copy of the 16-byte row record plus adjacent fields. |
+
+Small proxy (`1x32x14x14 -> 1x128x12x12`) published row windows:
+
+| Row | Record tail at `0x178` | `0x40` current input | `0x58` current output | `0x70` current weight | Full shapes at `0xa0/0xb8/0xd0` |
+|-----|------------------------|----------------------|-----------------------|-----------------------|----------------------------------|
+| 0 | `(11,0,3,7)` | `(1,32,6,14)` | `(1,128,4,12)` | `(128,32,3,3)` | `(1,32,14,14)`, `(1,128,12,12)`, `(128,32,3,3)` |
+| 1 | `(11,2,3,7)` | `(1,32,6,14)` | `(1,128,4,12)` | `(128,32,3,3)` | same full shapes |
+
+Stress shape (`1x160x14x14 -> 1x320x12x12`) published row windows:
+
+| Row | Record tail at `0x178` | `0x40` current input | `0x58` current output | `0x70` current weight | Full shapes at `0xa0/0xb8/0xd0` |
+|-----|------------------------|----------------------|-----------------------|-----------------------|----------------------------------|
+| 0 | `(10,0,3,7)` | `(1,160,14,14)` | `(1,112,12,12)` | `(112,160,3,3)` | `(1,160,14,14)`, `(1,320,12,12)`, `(320,160,3,3)` |
+| 1 | `(10,2,3,7)` | `(1,160,14,14)` | `(1,96,12,12)` | `(96,160,3,3)` | same full shapes |
+
+Interpretation:
+
+- `0x40/0x58/0x70` are the compiler's current tile/window tensors. They expose
+  Y tiling in the small proxy (`output_h=4`, input-window height `6`) and OC
+  tiling in the stress shape (`output_c=112` then `96`).
+- `0xa0/0xb8/0xd0` preserve the original full input/output/weight shapes.
+- The `w21` values seen before publish are channel offsets, not row-vector byte
+  offsets: stress rows use `0,112,224` before publishing and the published
+  output windows are `112` then `96`, consistent with OC split boundaries
+  `[0,112,224,320]`. The earlier K/output-channel boundary writer only showed
+  `[0,320]`, so this OC split is created in the later row/window construction
+  path.
+- The two published rows in these traces do not yet prove the final command
+  emission or visible reuse-bit mapping. The next compiler-side trace should
+  follow consumers of the `0x1a8` row vector after `RKNNTilingPass`, especially
+  into `RKNNModelBuildPass` / `RKNNModelRegCmdbuildPass`.
+
+Follow-up consumer trace:
+
+`experimental/trace_librknnc_row_consumers.gdb` traces the sibling code sites
+that also use the `0x1a8` row stride:
+
+| Trace point | Offset | Static role |
+|-------------|--------|-------------|
+| `row_scan_a` | `0x00635ce8` | Walks a vector of `0x1a8` rows and counts rows whose first dword matches the current loop index. |
+| `row_scan_b` | `0x01146cd0` | Similar row scanner in another call family. |
+| `row_scan_c` | `0x01707520` | Similar row scanner in another call family. |
+| `row_republish_before` | `0x00cac928` | Second row-publisher candidate. |
+| `row_republish_commit` | `0x00cac94c` | Second row-publisher candidate commit, also advances by `0x1a8`. |
+
+It was run on the stress shape:
+
+```text
+/tmp/rknnc_row_consumers_stress.log
+```
+
+The build completed normally. Hit counts:
+
+| Trace point | Hits |
+|-------------|------|
+| `row_scan_a` | 54 |
+| `row_scan_b` | 0 |
+| `row_scan_c` | 0 |
+| `row_republish_before` | 0 |
+| `row_republish_commit` | 0 |
+
+So, for the tested FP16 conv build, the next confirmed consumer is
+`librknnc.so+0x635ce8`. It scans the same row descriptor vector with a fixed
+`0x1a8` stride. The loop increments a counter when `[row+0]` matches the current
+1-based loop index:
+
+```asm
+0x635cc8: add w2, w2, #1
+0x635cd0: ldr w1, [x0]       ; row[0]
+0x635cd4: cmp w1, w2
+0x635cdc: ldr w1, [x4]
+0x635ce0: add w1, w1, #1
+0x635ce4: str w1, [x4]
+0x635ce8: add x0, x0, #0x1a8
+```
+
+The stress trace exposes a compact post-publish row family distinct from the
+earlier shape-vector-rich rows:
+
+| Example scan row | Header dwords | Tail clue |
+|------------------|---------------|-----------|
+| setup row | `1,0,4,...` | includes `out_h=12`, `w0=10`, row index `0` later in the tail |
+| metadata row | `2,3,6,...` | includes channel offset `0xa0` for row index `1` |
+| metadata row | `2,3,6,...` | no channel offset for row index `0` |
+| multi-tile row | `3,7,6,...` | includes channel offset `0x70` for row index `1` |
+| multi-tile row | `3,7,6,...` | includes channel offset `0xe0` for row index `2` |
+
+This confirms that, after the first publish, the compiler has a second
+row-vector representation where:
+
+- `row[0]` is used as a 1-based row class/index for counting.
+- `row[1]=3`, `row[2]=6` appears on the stress metadata rows.
+- `row[0]=3`, `row[1]=7`, `row[2]=6` appears on the stress multi-tile rows.
+- Tail scalar values include the stress OC offsets `0x70` and `0xe0`, matching
+  the previously inferred OC boundaries `[0,112,224,320]`.
+
+The row scan still does not identify final register destinations. It narrows the
+next target to the caller around `0x634748..0x635d10` and the downstream code
+that consumes the counts generated from this scan.
+
+Follow-up row-to-task trace:
+
+`experimental/trace_librknnc_row_to_task.gdb` was run on the remote official
+RKNN host for the stress shape:
+
+```text
+/tmp/rknnc_row_to_task_stress.log
+```
+
+The build completed normally and exported:
+
+```text
+/tmp/rknnc_trace_models/conv2d_trace_b1_c160_h14_w14_oc320_wic160_k3x3_g1.rknn
+```
+
+Hit counts in this normal FP16 conv build:
+
+| Trace point | Hits |
+|-------------|------|
+| `count_bucket_select` | 3 |
+| `row_base_selected` | 3 |
+| `row_shape_filter` | 6 |
+| `row_mode_filter` | 6 |
+| `row_flag_check` | 6 |
+| `offset0_ready` | 6 |
+| `offset1_ready` | 6 |
+| `task_desc_begin` | 6 |
+| `task_desc_fields` | 6 |
+| `task_desc_vectors` | 6 |
+| `task_desc_push16` | 2 |
+
+The static candidate helper path at `librknnc.so+0x5aea40` and the
+`task_desc_helper_call` breakpoint at `0x636574` did not fire in this build, so
+do not treat that helper as part of the normal stress FP16 conv path.
+
+The six selected `0x1a8` rows are exactly the compact row families previously
+seen by `row_scan_a`. The selected row base is `[sp+1104] + previous_count *
+0x1a8`; `previous_count` comes from the prefix sum over the class-count array.
+The task-builder uses fields from the selected row, including:
+
+| Row offset | Use confirmed by static/dynamic trace |
+|------------|----------------------------------------|
+| `0x30..0x3f` | Header/scalar area feeding task descriptor flags. |
+| `0x40` | Current input/window shape. |
+| `0x58` | Current output/window shape. |
+| `0x70` | Current weight/window shape. |
+| `0xa0` | Full input shape. |
+| `0xb8` | Full output shape. |
+| `0xd0` | Full weight shape. |
+| `0x148..` | Scalar tail; includes OC offset and compact family tuple. |
+| `0x14c` | OC offset in the compact rows (`0x70`, `0xe0` on later OC tiles). |
+| `0x17c..0x188` | Compact tuple fields such as `w0=10`, row index, family, flags, and vector count. |
+| `0x180` | Row/subtile index: observed `0`, `1`, `2`. |
+| `0x184` | Family/type: observed `1`, `2`, `3`. |
+| `0x188` | Flags: observed `0`, `3`, `7`. |
+| `0x18c` | Vector-count-like field: observed `4` on setup row and `6` on metadata/multi-tile rows. |
+
+Stress row sequence selected by `task_desc_vectors`:
+
+| Hit | `x21/0x1a8` | Current output (`0x58`) | Current weight (`0x70`) | Tail OC offset | Tail tuple |
+|-----|------------|--------------------------|--------------------------|----------------|------------|
+| 1 | 0 | `(1,320,12,12)` | `(320,160,3,3)` | `0` | `(10,0,1,0,4)` |
+| 2 | 1 | `(1,160,12,12)` | `(160,160,3,3)` | `0` | `(10,0,2,3,6)` |
+| 3 | 2 | `(1,160,12,12)` | `(160,160,3,3)` | `0xa0` | `(10,1,2,3,6)` |
+| 4 | 3 | `(1,112,12,12)` | `(112,160,3,3)` | `0` | `(10,0,3,7,6)` |
+| 5 | 4 | `(1,112,12,12)` | `(112,160,3,3)` | `0x70` | `(10,1,3,7,6)` |
+| 6 | 5 | `(1,96,12,12)` | `(96,160,3,3)` | `0xe0` | `(10,2,3,7,6)` |
+
+Only hits 4 and 6 reached `task_desc_push16` in this trace. Those are the
+multi-tile-family rows for OC offsets `0` and `0xe0`; hit 5 was selected but
+did not push at the traced site, so there is likely either a later/alternate
+push for the middle OC tile or a grouping rule that merges the middle tile with
+one of the pushed descriptors. This is not yet enough to name final register
+reuse bits.
+
+The pushed object at `0x6358d8` is a 16-byte entry copied to another vector. In
+this run the two pushed entries were pointer pairs, not decoded register words:
+
+```text
+push #1: 68c95308 3fd1d974 86b6b738 bfcc8007
+push #2: 5b3f6470 00000055 5b397700 00000055
+```
+
+The row-to-task path confirms OC-window grouping and scalar offsets. The
+exported RKNN file also contains plain little-endian Rocket regcmd qwords, so
+the final emitted command stream can be read directly for this shape.
+
+Follow-up exported-regcmd extraction:
+
+The remote model was copied from:
+
+```text
+/tmp/rknnc_trace_models/conv2d_trace_b1_c160_h14_w14_oc320_wic160_k3x3_g1.rknn
+```
+
+Local copy:
+
+```text
+/tmp/rknnc_trace_models_local/conv2d_trace_b1_c160_h14_w14_oc320_wic160_k3x3_g1.rknn
+```
+
+The file begins with `RKNN` and has six aligned contiguous runs of decoded
+Rocket register commands using the same qword encoding as the local examples:
+
+```text
+qword = (target << 48) | ((value & 0xffffffff) << 16) | reg_addr
+```
+
+Detected runs:
+
+| File offset | Qwords | Interpretation |
+|-------------|--------|----------------|
+| `0x2640` | 108 | Setup/full row; has a short preamble before the normal body. |
+| `0x29b8` | 107 | Metadata/full-half row. |
+| `0x2e40` | 106 | Metadata/full-half row with OC offset `0xa0`. |
+| `0x32c0` | 106 | Multi-tile row, OC offset `0`. |
+| `0x3740` | 106 | Multi-tile row, OC offset `0x70`. |
+| `0x3bc0` | 106 | Multi-tile row, OC offset `0xe0`. |
+
+These six runs line up with the six `0x1a8` compact rows selected by
+`task_desc_vectors`.
+
+Important emitted register values across the six runs:
+
+| Register | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Run 6 |
+|----------|-------|-------|-------|-------|-------|-------|
+| CNA `0x1010` `CONV_CON2` | `0x000000f0` | `0x400000f0` | `0x400000f0` | `0x500000f0` | `0x500000f0` | `0x500000f0` |
+| CNA `0x1030` `WEIGHT_SIZE0` | `0x000e1000` | `0x00070800` | `0x00070800` | `0x0004ec00` | `0x0004ec00` | `0x00043800` |
+| CNA `0x1038` `WEIGHT_SIZE2` | `0x03030140` | `0x030300a0` | `0x030300a0` | `0x03030070` | `0x03030070` | `0x03030060` |
+| CNA `0x1110` `DCOMP_ADDR0` | `0x00000000` | `0x00000000` | `0x00070800` | `0x00000000` | `0x0004ec00` | `0x0009d800` |
+| CORE `0x3018` | `0x0000013f` | `0x0000009f` | `0x0000009f` | `0x0000006f` | `0x0000006f` | `0x0000005f` |
+| DPU `0x403c` | `0x013f013f` | `0x009f009f` | `0x009f009f` | `0x006f006f` | `0x006f006f` | `0x005f005f` |
+| DPU `0x4058` | `0x0000013f` | `0x0000009f` | `0x0000009f` | `0x0000006f` | `0x0000006f` | `0x0000005f` |
+
+Stable values for this stress shape include CNA `DATA_SIZE1=0x001f00a0`,
+CNA `DATA_SIZE3=0x90`, CNA `WEIGHT_SIZE1=0xb40`, CNA `CBUF_CON0=0xa2`, CNA
+`CBUF_CON1=0x46`, CNA `FEATURE_DATA_ADDR=0`, CNA `DMA_CON1=0x38`, CNA
+`DMA_CON2=0x8c`, CNA `FC_DATA_SIZE1=0xa0`, CORE `0x3010=0x200`, DPU
+`S_POINTER=0x0e`, DPU `0x4030=0x0b`, DPU `0x4034=0x0b`, DPU
+`0x405c=0x000b000b`, and DPU `0x4070=0x383`.
+
+For the multi-tile rows, `CONV_CON2=0x500000f0` is now compiler ground truth.
+The OC tile widths are directly visible in `WEIGHT_SIZE2` low bits and the
+matching CORE/DPU channel-end fields: `0x70`, `0x70`, and `0x60` for channel
+counts `112`, `112`, and `96`. `DCOMP_ADDR0` advances by weight-tile byte
+offsets `0`, `0x4ec00`, and `0x9d800`, matching the compact row OC offsets
+`0`, `0x70`, and `0xe0`.
+
+### Exported regcmd comparison set
+
+To avoid overfitting the stress shape, four official compiler models were built
+on the remote RKNN host and copied locally:
+
+```text
+/tmp/rknnc_compare_models_local/cmp_b1_c32_h14_w14_oc128_wic32_k3x3_g1.rknn
+/tmp/rknnc_compare_models_local/cmp_b1_c160_h14_w14_oc320_wic160_k3x3_g1.rknn
+/tmp/rknnc_compare_models_local/cmp_b1_c528_h14_w14_oc32_wic528_k1x1_g1.rknn
+/tmp/rknnc_compare_models_local/cmp_b1_c32_h150_w150_oc32_wic1_k3x3_g32.rknn
+```
+
+The helper `experimental/rknn_parse_regcmd_runs.py` scans these files for
+aligned Rocket command runs and dumps stable key registers. It deliberately
+parses only the exported model bytes; it does not use runtime submission state.
+
+Command used:
+
+```sh
+python3 experimental/rknn_parse_regcmd_runs.py \
+  /tmp/rknnc_compare_models_local/*.rknn --min-qwords 24
+```
+
+The comparison confirms these patterns for the tested FP16 conv models:
+
+| Shape family | Runs | Main emitted pattern |
+|--------------|------|----------------------|
+| Spatial `32->128`, `14x14`, `3x3` | 6 | Runs 1-3 are full/half OC rows (`CONV_CON2` `0x00000110`, then `0x40000110`); runs 4-6 are Y rows (`0x20000090`) with input height 6 and output height 4. |
+| Spatial `160->320`, `14x14`, `3x3` | 6 | Runs 1-3 are full/160-channel rows (`0x000000f0`, `0x400000f0`); runs 4-6 are OC tile rows (`0x500000f0`) with OC widths `112,112,96`. |
+| Pointwise `528->32`, `14x14`, `1x1` | 6 | Runs 1-3 are full/16-channel rows (`0x00000090`, `0x40000090`); runs 4-6 are Y rows (`0x20000060`, `0x20000060`, `0x20000050`) with output heights `5,5,4`. |
+| Depthwise `32->32`, `150x150`, `3x3`, groups 32 | 14 | Runs use depthwise mode (`CONV_CON1=0x123`, CORE `0x3010=0x202`, DPU feature mode `0x1fc`) and a long Y schedule with `CONV_CON2` high bits `0x0`, `0x1`, then `0x2`. |
+
+Field-level observations:
+
+- `CNA_CONV_CON2` low bits retain the grain-ish value already seen in Python
+  (`0xf0`, `0x110`, `0x90`, `0xc0`, etc.). The high nibble selects tile-family
+  behavior:
+  - `0x00000000` prefix: initial/full row.
+  - `0x10000000` prefix: depthwise middle Y-family rows.
+  - `0x20000000` prefix: Y-tile rows for spatial, pointwise, and later
+    depthwise rows.
+  - `0x40000000` prefix: channel-half/metadata rows whose `DCOMP_ADDR0` and
+    DPU destination-base offset distinguish first and second halves.
+  - `0x50000000` prefix: stress OC multi-tile rows.
+- `CNA_DCOMP_ADDR0` advances only on OC/weight-channel splits in these models.
+  For `32->128`, the half-OC row uses `0x9000`; for `528->32`, the second
+  half uses `0x4200`; for `160->320`, the multi-tile offsets are `0`,
+  `0x4ec00`, `0x9d800`.
+- `CNA_FEATURE_DATA_ADDR` advances on Y tiles, not on pure OC splits. Examples:
+  `32->128` Y rows use `0`, `0x380`, `0x700`; pointwise `528->32` uses `0`,
+  `0x460`, `0x8c0`; depthwise uses larger row-stride-derived offsets such as
+  `0x14820`, `0x1d4c0`, `0x3a980`, `0x48a80`.
+- `DPU_DST_BASE_ADDR` mirrors output tile offset. On Y rows it tracks output-row
+  offset (`0`, `0x300`, `0x600` for `32->128`; `0`, `0x460`, `0x8c0` for
+  pointwise). On OC rows it tracks output-channel offset (`0`, `0x7e00`,
+  `0xfc00` for the stress multi-tile rows).
+- The output-channel count is encoded consistently in three places:
+  `CNA_WEIGHT_SIZE2` low bits, CORE `0x3018`, and DPU `0x403c/0x4058`. For
+  channel count `N`, CORE/DPU use `N-1`, while `CNA_WEIGHT_SIZE2` uses `N`.
+- The output spatial tile size is encoded consistently in CNA `DATA_SIZE0`
+  input-window height, CNA `DATA_SIZE3` atomics/area-like field, CORE
+  `0x3014`, DPU `0x4034`, and DPU `0x405c`.
+
+Implication for a clean `examples/kernel_6_18/conv.py`: it should not need
+shape-name special cases for these families. A small task/tile descriptor can
+drive a single regcmd emitter:
+
+```text
+tile = {
+  input_y, input_h, output_y, output_h,
+  output_c_start, output_c_count,
+  conv_con2_family_bits,
+  feature_offset,
+  weight_offset,
+  output_offset,
+}
+```
+
+The remaining reverse gap is now the generic planner rule that assigns
+`conv_con2_family_bits` and tile order for arbitrary shapes, especially mixed
+Y+K cases. The emitted register destinations and most per-tile value formulas
+are no longer speculative for the comparison set above.
+
+### Descriptor view for `conv.py`
+
+The exported command runs can be reduced to a descriptor that is close to what a
+clean Python emitter should consume. Running:
+
+```sh
+python3 experimental/rknn_parse_regcmd_runs.py \
+  /tmp/rknnc_compare_models_local/*.rknn --min-qwords 24 --descriptors
+```
+
+prints one descriptor per regcmd run:
+
+```text
+idx,off,n,family,family_bits,grain_bits,input_h,output_h,output_w,
+oc_count,oc_end,feature_off,weight_off,output_off,weight_bytes,cbuf0
+```
+
+Representative rows:
+
+| Shape | Run | Family | Input H | Output H/W | OC count | Feature off | Weight off | Output off |
+|-------|-----|--------|---------|------------|----------|-------------|------------|------------|
+| `32->128 3x3` | 4 | `y_tile` (`0x20000000`) | 6 | 4x12 | 128 | `0x0` | `0x0` | `0x0` |
+| `32->128 3x3` | 5 | `y_tile` (`0x20000000`) | 6 | 4x12 | 128 | `0x380` | `0x0` | `0x300` |
+| `32->128 3x3` | 6 | `y_tile` (`0x20000000`) | 6 | 4x12 | 128 | `0x700` | `0x0` | `0x600` |
+| `160->320 3x3` | 4 | `k_tile` (`0x50000000`) | 14 | 12x12 | 112 | `0x0` | `0x0` | `0x0` |
+| `160->320 3x3` | 5 | `k_tile` (`0x50000000`) | 14 | 12x12 | 112 | `0x0` | `0x4ec00` | `0x7e00` |
+| `160->320 3x3` | 6 | `k_tile` (`0x50000000`) | 14 | 12x12 | 96 | `0x0` | `0x9d800` | `0xfc00` |
+| `528->32 1x1` | 4 | `y_tile` (`0x20000000`) | 5 | 5x14 | 32 | `0x0` | `0x0` | `0x0` |
+| `528->32 1x1` | 5 | `y_tile` (`0x20000000`) | 5 | 5x14 | 32 | `0x460` | `0x0` | `0x460` |
+| `528->32 1x1` | 6 | `y_tile` (`0x20000000`) | 4 | 4x14 | 32 | `0x8c0` | `0x0` | `0x8c0` |
+
+For the current `examples/kernel_6_18/conv.py`, the important mismatch is that
+`make_conv2d_regs()` only accepts DMA bases plus `weight_reuse/full_data_bank`.
+The compiler-derived descriptor needs these fields to be independent per run:
+
+```text
+conv_con2 = family_bits | grain_bits
+CNA_FEATURE_DATA_ADDR = input_dma + feature_off
+CNA_DCOMP_ADDR0       = weight_dma + weight_off
+DPU_DST_BASE_ADDR     = output_dma + output_off
+```
+
+and the tile-local params must use the descriptor's `input_h`, `output_h`,
+`output_w`, and `oc_count` rather than recomputing everything from the original
+full layer shape.
+
+Current `conv.py` already has a boundary-vector planner skeleton, but the
+emitter still hides the compiler's per-run offsets and `CONV_CON2` family bits.
+The next implementation-oriented step is therefore not another runtime special
+case; it is to refactor the emitter around a `TileDesc`/`RegDesc` object and
+then teach the planner to produce RKNN-like descriptor families.
+
+### Mixed Y+K exported schedules
+
+To force mixed height and channel movement, three additional official compiler
+models were built and copied locally:
+
+```text
+/tmp/rknnc_mixed_models_local/mix_b1_c160_h40_w40_oc320_wic160_k3x3_g1.rknn
+/tmp/rknnc_mixed_models_local/mix_b1_c72_h20_w20_oc288_wic72_k3x3_g1.rknn
+/tmp/rknnc_mixed_models_local/mix_b1_c40_h40_w40_oc320_wic40_k1x1_g1.rknn
+```
+
+The key mixed case is `1x160x40x40 -> 1x320x38x38`, `3x3`, groups 1. Its
+descriptor CSV shows 12 command runs:
+
+| Runs | Family | Y tile | OC tile | Offsets |
+|------|--------|--------|---------|---------|
+| 1-2 | `setup` (`0x00000000`) | output `21`, then `17` rows | full 320 | feature/output offsets `0`, then `0x3480/0x31e0` |
+| 3-6 | `k_half` (`0x40000000`) | two Y rows for each 160-channel half | 160, 160 | second half adds weight `0x70800`, output base `0x70d00`; second Y row adds `0x3480` feature and `0x31e0` output |
+| 7-12 | `k_tile` (`0x50000000`) | two Y rows for each OC tile | 112, 112, 96 | OC bases `0`, `0x4ef80`, `0x9df00`; second Y row adds `0x31e0` output |
+
+The exact `k_tile` rows:
+
+| Run | Input H | Output H/W | OC count | Feature off | Weight off | Output off |
+|-----|---------|------------|----------|-------------|------------|------------|
+| 7 | 23 | 21x38 | 112 | `0x0` | `0x0` | `0x0` |
+| 8 | 19 | 17x38 | 112 | `0x3480` | `0x0` | `0x31e0` |
+| 9 | 23 | 21x38 | 112 | `0x0` | `0x4ec00` | `0x4ef80` |
+| 10 | 19 | 17x38 | 112 | `0x3480` | `0x4ec00` | `0x52160` |
+| 11 | 23 | 21x38 | 96 | `0x0` | `0x9d800` | `0x9df00` |
+| 12 | 19 | 17x38 | 96 | `0x3480` | `0x9d800` | `0xa10e0` |
+
+This proves the mixed-order rule for this compiler path:
+
+```text
+for family in [setup, k_half, k_tile]:
+  for k_window in family_k_windows:
+    for y_window in y_windows:
+      emit descriptor with additive offsets
+```
+
+For the tested mixed spatial case, output offsets are additive:
+
+```text
+output_off = output_k_base + output_y_base
+```
+
+Examples:
+
+```text
+0x52160 = 0x4ef80 + 0x31e0
+0xa10e0 = 0x9df00 + 0x31e0
+```
+
+Feature offsets depend only on Y (`0`, `0x3480`), and weight offsets depend
+only on K (`0`, `0x4ec00`, `0x9d800`). This is the strongest evidence so far
+that a clean `conv.py` should create independent Y and K windows, then combine
+them into per-family descriptors with additive DMA offsets.
+
+Two comparison points:
+
+- `72x20 -> 288`, `3x3` does not Y-tile; it has setup, `k_half`, and `k_tile`
+  families only, with OC windows `96,96,96`.
+- `40x40 -> 320`, `1x1` pointwise emits setup and `k_half` families for full
+  height, then separate full-OC `y_tile` rows (`14,13,13` output rows). It does
+  not combine pointwise Y rows with K rows in this shape.
+
+Remaining planner gap after this pass:
+
+- The emitted mixed descriptor order and offset arithmetic are now known for a
+  large spatial FP16 conv.
+- Still missing: the general threshold rule that chooses between full,
+  `k_half`, `k_tile`, and pointwise full-OC `y_tile` descriptor families for all
+  shapes. The current best route is to compare the descriptor CSV against
+  `top_tiler` row-family fields (`row[0]`, `0x184`, `0x188`, `0x18c`) for the
+  new mixed `160x40` model.
+
+### `160->320 3x3` height sweep
+
+To pin down the Y split threshold for the same spatial-channel path, these
+official compiler models were exported from the RKNN host and copied locally:
+
+```text
+/tmp/rknnc_sweep_models_local/sweep_b1_c160_h16_w16_oc320_wic160_k3x3_g1.rknn
+/tmp/rknnc_sweep_models_local/sweep_b1_c160_h20_w20_oc320_wic160_k3x3_g1.rknn
+/tmp/rknnc_sweep_models_local/sweep_b1_c160_h24_w24_oc320_wic160_k3x3_g1.rknn
+/tmp/rknnc_sweep_models_local/sweep_b1_c160_h28_w28_oc320_wic160_k3x3_g1.rknn
+/tmp/rknnc_sweep_models_local/sweep_b1_c160_h32_w32_oc320_wic160_k3x3_g1.rknn
+/tmp/rknnc_sweep_models_local/sweep_b1_c160_h36_w36_oc320_wic160_k3x3_g1.rknn
+/tmp/rknnc_sweep_models_local/sweep_b1_c160_h40_w40_oc320_wic160_k3x3_g1.rknn
+```
+
+The parser command was:
+
+```sh
+python3 experimental/rknn_parse_regcmd_runs.py \
+  /tmp/rknnc_sweep_models_local/*.rknn --csv
+```
+
+The key result is that this path does not Y-tile up through input height 28.
+Heights 16, 20, 24, and 28 each emit six descriptors:
+
+```text
+setup full, k_half 160, k_half 160, k_tile 112, k_tile 112, k_tile 96
+```
+
+At input height 32 and above, the compiler crosses every family with two Y
+windows. The descriptor count becomes 12:
+
+```text
+setup x2, k_half x4, k_tile x6
+```
+
+Exact Y windows observed:
+
+| Input H/W | Output H/W | Y windows | Feature offsets | Output Y offsets | Grain bits |
+|-----------|------------|-----------|-----------------|------------------|------------|
+| 16 | 14 | full only | `0x0` | `0x0` | `0xf0` |
+| 20 | 18 | full only | `0x0` | `0x0` | `0xf0` |
+| 24 | 22 | full only | `0x0` | `0x0` | `0xf0` |
+| 28 | 26 | full only | `0x0` | `0x0` | `0xc0` |
+| 32 | 30 | `26,4` | `0x0,0x3400` | `0x0,0x30c0` | `0xc0,0x90` |
+| 36 | 34 | `23,11` | `0x0,0x33c0` | `0x0,0x30e0` | `0xc0,0xc0` |
+| 40 | 38 | `21,17` | `0x0,0x3480` | `0x0,0x31e0` | `0xc0,0xc0` |
+
+For all sweep heights, the K-side schedule stays stable:
+
+```text
+k_half output-channel windows: 160, 160
+k_tile output-channel windows: 112, 112, 96
+weight offsets: 0, 0x70800 for k_half; 0, 0x4ec00, 0x9d800 for k_tile
+```
+
+Output K bases scale with full output height/width and FP16 element size, then
+the per-Y output offset is added. For example, at `32x32 -> 30x30`, the second
+112-channel `k_tile` base is `112 * 30 * 30 * 2 = 0x31380`, and its second Y
+row adds `0x30c0` to produce `0x34440`.
+
+`experimental/rknn_descriptor_plan.py --mode observed` now also covers this
+exact `160->320`, `3x3`, groups-1 height sweep. It was checked against all seven
+exported models:
+
+```sh
+for f in /tmp/rknnc_sweep_models_local/sweep_b1_c160_h*_w*_oc320_wic160_k3x3_g1.rknn; do
+  shape=$(basename "$f" .rknn)
+  python3 experimental/rknn_descriptor_plan.py "$shape" \
+    --mode observed --compare-rknn "$f"
+done
+```
+
+All rows matched exactly. The check exposed an important emitted-descriptor
+detail: the `CNA_FEATURE_DATA_ADDR` Y offset in these exported regcmds advances
+by `output_y * input_w * 8 * 2`, not by `output_y * input_w * aligned_in_c * 2`.
+For example:
+
+```text
+32x32, second Y window starts at output_y=26:
+feature_off = 26 * 32 * 8 * 2 = 0x3400
+
+40x40, second Y window starts at output_y=21:
+feature_off = 21 * 40 * 8 * 2 = 0x3480
+```
+
+So the clean descriptor emitter should treat the compiler-provided
+`feature_off` as a descriptor field. Do not recompute it from full tensor byte
+size in the register emitter.
+
+### `20x20 -> 18x18`, `out_c=320` channel sweep
+
+To separate the K-family choice from the height threshold, these official
+compiler models were exported with fixed `20x20` input, `3x3`, groups 1, and
+`out_c=320`:
+
+```text
+/tmp/rknnc_channel_models_local/chan_b1_c32_h20_w20_oc320_wic32_k3x3_g1.rknn
+/tmp/rknnc_channel_models_local/chan_b1_c40_h20_w20_oc320_wic40_k3x3_g1.rknn
+/tmp/rknnc_channel_models_local/chan_b1_c64_h20_w20_oc320_wic64_k3x3_g1.rknn
+/tmp/rknnc_channel_models_local/chan_b1_c72_h20_w20_oc320_wic72_k3x3_g1.rknn
+/tmp/rknnc_channel_models_local/chan_b1_c96_h20_w20_oc320_wic96_k3x3_g1.rknn
+/tmp/rknnc_channel_models_local/chan_b1_c128_h20_w20_oc320_wic128_k3x3_g1.rknn
+/tmp/rknnc_channel_models_local/chan_b1_c160_h20_w20_oc320_wic160_k3x3_g1.rknn
+/tmp/rknnc_channel_models_local/chan_b1_c192_h20_w20_oc320_wic192_k3x3_g1.rknn
+/tmp/rknnc_channel_models_local/chan_b1_c256_h20_w20_oc320_wic256_k3x3_g1.rknn
+```
+
+The parser command was:
+
+```sh
+python3 experimental/rknn_parse_regcmd_runs.py \
+  /tmp/rknnc_channel_models_local/*.rknn --csv
+```
+
+Observed family break for this fixed output shape:
+
+| Input C | Descriptor families after setup/k-half | OC windows | Grain bits | CBUF0 |
+|---------|----------------------------------------|------------|------------|-------|
+| 32 | `y_tile` x3 | full 320 each | setup/k-half `0x170`, y `0xb0` | `0xb1` |
+| 40 | `y_tile` x3 | full 320 each | setup/k-half `0x170`, y `0xb0` | `0xb1` |
+| 64 | `k_tile` x3 | `112,112,96` | `0x140` | `0xa2` |
+| 72 | `k_tile` x3 | `112,112,96` | `0x140` | `0xa2` |
+| 96 | `k_tile` x3 | `112,112,96` | `0x120` | `0x93` |
+| 128 | `k_tile` x3 | `112,112,96` | `0xf0` | `0x84` |
+| 160 | `k_tile` x3 | `112,112,96` | `0xf0` | `0x84` |
+| 192 | `k_tile` x3 | `112,112,96` | `0xf0` | `0x75` |
+| 256 | `k_tile` x3 | `112,112,96` | `0xc0` | `0x57` |
+
+The break is not "small input channel means fewer OC tiles." At `out_c=320`,
+`in_c=64` already switches to the same `k_tile` OC schedule as the larger
+160-channel stress case. Meanwhile `in_c=32` and `40` keep full-OC Y rows:
+
+```text
+setup full, k_half 160, k_half 160, y_tile full, y_tile full, y_tile full
+```
+
+For the `k_tile` branch, OC windows are stable across `in_c=64..256` in this
+sweep:
+
+```text
+112, 112, 96
+```
+
+The weight byte counts and offsets still scale directly with
+`kh * kw * in_c * 2 * oc_count` in the exported spatial-conv descriptors.
+Examples:
+
+```text
+in_c=64:  k_tile 112 weight bytes = 0x1f800
+in_c=160: k_tile 112 weight bytes = 0x4ec00
+in_c=256: k_tile 112 weight bytes = 0x7e000
+```
+
+This falsifies the earlier rough "about 3 CBUF banks of weights" estimate in
+`experimental/rknn_descriptor_plan.py`; the compiler is selecting the same
+112-channel OC tile width even when that consumes roughly 4, 10, or 16 CBUF
+banks worth of raw FP16 weights. The remaining unknown is therefore a
+compiler-family selection rule, not a simple per-tile weight-CBUF capacity
+formula.
+
+The same sweep is now covered by `experimental/rknn_descriptor_plan.py --mode
+observed`. It was checked against all nine exported channel-sweep models:
+
+```sh
+for f in /tmp/rknnc_channel_models_local/chan_b1_c*_h20_w20_oc320_wic*_k3x3_g1.rknn; do
+  shape=$(basename "$f" .rknn)
+  python3 experimental/rknn_descriptor_plan.py "$shape" \
+    --mode observed --compare-rknn "$f"
+done
+```
+
+All rows matched exactly. This check is what exposed the raw-`in_c` weight
+stride above: `in_c=40` uses second-half weight offset `0x1c200`, and `in_c=72`
+uses k-tile offsets `0`, `0x23700`, `0x46e00`. Those are
+`oc_start * kh * kw * in_c * 2`, not `oc_start * kh * kw * aligned_in_c * 2`.
+
+### `in_c=64`, `20x20 -> 18x18` output-channel sweep
+
+To test whether `112,112,96` was a fixed OC tile size or a consequence of
+`out_c=320`, these official compiler models were exported with fixed `in_c=64`,
+`20x20`, `3x3`, groups 1, and varying `out_c`:
+
+```text
+/tmp/rknnc_outc_models_local/outc_b1_c64_h20_w20_oc32_wic64_k3x3_g1.rknn
+/tmp/rknnc_outc_models_local/outc_b1_c64_h20_w20_oc48_wic64_k3x3_g1.rknn
+/tmp/rknnc_outc_models_local/outc_b1_c64_h20_w20_oc64_wic64_k3x3_g1.rknn
+/tmp/rknnc_outc_models_local/outc_b1_c64_h20_w20_oc96_wic64_k3x3_g1.rknn
+/tmp/rknnc_outc_models_local/outc_b1_c64_h20_w20_oc112_wic64_k3x3_g1.rknn
+/tmp/rknnc_outc_models_local/outc_b1_c64_h20_w20_oc128_wic64_k3x3_g1.rknn
+/tmp/rknnc_outc_models_local/outc_b1_c64_h20_w20_oc160_wic64_k3x3_g1.rknn
+/tmp/rknnc_outc_models_local/outc_b1_c64_h20_w20_oc192_wic64_k3x3_g1.rknn
+/tmp/rknnc_outc_models_local/outc_b1_c64_h20_w20_oc224_wic64_k3x3_g1.rknn
+/tmp/rknnc_outc_models_local/outc_b1_c64_h20_w20_oc256_wic64_k3x3_g1.rknn
+/tmp/rknnc_outc_models_local/outc_b1_c64_h20_w20_oc288_wic64_k3x3_g1.rknn
+/tmp/rknnc_outc_models_local/outc_b1_c64_h20_w20_oc320_wic64_k3x3_g1.rknn
+/tmp/rknnc_outc_models_local/outc_b1_c64_h20_w20_oc384_wic64_k3x3_g1.rknn
+/tmp/rknnc_outc_models_local/outc_b1_c64_h20_w20_oc512_wic64_k3x3_g1.rknn
+```
+
+Compact summaries can be reproduced with:
+
+```sh
+python3 experimental/rknn_descriptor_plan.py \
+  outc_b1_c64_h20_w20_oc320_wic64_k3x3_g1 \
+  --compiler-summary /tmp/rknnc_outc_models_local/outc_b1_c64_h20_w20_oc320_wic64_k3x3_g1.rknn
+```
+
+Observed post-setup family choices:
+
+| Output C | Setup/family sequence after setup | Post-family OC windows |
+|----------|-----------------------------------|------------------------|
+| 32 | `k_half`, then `y_tile` | Y rows full 32 |
+| 48 | `depthwise_y_mid`, then `k_tile` | `16,16,16` |
+| 64 | `k_half`, then `y_tile` | Y rows full 64 |
+| 96 | `k_half`, then `k_tile` | `32,32,32` |
+| 112 | `depthwise_y_mid`, then `y_tile` | Y rows full 112 |
+| 128 | `k_half`, then `y_tile` | Y rows full 128 |
+| 160 | `k_half`, then `y_tile` | Y rows full 160 |
+| 192 | `k_half`, then `k_tile` | `64,64,64` |
+| 224 | `k_half`, then `y_tile` | Y rows full 224 |
+| 256 | `k_half`, then `y_tile` | Y rows full 256 |
+| 288 | `k_half`, then `k_tile` | `96,96,96` |
+| 320 | `k_half`, then `k_tile` | `112,112,96` |
+| 384 | `k_half`, then `k_tile` | `128,128,128` |
+| 512 | `k_half`, then `k_tile` | `176,176,160` |
+
+This proves `112,112,96` is not a hard-coded OC tile shape. In this compiler
+path, the `k_tile` rows are usually three OC windows. For output-channel counts
+that divide cleanly by 3 and stay 16-aligned, the compiler uses exact thirds:
+
+```text
+96  -> 32,32,32
+192 -> 64,64,64
+288 -> 96,96,96
+384 -> 128,128,128
+```
+
+For non-divisible counts such as `320` and `512`, it rounds the first two thirds
+up to a 16-channel boundary and leaves the remainder in the tail:
+
+```text
+320 -> 112,112,96
+512 -> 176,176,160
+```
+
+Several output-channel counts do not use the `k_tile` post-family at all, even
+though their total weights exceed three raw CBUF banks. They instead emit
+full-OC `y_tile` rows after setup/k-half: `32`, `64`, `128`, `160`, `224`, and
+`256`. The `48` and `112` cases also show `0x10000000` family rows on this
+non-depthwise conv path, so that high-bit family is not exclusively a depthwise
+marker; it is better named `y_mid`/middle-Y family until the row-class semantics
+are fully confirmed.
+
+Planner implication:
+
+- `k_tile` window size should be derived from the output-channel count in this
+  path, approximately `ceil_align16(out_c / 3)` for the first two rows plus a
+  tail, not from raw CBUF weight capacity.
+- The decision to use `k_tile` versus full-OC `y_tile` remains a separate
+  compiler rule. Current evidence suggests it is tied to preferred channel
+  multiples/family templates, not just weight size.
+- Do not encode `0x10000000` as "depthwise only" in a clean emitter. The parser
+  should treat it as a generic family bit until more `librknnc.so` row traces
+  assign the true name.
+
+`experimental/rknn_descriptor_plan.py` now has an `--mode observed` path for
+this exact `in_c=64`, `20x20`, `3x3`, groups-1 sweep. It encodes only the
+compiler-derived rows above, and was checked against all 14 exported models:
+
+```sh
+for f in /tmp/rknnc_outc_models_local/*.rknn; do
+  shape=$(basename "$f" .rknn)
+  python3 experimental/rknn_descriptor_plan.py "$shape" \
+    --mode observed --compare-rknn "$f"
+done
+```
+
+All rows matched exactly. The observed-mode formulas used here are:
+
+```text
+weight_off = output_c_start * kh * kw * in_c * 2
+output_off = output_c_start * output_h_full * output_w * 2 + output_y * output_w * 8 * 2
+feature_off = output_y * input_w * 8 * 2
+```
+
+For the `20x20 -> 18x18` Y families in this sweep, the compiler uses fixed
+windows:
+
+```text
+y_mid:  two rows of output_h=9, input_h=11, y starts 0 and 9
+y_tile: three rows of output_h=6, input_h=8,  y starts 0, 6, and 12
+```
+
+This gives a concrete implementation target for `conv.py`: separate the
+descriptor emitter from the planner first, then make the planner choose among
+these family templates. The register emitter does not need shape-name special
+cases once it accepts `{family_bits, input_h, output_h, output_w, oc_count,
+feature_off, weight_off, output_off}` as explicit descriptor fields.
+
+### Pointwise `1x1` exported schedules
+
+Pointwise compiler models were exported to separate the `1x1` family templates
+from the spatial `3x3` rules:
+
+```text
+/tmp/rknnc_pw_models_local/pw_b1_c40_h20_w20_oc320_wic40_k1x1_g1.rknn
+/tmp/rknnc_pw_models_local/pw_b1_c40_h28_w28_oc320_wic40_k1x1_g1.rknn
+/tmp/rknnc_pw_models_local/pw_b1_c40_h40_w40_oc320_wic40_k1x1_g1.rknn
+/tmp/rknnc_pw_models_local/pw_b1_c40_h56_w56_oc320_wic40_k1x1_g1.rknn
+/tmp/rknnc_pw_models_local/pw_b1_c64_h20_w20_oc128_wic64_k1x1_g1.rknn
+/tmp/rknnc_pw_models_local/pw_b1_c64_h40_w40_oc128_wic64_k1x1_g1.rknn
+/tmp/rknnc_pw_models_local/pw_b1_c256_h14_w14_oc512_wic256_k1x1_g1.rknn
+/tmp/rknnc_pw_models_local/pw_b1_c256_h28_w28_oc512_wic256_k1x1_g1.rknn
+/tmp/rknnc_pw_models_local/pw_b1_c528_h14_w14_oc32_wic528_k1x1_g1.rknn
+/tmp/rknnc_pw_models_local/pw_b1_c528_h20_w20_oc32_wic528_k1x1_g1.rknn
+/tmp/rknnc_pw_models_local/pw_b1_c528_h40_w40_oc32_wic528_k1x1_g1.rknn
+```
+
+The clean/simple pointwise template is:
+
+```text
+setup full height/full OC
+k_half first half full height
+k_half second half full height
+y_tile full OC for each Y window
+```
+
+This template was observed and exactly matched by
+`experimental/rknn_descriptor_plan.py --mode observed` for:
+
+```text
+40->320 at 20x20, 28x28, 40x40, 56x56
+64->128 at 20x20, 40x40
+256->512 at 14x14
+528->32 at 14x14
+```
+
+Observed simple pointwise Y windows:
+
+| H/W | Y tile output rows | Feature/output offsets |
+|-----|--------------------|------------------------|
+| 14 | `5,5,4` | `0,0x460,0x8c0` |
+| 20 | `7,7,6` | `0,0x8c0,0x1180` |
+| 28 | `10,9,9` | `0,0x1180,0x2140` |
+| 40 | `14,13,13` | `0,0x2300,0x4380` |
+| 56 | `19,19,18` | `0,0x4280,0x8500` |
+
+For pointwise, `input_h == output_h` in each descriptor because `kh=kw=1`.
+The same descriptor offset formulas apply:
+
+```text
+weight_off = output_c_start * in_c * 2
+output_off = output_c_start * output_h_full * output_w * 2 + output_y * output_w * 8 * 2
+feature_off = output_y * input_w * 8 * 2
+```
+
+The larger pointwise exports show a second, more complex crossed-Y family:
+
+```text
+256->512 at 28x28: setup x2, k_half crossed over 4 Y windows per half, then y_tile x6
+528->32 at 20x20:  setup x2, k_half crossed over 2 Y windows per half, then y_tile x3
+528->32 at 40x40:  setup x2, k_half crossed over 6 Y windows per half, then y_tile x6
+```
+
+These are now also covered by `experimental/rknn_descriptor_plan.py --mode
+observed`. The exact Y lists are:
+
+| Shape | Setup Y windows | K-half Y windows | Y-tile emission order |
+|-------|-----------------|------------------|-----------------------|
+| `256->512`, `28x28` | `(0,9),(9,9)` | `(0,9),(9,9),(18,9),(27,1)` per half | `(0,5),(15,5),(5,5),(20,4),(10,5),(24,4)` |
+| `528->32`, `20x20` | `(0,15),(15,5)` | `(0,15),(15,5)` per half | `(0,7),(7,7),(14,6)` |
+| `528->32`, `40x40` | `(0,7),(7,7)` | `(0,7),(7,7),(14,7),(21,7),(28,7),(35,5)` per half | `(0,7),(21,7),(7,7),(28,6),(14,7),(34,6)` |
+
+The non-monotonic Y-tile emission order on `28x28` and `40x40` is compiler
+ground truth from exported regcmds. Do not sort these rows in a clean planner;
+the descriptor order should be emitted as chosen by the family template.
+
+### Observed descriptor contract
+
+`experimental/rknn_descriptor_plan.py` now has two modes intended to turn the
+reverse data into an implementation contract for `examples/kernel_6_18/conv.py`.
+
+Single-shape descriptor export:
+
+```sh
+python3 experimental/rknn_descriptor_plan.py \
+  pw_b1_c256_h28_w28_oc512_wic256_k1x1_g1 \
+  --mode observed --json
+```
+
+This prints ordered descriptor objects with only the fields the clean register
+emitter should consume:
+
+```text
+family, family_bits, grain_bits, input_h, output_h, output_w, oc_count,
+feature_off, weight_off, output_off
+```
+
+Corpus coverage check:
+
+```sh
+python3 experimental/rknn_descriptor_plan.py --mode observed --coverage \
+  /tmp/rknnc_channel_models_local/*.rknn \
+  /tmp/rknnc_sweep_models_local/*.rknn \
+  /tmp/rknnc_outc_models_local/*.rknn \
+  /tmp/rknnc_pw_models_local/*.rknn
+```
+
+Current result: all 41 local compiler-exported RKNN files are known shapes,
+observed-supported, and exact descriptor matches.
+
+The helper also has a grain-bit grouping view:
+
+```sh
+python3 experimental/rknn_descriptor_plan.py --grain-summary \
+  /tmp/rknnc_channel_models_local/*.rknn \
+  /tmp/rknnc_sweep_models_local/*.rknn \
+  /tmp/rknnc_outc_models_local/*.rknn \
+  /tmp/rknnc_pw_models_local/*.rknn
+```
+
+`grain_bits` are the low bits of `CNA_CONV_CON2`, so the final emitter must set:
+
+```text
+CNA_CONV_CON2 = family_bits | grain_bits
+```
+
+The current observed checker treats unknown grain bits as an explicit wildcard
+(`*`) while still printing the compiler value during comparisons. This is
+intentional. The corpus shows that grain bits are not just a function of
+`family,input_h,output_h,output_w,oc_count`. Examples:
+
+```text
+k_half,20,18,18,160 -> 0xc0,0xf0,0x120,0x140,0x170
+k_tile,20,18,18,112 -> 0xc0,0xf0,0x120,0x140
+```
+
+So `grain_bits` remain the most important unresolved descriptor field. The next
+compiler-side target is the `librknnc.so` path that writes low `CONV_CON2` bits
+from row/template metadata, likely near the final regcmd build rather than the
+top-level Y/K boundary planner.
+
+Two extra helper views now make this gap easier to attack:
+
+```sh
+python3 experimental/rknn_descriptor_plan.py --grain-context \
+  /tmp/rknnc_channel_models_local/*.rknn \
+  /tmp/rknnc_sweep_models_local/*.rknn \
+  /tmp/rknnc_outc_models_local/*.rknn \
+  /tmp/rknnc_pw_models_local/*.rknn
+
+python3 experimental/rknn_descriptor_plan.py --grain-matrix \
+  /tmp/rknnc_channel_models_local/*.rknn \
+  /tmp/rknnc_sweep_models_local/*.rknn \
+  /tmp/rknnc_outc_models_local/*.rknn \
+  /tmp/rknnc_pw_models_local/*.rknn
+```
+
+`--grain-context` prints one row per compiler descriptor with shape fields,
+descriptor fields, `weight_bytes`, and `cbuf0`. `--grain-matrix` groups by:
+
+```text
+family, kh, kw, in_c, input_h, output_h, output_w, oc_count, cbuf0
+```
+
+New observations from this matrix:
+
+- For spatial `3x3`, setup/k-half/k-tile grain bits are stable once the visible
+  descriptor geometry and `cbuf0` match. They do not vary with OC tile count in
+  the tested out-channel sweep. Example: all `64->*`, `20x20`, `3x3`,
+  `cbuf0=0xa2` setup/k-half/k-tile descriptors use `grain_bits=0x140`, even
+  when `oc_count` changes from `16` through `176`.
+- For the `160->320` spatial height sweep, grain bits follow the Y-window CBUF
+  template rather than family or OC tile count:
+
+```text
+input_h/output_h/output_w/cbuf0 -> grain_bits
+16/14/14/0x93 -> 0xf0
+20/18/18/0x84 -> 0xf0
+24/22/22/0x66 -> 0xf0
+28/26/26/0x48 -> 0xc0
+6/4/30/0x39   -> 0x90
+13/11/34/0x39 -> 0xc0
+19/17/38/0x39 -> 0xc0
+23/21/38/0x39 -> 0xc0
+25/23/34/0x39 -> 0xc0
+28/26/30/0x39 -> 0xc0
+```
+
+- For pointwise Y/crossed descriptors, the low bits often track the local row
+  count directly:
+
+```text
+1 row  -> 0x20
+5 rows -> 0x50
+6 rows -> 0x60 or 0x70 depending on template
+7 rows -> 0x70 or 0x80 depending on template
+9 rows -> 0x90
+14 rows -> 0xa0
+```
+
+  This is not a complete formula because simple pointwise full-window
+  descriptors still show template/Cbuf effects (`40->320 56x56` full-window
+  setup/k-half uses `0x100`, while 18/19 row Y tiles also use `0x100`).
+
+- `cbuf0` high bit `0x2000` can alternate between pointwise Y descriptors
+  without changing `grain_bits`. Examples: crossed `256->512 28x28` setup rows
+  both use `grain_bits=0x90` while `cbuf0` alternates `0x84/0x2084`; crossed
+  `528->32 40x40` setup/Y rows alternate `0x2a/0x202a` with the same
+  row-derived grain value. So `grain_bits` and CBUF bank-selection bits must
+  remain separate fields in the clean descriptor contract.
+
+### Regcmd build-path probes
+
+Two focused GDB scripts were added to push the reverse from row planning toward
+the final `RKNNModelRegCmdbuildPass` command stream:
+
+```text
+experimental/trace_librknnc_regcmd_helper.gdb
+experimental/trace_librknnc_regcmd_emit.gdb
+```
+
+`trace_librknnc_regcmd_helper.gdb` instruments the direct call visible in the
+row/task-builder disassembly:
+
+```asm
+0x636574: bl 0x5aea40
+```
+
+and helper internals around `0x5aea40..0x5aedb8`. Running it remotely on a
+self-contained official RKNN build for:
+
+```text
+1x160x20x20 -> 1x320x18x18, 3x3, groups=1
+```
+
+produced:
+
+```text
+/tmp/rknnc_regcmd_helper_conv.log
+/tmp/rknnc_regcmd_helper_models/probe_b1_c160_h20_w20_oc320_wic160_k3x3_g1.rknn
+```
+
+The breakpoints installed, the model built and exported normally, but none of
+the helper breakpoints fired. The exported RKNN still contains the expected six
+compiler descriptors:
+
+```text
+setup  grain=0xf0
+k_half grain=0xf0 x2
+k_tile grain=0xf0 x3
+```
+
+So `0x5aea40` is a real conditional row/task helper, but it is not on the normal
+regcmd build path for this generated spatial `20x20` model. Do not treat it as
+the final `CNA_CONV_CON2` writer.
+
+Static inspection then found tempting qword-construction loops around
+`librknnc.so+0xc152e0..0xc15308`, `+0xc154b4..0xc154d8`, and a late append at
+`+0xc15ff4`. These loops appear to build 8-byte records from:
+
+```text
+u16 field at sp+0x10a
+u32 value at sp+0x10c
+append 8-byte qword to a vector
+```
+
+`trace_librknnc_regcmd_emit.gdb` instruments those append sites and decodes the
+candidate qword using the exported-RKNN format:
+
+```text
+qword = (target << 48) | ((value & 0xffffffff) << 16) | reg_addr
+```
+
+Remote run:
+
+```text
+/tmp/rknnc_regcmd_emit_conv.log
+```
+
+Again the breakpoints installed and the same RKNN model built/exported normally,
+but none of the emit-loop breakpoints fired. That rules these loops out for the
+normal single-conv `RKNNModelRegCmdbuildPass` path.
+
+The current compiler-side facts are therefore:
+
+- The row/task builder and exported regcmd stream are matched well enough to
+  describe ordered descriptors.
+- The final pass still writes the exported qwords somewhere else; the first two
+  obvious static candidates (`0x5aea40` helper and `0xc15xxx` qword append
+  loops) are negative for the representative generated `160->320 20x20` model.
+- Next productive trace should start from the bytes that are definitely written
+  to the `.rknn` export: catch the model export/write path or memory-copy path
+  that handles the contiguous regcmd byte run, then backtrace to its producer.
+  The target bytes for the same probe are:
+
+```text
+run 1 at file off 0x2640: CNA_CONV_CON2 = 0x000000f0
+run 2 at file off 0x29b8: CNA_CONV_CON2 = 0x400000f0
+run 4 at file off 0x32c0: CNA_CONV_CON2 = 0x500000f0
+```
+
+These negative probes are still useful for `conv.py`: they keep the clean
+descriptor contract grounded in exported command bytes and avoid naming an
+unrelated helper as the grain-bit source.
+
+### RKNN export writer path
+
+The next trace moved from candidate producers to the bytes that are definitely
+present in the exported `.rknn` file. `trace_librknnc_export_writes.gdb` scans
+outgoing file-write buffers for known little-endian regcmd qwords from the same
+official compiler probe:
+
+```text
+experimental/trace_librknnc_export_writes.gdb
+/tmp/rknnc_export_writes_conv.log
+```
+
+The trace found the final serialized RKNN buffer during `RKNNModelExportPass`.
+The buffer was:
+
+```text
+buf=0x555b821990
+size=941366
+```
+
+and the qword offsets inside that buffer matched the exported file offsets:
+
+```text
+CNA_CONV_CON2 setup  0x0201000000f01010 at file/buffer off 0x2670
+CNA_CONV_CON2 k_half 0x0201400000f01010 at file/buffer off 0x29d0
+CNA_CONV_CON2 k_tile 0x0201500000f01010 at file/buffer off 0x32d0
+```
+
+The hit backtrace is the generic C++ stream write path:
+
+```text
+#0 std::ostream::write(char const*, long)
+#1 librknnc.so+0x152ed48
+#2 librknnc.so+0x154b7cc
+```
+
+Static disassembly shows `librknnc.so+0x152ebb0` is a generic file writer: it
+opens the export path and then calls `std::ostream::write` with the supplied
+buffer and size:
+
+```asm
+152ed38: ldr x1, [sp,#104]   ; buffer
+152ed3c: mov x2, x26         ; size
+152ed40: mov x0, x21         ; ostream
+152ed44: bl  11a600          ; std::ostream::write
+```
+
+The caller at `librknnc.so+0x154b690` logs `Export RKNN model to ...`, allocates
+a 0x190-byte export object, calls the buffer builder at `+0x1549c44`, and then
+writes the serialized buffer on success:
+
+```asm
+154b780: bl  1549c44         ; build/fill serialized RKNN export object
+154b7b4: ldr x3, [sp,#72]    ; export object
+154b7bc: ldp x4,x2,[x3,#8]   ; base pointer, size
+154b7c0: ldr x1,[x3,#40]     ; payload offset
+154b7c4: add x1,x4,x1        ; buffer passed to writer
+154b7c8: bl  152ebb0         ; write file
+```
+
+So the confirmed serialized-buffer contract is:
+
+```text
+writer_path = librknnc.so+0x154b690 -> +0x152ebb0 -> std::ostream::write
+builder     = librknnc.so+0x1549c44
+buffer      = export_obj[8] + export_obj[40]
+size        = export_obj[16]
+```
+
+This does not yet identify the original regcmd producer. It does narrow the
+next step: instrument `+0x1549c44` and the object fields it fills, then trace
+where the qword-containing payload is copied into the export object. The
+producer should be upstream of `+0x1549c44`; the final writer itself is only
+serializing an already-built RKNN buffer.
+
+`experimental/trace_librknnc_export_builder.gdb` now instruments that builder
+boundary and the two important copy sites inside `+0x1549c44`. Remote run:
+
+```text
+/tmp/rknnc_export_builder_conv.log
+```
+
+Important hits for the same `160->320 20x20 3x3` probe:
+
+```text
+builder_entry       librknnc.so+0x1549c44
+payload_copy_before librknnc.so+0x154aed0
+payload_copy_after  librknnc.so+0x154aee8
+wrapper_copy_before librknnc.so+0x154afe8
+wrapper_copy_after  librknnc.so+0x154b03c
+builder_return      librknnc.so+0x154b0d0
+caller_after_build  librknnc.so+0x154b784
+caller_before_write librknnc.so+0x154b7b4
+```
+
+The payload copy is the first confirmed current-export placement of the regcmd
+bytes into the export object:
+
+```asm
+154aed0: ldr x3,[x0,#8]       ; export_obj base
+154aedc: ldr x0,[x0,#40]      ; export_obj payload offset
+154aee0: add x0,x3,x0         ; destination
+154aee4: bl  11a720           ; memcpy(dst, staging, size)
+```
+
+A second run with an exact breakpoint at `+0x154aee4` confirmed the `memcpy`
+arguments before the call:
+
+```text
+dst  x0 = export_obj base/payload, e.g. 0x555b821950
+src  x1 = staging byte buffer,    e.g. 0x555b186440
+size x2 = 0xe5900
+```
+
+The staging source already contains the current regcmd bytes at raw payload
+offsets:
+
+```text
+payload_memcpy_src setup  off 0x2630
+payload_memcpy_src k_half off 0x2990
+payload_memcpy_src k_tile off 0x3290
+```
+
+Immediately after `+0x154aee4`, the export object has the regcmd qwords at raw
+payload offsets:
+
+```text
+setup  off 0x2630
+k_half off 0x2990
+k_tile off 0x3290
+```
+
+Those are exactly 0x10 bytes before the parser's run starts and 0x40 bytes
+before the final file qword offsets. The `0x10` gap is the per-run preamble
+inside each command run. The later wrapper copy inserts a 0x40-byte object
+header before the payload:
+
+```asm
+154b000: add x4,x7,x6         ; export_obj base + payload offset
+154b004: add x3,x4,#0x40
+154b00c: str q0,[x7,x6]       ; wrapper/header start
+154b010: str x23,[x4,#16]
+154b020: bl  11a720           ; memcpy wrapper payload part
+154b024: str x19,[x0,x23]     ; payload length
+154b034: add x0,x0,#0x8
+154b038: bl  11a720           ; memcpy old payload after wrapper
+```
+
+After `+0x154b038`, the same qwords move to final exported file offsets:
+
+```text
+setup  off 0x2670
+k_half off 0x29d0
+k_tile off 0x32d0
+```
+
+The final export object at builder return and at `caller_before_write` is:
+
+```text
+export_obj[0x00] = vtable/object tag
+export_obj[0x08] = base pointer
+export_obj[0x10] = size = 941366
+export_obj[0x18] = capacity = 0xe6000
+export_obj[0x20] = end/used = 941366
+export_obj[0x28] = payload offset = 0 for this final object
+```
+
+The stale qwords seen before `payload_copy_before` are leftovers near the end of
+the already allocated export buffer (`off 0xe1530`, `0xe1890`, `0xe2190`).
+They are not the current serialized placement. The current placement starts
+only after the `+0x154aee4` copy from the staging byte vector.
+
+This trace proves that `+0x1549c44` is a serializer/builder, not the regcmd
+semantic producer. It receives an already assembled byte stream in its local
+staging vector and copies it into the export object's payload. The next
+productive compiler trace should move one step earlier from the staging vector:
+
+```text
+Trace the source pointer used by memcpy at +0x154aee4 (x1, size x2) backward to
+the function that appended the command-run byte blocks. In the sampled run, the
+source was 0x555b186440 and already contained the raw command payload before
+the export-object copy.
+```
+
+`experimental/trace_librknnc_builder_appends.gdb` traces the append helpers
+called by `+0x1549c44` before that payload copy. It filters helper calls whose
+return address is inside the builder and scans the builder-local writer object.
+Remote run:
+
+```text
+/tmp/rknnc_builder_appends_conv.log
+```
+
+The traced helper family is a byte-stream writer, not a high-level regcmd
+planner:
+
+```text
+append/alignment helpers:
+  +0x1537840 align4
+  +0x1537e20 append indexed u32/tag
+  +0x1561100 append byte/tag
+  +0x15611f0 append u32
+  +0x15612e0 append bytes
+  +0x15615c0 append indexed u32/tag variant
+  +0x1561fa0 append varint/size-like value
+```
+
+The writer object passed in `x22` during the builder has this observed layout:
+
+```text
+x22 + 0x30 : used byte count
+x22 + 0x40 : current payload cursor
+x22 + 0x48 : record/field-table cursor
+x22 + 0x50 : record count
+x22 + 0x54 : max tag/field id
+x22 + 0x58 : base used count before current nested object
+x22 + 0x60 : dirty/nested-object flag byte
+x22 + 0x68 : small capacity/state
+x22 + 0x70 : gate/empty flag byte
+```
+
+The staging allocation grows backward: as fields are appended, `used` increases
+and the payload `cursor` decreases. The command qword absolute addresses remain
+stable while their offset relative to the moving cursor changes. In the sampled
+run:
+
+```text
+after early append at +0x1549d5c:
+  used   = 0xe50c0
+  cursor = 0x555b186a80
+  setup qword visible at cursor+0x1df0
+
+after final align at +0x154ae64:
+  used   = 0xe58fc
+  cursor = 0x555b186244
+  setup qword visible at cursor+0x262c
+
+after final append_u32 at +0x154ae80:
+  used   = 0xe5900
+  cursor = 0x555b186240
+  setup qword visible at cursor+0x2630
+```
+
+The exact payload-copy call immediately after this uses the same cursor:
+
+```text
++0x154aee4 memcpy:
+  dst  = export object payload
+  src  = x22.cursor = 0x555b186240
+  size = x22.used   = 0xe5900
+
+qwords in src:
+  setup  off 0x2630
+  k_half off 0x2990
+  k_tile off 0x3290
+```
+
+So `+0x1549c44` builds a nested serialized payload around an already present
+command-stream region, then copies `x22.cursor..x22.cursor+x22.used` to the
+export object. The helper calls between `+0x1549d5c` and `+0x154ae80` mostly add
+serialization fields, indexes, lengths, wrapper tags, and alignment. They do not
+appear to synthesize individual Rocket qwords from register/value semantics.
+
+Important negative/positive split:
+
+- Positive: the final raw command payload is exactly `x22.cursor` after
+  `+0x154ae80`, before the export-object copy.
+- Negative: the append helpers traced here are still generic serializer helpers.
+  Seeing qword bytes in their scan window does not prove those helpers produced
+  the qwords; the qword bytes are already stable in the allocation while the
+  cursor moves around them.
+
+The next real producer target is therefore earlier than this export serializer:
+find where the stable command-stream allocation bytes at absolute addresses like
+`0x555b188870` are created before `RKNNModelExportPass`, likely during
+`RKNNModelRegCmdbuildPass` or the model build object consumed by the export
+builder. A targeted approach is to catch allocations/copies of the run-sized
+byte blocks before export, or to trace references to the command payload pointer
+passed into `+0x1549c44` rather than the serializer's final `x22` cursor.
+
+This is the clearest boundary for the clean rewrite:
+
+1. Add a descriptor type in `conv.py` with the exported fields above.
+2. Refactor `make_conv2d_regs()` so it consumes descriptor-local dimensions and
+   offsets instead of recomputing from only full-layer `p`.
+3. Make the planner emit ordered descriptors. Descriptor order is part of the
+   contract; do not sort by Y/K offsets.
+4. Keep CPU im2col out of the clean path. The compiler-derived descriptors show
+   direct hardware spatial and pointwise schedules for the tested shapes.
+
+### Descriptor checker against current `conv.py`
+
+`experimental/rknn_descriptor_plan.py` was added as a bridge from reverse data
+to implementation. It imports the current `examples/kernel_6_18/conv.py`
+helpers and compares an estimated descriptor sequence against exported RKNN
+regcmd descriptors:
+
+```sh
+python3 experimental/rknn_descriptor_plan.py \
+  mix_b1_c160_h40_w40_oc320_wic160_k3x3_g1 \
+  --compare-rknn /tmp/rknnc_mixed_models_local/mix_b1_c160_h40_w40_oc320_wic160_k3x3_g1.rknn
+```
+
+This intentionally fails for the mixed spatial shape, and the failure is useful:
+
+- Compiler emits 12 descriptors:
+  `setup` x2, `k_half` x4, `k_tile` x6.
+- Current `conv.py` planner enters its `spatial_im2col` path and predicts many
+  tiny 2-output-row descriptors. Its first estimate is `input_h=4`,
+  `output_h=2`; compiler ground truth is `input_h=23`, `output_h=21`.
+- Current K estimate for that path starts from im2col/pointwise tile sizing and
+  predicts many 48-channel `k_tile` windows; compiler ground truth for the
+  mixed spatial path is `112,112,96`.
+
+For the small spatial `32->128` model, the checker matches the first three
+compiler rows (`setup`, `k_half`, `k_half`) exactly, then flags the missing
+compiler `y_tile` rows. That confirms the descriptor/offest formulas are useful,
+but the family-selection logic is not complete.
+
+Implementation implication:
+
+- Remove the conceptual `spatial_im2col` planning path from the clean RKNN-style
+  planner. It is an older Python workaround, not compiler behavior.
+- Planner output should be compiler-family descriptors first, not direct submit
+  tiles. For large spatial conv, derive the two-level family schedule:
+  full/setup, half-K metadata, and `k_tile` windows, each crossed with the
+  compiler Y windows.
+- Keep CPU im2col out of the clean path unless explicitly requested.
+
+### Staging buffer origin (next trace target)
+
+Confirmed flow before the export serializer:
+
+```
+RKNNModelRegCmdbuildPass (03:59:57.950)   <- runs before export
+  | (populates model object internal command buffer)
+RKNNModelExportPass   (03:59:57.950-976)
+  | +0x154b690 "Export RKNN model to ..."
+  |   allocates export object (0x190 bytes at 0x555b2143d0)
+  |   calls builder +0x1549c44 at +0x154b780
+  |     +0x1549c44 entry: x22 = x0 = compiler object (0x555b01c250)
+  |       compiler+0x108: vector begin=0x555b30e070 end=0x555b30e080 (16 bytes)
+  |       compiler+0x1f0: pointer to library static data (0x7fe30bb570)
+  |     first append align4 at +0x1549d5c -> used=0xe50c0, cursor=0x555b186a80
+  |       qword at cursor+0x1df0 = 0x555b188870 (already present)
+  |     ... serialization metadata appended around stable qword bytes ...
+  |     final append at +0x154ae80 -> used=0xe5900, cursor=0x555b186240
+  |     memcpy(cursor, export_obj_payload, used) at +0x154aee4
+  |     wrapper insertion -> final file offsets 0x2670/0x29d0/0x32d0
+  |   +0x152ebb0 std::ostream::write
+```
+
+Key unresolved question: **Who allocated and filled the staging buffer** at
+absolute addresses like `0x555b188870` before the export builder touched it?
+
+The staging buffer:
+- lives at cursor = `0x555b186240`, size = `0xe5900`
+- is **not** the compiler object itself (distance ~1.48 MB)
+- is **not** in the compiler+0x108 vector (only 16 bytes, begin=`0x555b30e070`)
+- already contains the final regcmd qwords when the builder first examines its
+  cursor (`used=0xe50c0` after first align4 call)
+
+Static anchor points:
+- Export builder at `+0x1549c44` is called from 5 call sites:
+  `+0x1be4ac`, `+0x1be664`, `+0x1be814`, `+0x1c05fc`, `+0x154b780`
+- The `+0x154b780` call is the RKNNModelExportPass path (traced above).
+- The other 4 call sites (around `+0x1bxxxx`) may be other serialization
+  contexts (model copy, subgraph serialization, etc.).
+- `RKNNModelRegCmdbuildPass` runs at `+0x1c05fc` (near the other builder
+  callers) -- this is likely the pass that populates the model's command buffer.
+
+The next productive trace (`trace_librknnc_staging_source.gdb`):
+1. Intercepts `memcpy` calls from within the builder (`+0x1549c44` range)
+2. Filters for sizes >= 0x1000 (to catch the staging payload)
+3. Scans source and destination for qword patterns
+4. Shows backtrace to identify who produced the bytes
+
+To run on remote probe:
+```sh
+ssh orangepi@192.168.192.36 "cd ~/npu/ops_rknn && \
+  cp /tmp/rknnc_probe_conv.py . && \
+  gdb -batch -x /tmp/trace_librknnc_staging_source.gdb \
+    --args python3 rknnc_probe_conv.py /tmp/rknnc_staging_log" 2>&1 | \
+  tee /tmp/rknnc_staging_source_conv.log
+```
+
+The probe script (`rknnc_probe_conv.py`) builds a conv 1x160x20x20 -> 320x18x18
+3x3 model via rknn-toolkit2.
+
+---
+
+## 6-Tile Conv EMIT Trace Analysis (2026-05-22)
+
+### Model Details
+
+```
+Model: conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1.rknn
+Input:  (1, 3, 224, 224) int8
+Output: (1, 32, 222, 222) int8
+Kernel: 3x3, stride 1, no padding
+Weight: 32 * 3 * 3 * 3 = 864 bytes = 864 int8 values
+CBUF:   weight_bank=1, data_bank=11
+Split:  BY_Y (Y-axis tiling) across 3 NPU cores
+```
+
+Captured via `rknn.gdb` + `dump.py` on remote with `LD_LIBRARY_PATH=/tmp`
+(pointing to local `librknnrt_decomp.so` for offset-matched tracing).
+
+### Overall Structure
+
+- **1084 EMIT lines** total
+- **21 sub-tile OP_ENABLE entries** (each = one DPU operation)
+- **5 FENCE entries** (separate core groups)
+- **4 core groups** (3 NPU cores, one core handles 2 spatial regions)
+
+### Core Group Layout
+
+| Group | Cores | Tiles | Input Heights | RESERVED_0 in CONV_CON2 | DCOMP_ADDR  | PC_REG_AMT RESERVED_0 |
+|-------|-------|-------|---------------|--------------------------|-------------|----------------------|
+| 0     | Core0 | 4     | 50,50,50,32   | 0                        | 0xffff8000  | 0                    |
+| 1     | Core1 | 4     | 50,50,50,32   | 64                       | 0xffff8000  | 1                    |
+| 2     | Core2 | 4     | 50,50,50,32   | 64                       | 0xffff8900  | 1                    |
+| 3     | Core3 | 3     | 39,39,39      | 32                       | 0xffff8000  | 2                    |
+
+Total input rows: (50+50+50+32) * 3 + (39*3) = 546 + 117 = 663? No — each core
+processes a **different spatial region** of the same 224-row input. The 4 groups
+are 4 separate core assignments for different Y-slices of the output.
+
+Actually, looking at the FEATURE_DATA_ADDR within each group, input addresses
+increment per tile, confirming Y-tiling within each core. Each core processes
+ALL output channels (32 kernels) for its assigned output row range.
+
+**Key insight**: The "4 groups" likely correspond to:
+- Group 0 (Core0, 4 tiles): output rows 0-181 (full 182-row input region)
+- Group 1 (Core1, 4 tiles): output rows 0-181 (same input region, different weight bank)
+- Group 2 (Core2, 4 tiles): output rows 0-181 (same)
+- Group 3 (Core3, 3 tiles): output rows 0-116 (shorter region)
+
+Wait — this would mean redundant work. More likely interpretation:
+**Each "group" is one sub-conv for a different input channel group or output channel
+slice**, not spatial Y-slicing. But WEIGHT_SIZE2 shows 32 kernels in all tiles,
+so all output channels are processed per tile.
+
+The actual answer: **each group is a spatial Y-slice assigned to a different core**.
+The height sums 50+50+50+32=182 input rows per core means each core processes
+~74 output rows (with 3x3 kernel overlap). 3 cores * 74 = 222 output rows = correct.
+Group 3 with height 39 handles the remaining partial output.
+
+### Per-Tile Register Emission Sequence (36 registers per tile)
+
+The following sequence repeats for each sub-tile, with the FIRST tile of each
+core group lacking `WEIGHT_REUSE` and subsequent tiles having it:
+
+```
+; === CNA (Convolution Accelerator) Setup ===
+CNA_CBUF_CON0          [TILE-VARYING: WEIGHT_REUSE(1) for tiles 2+; WEIGHT_BANK(1)|DATA_BANK(11)]
+CNA_CONV_CON1           [CONSTANT: NONALIGN_DMA(1)|GROUP_LINE_OFF(1)|ARGB_IN(10)|PROC_PRECISION(2)|IN_PRECISION(2)]
+DPU_S_POINTER           [CONSTANT: PP_MODE(1)|EXECUTER_PP_EN(1)|PP_EN(1)]
+CNA_CONV_CON1           [CONSTANT: duplicate]
+CNA_CONV_CON2           [TILE-VARYING: FEATURE_GRAINS(height); CORE-VARYING: RESERVED_0]
+CNA_CONV_CON3           [CONSTANT: Y_STRIDE(1)|X_STRIDE(1)]
+CNA_DATA_SIZE0          [TILE-VARYING: WIDTH(224), HEIGHT(50|32|39)]
+CNA_DATA_SIZE1          [CONSTANT: CHANNEL_REAL(2)|CHANNEL(8)]
+CNA_DATA_SIZE2          [CONSTANT: DATAOUT_WIDTH(222)]
+CNA_DATA_SIZE3          [TILE-VARYING: DATAOUT_ATOMICS]
+CNA_WEIGHT_SIZE0        [CONSTANT]
+CNA_WEIGHT_SIZE1        [CONSTANT: BYTES_PER_KERNEL(144)]
+CNA_WEIGHT_SIZE2        [CONSTANT: 3x3, 32 kernels]
+CNA_CBUF_CON0           [duplicate of first CBUF_CON0]
+CNA_CBUF_CON1           [TILE-VARYING: DATA_ENTRIES]
+CNA_CVT_CON0            [CONSTANT: CVT_BYPASS(1)]
+CNA_CVT_CON1-4          [CONSTANT: scales=1]
+CNA_FEATURE_DATA_ADDR   [TILE-VARYING: input IOVA]
+CNA_DMA_CON0            [CONSTANT: WEIGHT_BURST_LEN(15)|DATA_BURST_LEN(15)]
+CNA_DMA_CON1            [CONSTANT: LINE_STRIDE(224)]
+CNA_DMA_CON2            [CONSTANT: SURF_STRIDE(49952)]
+CNA_FC_DATA_SIZE0       [TILE-VARYING: DMA_WIDTH(224), DMA_HEIGHT]
+CNA_FC_DATA_SIZE1       [CONSTANT: DMA_CHANNEL(8)]
+CNA_DCOMP_ADDR0         [CORE-VARYING: 0xffff8000 or 0xffff8900]
+CNA_CVT_CON5            [CONSTANT: 0x00000fff]
+
+; === CORE (DPU Core) Setup ===
+CORE_MISC_CFG           [CONSTANT: PROC_PRECISION(2)]
+CORE_DATAOUT_SIZE_0     [TILE-VARYING: HEIGHT, WIDTH]
+CORE_DATAOUT_SIZE_1     [CONSTANT: CHANNEL(31)]
+
+; === DPU (Post-Processing) Setup ===
+DPU_FEATURE_MODE_CFG    [CONSTANT: BURST_LEN(15)|OUTPUT_MODE(2)]
+DPU_DATA_FORMAT         [CONSTANT: OUT/IN/PROC_PRECISION(2)]
+DPU_DST_BASE_ADDR       [TILE-VARYING: output IOVA]
+DPU_DST_SURF_STRIDE     [CONSTANT: 49284]
+DPU_DATA_CUBE_WIDTH     [CONSTANT: 221]
+DPU_DATA_CUBE_HEIGHT    [TILE-VARYING: 47|29|36]
+DPU_DATA_CUBE_CHANNEL   [CONSTANT: ORIG(31)|CHANNEL(31)]
+DPU_BS_CFG              [CONSTANT: all bypass]
+DPU_BS_OW_CFG           [CONSTANT]
+DPU_WDMA_SIZE_0         [CONSTANT: CHANNEL(31)]
+DPU_WDMA_SIZE_1         [TILE-VARYING: HEIGHT, WIDTH]
+DPU_BN_CFG              [CONSTANT: all bypass]
+DPU_EW_CFG              [CONSTANT: all bypass]
+DPU_EW_CVT_SCALE_VALUE  [CONSTANT: 1]
+DPU_OUT_CVT_SCALE       [CONSTANT: FP32TOFP16_EN(1)|SCALE(1)]
+DPU_SURFACE_ADD         [CONSTANT: 98568]
+
+; === PC (Program Control) ===
+PC_BASE_ADDRESS         [TILE-VARYING: weight microcode addr]
+PC_REGISTER_AMOUNTS     [TILE-VARYING: PC_DATA_AMOUNT; CORE-VARYING: RESERVED_0]
+PC_OPERATION_ENABLE     [CONSTANT: RESERVED_0(6)|OP_EN(1)]
+```
+
+### Tile-Varying Fields Summary
+
+| Field | Tile 1 (h=50) | Tile 2 (h=50) | Tile 3 (h=50) | Tile 4 (h=32) | Tile (h=39) |
+|-------|---------------|---------------|---------------|---------------|-------------|
+| DATA_SIZE0.HEIGHT | 50 | 50 | 50 | 32 | 39 |
+| CONV_CON2.GRAINS | 50 | 50 | 50 | 32 | 39 |
+| DATA_SIZE3.ATOMICS | 10656 | 10656 | 10656 | 6660 | 8214 |
+| CBUF_CON1.ENTRIES | 11200 | 11200 | 11200 | 7168 | 8736 |
+| CORE_DATAOUT.H | 47 | 47 | 47 | 29 | 36 |
+| DPU_CUBE.H | 47 | 47 | 47 | 29 | 36 |
+| WDMA_SIZE_1.H | 47 | 47 | 47 | 29 | 36 |
+
+### Core-Varying Fields Summary
+
+| Core | CONV_CON2.RESERVED_0 | DCOMP_ADDR | PC_REG_AMT.RESERVED_0 | Notes |
+|------|---------------------|------------|----------------------|-------|
+| 0    | 0                   | 0xffff8000 | 0                    | First core, no flag |
+| 1    | 64                  | 0xffff8000 | 1                    | |
+| 2    | 64                  | 0xffff8900 | 1                    | Different weight DMA |
+| 3    | 32                  | 0xffff8000 | 2                    | Shorter tiles |
+
+### CBUF Weight Reuse Pattern
+
+- **First tile per core**: `CNA_CBUF_CON0 = WEIGHT_BANK(1) | DATA_BANK(11)` (no reuse)
+- **Subsequent tiles**: `CNA_CBUF_CON0 = WEIGHT_REUSE(1) | WEIGHT_BANK(1) | DATA_BANK(11)`
+- This means weights are loaded once per core and reused across Y-tiles within that core
+
+### Address Progression (Core 0)
+
+| Tile | FEATURE_DATA_ADDR | Delta | DPU_DST_BASE_ADDR | Delta |
+|------|-------------------|-------|-------------------|-------|
+| 1    | 0xffc62000        | —     | 0xff95f000        | —     |
+| 2    | 0xffc71c00        | +0xFC00 | 0xff988a00      | +0x13A00 |
+| 3    | 0xffc81800        | +0xFC00 | 0xff9b2400      | +0x29A00 |
+| 4    | 0xffca1000        | +0x1F800 | 0xff9dbe00     | +0x29A00 |
+
+Input stride: 0xFC00 = 64512 bytes (224 * 8ch * 1byte * 36 rows?)
+Output stride: 0x13A00 = 80384 bytes (221 * 32ch * ... varies)
+
+### DMA Patch Confirmation
+
+The `fcn.002efd38` (indexed patcher) fires **115 times** and `fcn.002efce0` (pair-record
+patcher) fires **231 times** on this 21-tile model. Each tile has multiple DMA address
+fields that get patched: FEATURE_DATA_ADDR, DPU_DST_BASE_ADDR, DCOMP_ADDR, PC_BASE_ADDRESS.
+
+### Remaining Unknowns After This Trace
+
+1. **CONV_CON2.RESERVED_0 meaning**: 0/32/64 per core — possibly core index encoding or weight buffer selector
+2. **PC_REGISTER_AMOUNTS.RESERVED_0**: 0/1/2 per core — likely core index for PC chain routing
+3. **4 groups vs 3 cores**: RK3588 has 3 NPU cores but we see 4 groups; one core may be assigned 2 separate spatial regions
+4. **Weight microcode (PC_BASE_ADDRESS)**: points to pre-compiled weight data; format unknown
+
+---
+
+## Pointwise OC-Split Conv EMIT Trace Analysis (2026-05-22)
+
+### Model Details
+
+```
+Model: conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1.rknn
+Input:  (1, 256, 14, 14) int8
+Output: (1, 512, 14, 14) int8
+Kernel: 1x1, stride 1, no padding (pointwise)
+Weight: 512 * 256 * 1 * 1 = 131072 bytes = 128KB
+CBUF:   weight_bank=8, data_bank=4
+```
+
+### Overall Structure
+
+- **810 EMIT lines** total
+- **6 OP_ENABLE entries** (6 sub-tiles)
+- **5 FENCE entries** (5 core boundaries)
+
+### Tile Layout
+
+| Tile | Line | KERNELS | HEIGHT | GRAINS | ATOMICS | DATA_ENTRIES | CONV_CON2.R0 | DCOMP_ADDR | FEATURE_ADDR |
+|------|------|---------|--------|--------|---------|-------------|-------------|------------|-------------|
+| Init | —    | 512     | 14     | 10     | 196     | 112         | 0           | 0xfffbc000 | 0xfff59000  |
+| 1    | 122  | 256     | 14     | 10     | 196     | 112         | 64          | 0xfffbc000 | 0xfff59000  |
+| 2    | 228  | 256     | 14     | 10     | 196     | 112         | 64          | 0xfffdc000 | 0xfff59000  |
+| 3    | 363  | 512     | 5      | 6      | 70      | 112         | 32          | 0xfffbc000 | 0xfff59000  |
+| 4    | 498  | 512     | 5      | 6      | 70      | 112         | 32          | 0xfffbc000 | 0xfff59460  |
+| 5    | 633  | 512     | 4      | 5      | 56      | 112         | 32          | 0xfffbc000 | 0xfff598c0  |
+
+### Key Observations
+
+1. **OC-Split (K-split) visible**: Init tile has KERNELS(512), but tiles 1-2 have KERNELS(256)
+   — the first 2 tiles split the 512 OC into two 256-OC passes.
+   - Init tile: CORE_DATAOUT_SIZE_1 = CHANNEL(511), WDMA = CHANNEL(511)
+   - After OP_ENABLE, tiles 1-2: CHANNEL(255), WDMA = CHANNEL(255)
+
+2. **Y-split on tiles 3-5**: heights 5,5,4 with FEATURE_ADDR incrementing by 0x460 and 0x460
+   — these are spatial Y-tiles on different cores.
+
+3. **No WEIGHT_REUSE in any tile**: all tiles have `CBUF_CON0 = WEIGHT_BANK(8)|DATA_BANK(4)`
+   — because OC-split means different weights per tile, so no reuse possible.
+
+4. **CBUF bank layout inverted**: weight_bank=8 (large, for 128KB weights), data_bank=4 (small, for 14x14x256 input)
+   — opposite of the 3x3 conv which had weight_bank=1, data_bank=11.
+
+5. **CONV_CON2.RESERVED_0 = 0/64/32**: same pattern as the 3x3 conv:
+   - Init tile: RESERVED_0=0
+   - Tiles 1-2: RESERVED_0=64
+   - Tiles 3-5: RESERVED_0=32
+
+6. **DCOMP_ADDR differs per OC group**: tiles 1 use 0xfffbc000, tile 2 uses 0xfffdc000
+   — different weight decompression buffers for the two OC halves.
+
+7. **DPU_SURFACE_ADD = 392**: different from 3x3 conv's 98568 — reflects much smaller output.
+
+8. **PC_REGISTER_AMOUNTS = 0**: no PC_DATA_AMOUNT — pointwise conv uses no weight microcode
+   (or weights are loaded directly via DCOMP path).
+
+9. **DCOMP registers present**: DCOMP_CTRL(0), DCOMP_REGNUM(0), DCOMP_AMOUNT0-15(0) are all zero
+   — decompression is disabled (no weight compression for this model).
+
+### Comparison: 3x3 Y-Tile vs 1x1 OC-Split
+
+| Aspect | 3x3 Y-Tile (c3→c32) | 1x1 OC-Split (c256→c512) |
+|--------|---------------------|--------------------------|
+| WEIGHT_BANK | 1 | 8 |
+| DATA_BANK | 11 | 4 |
+| WEIGHT_REUSE | Yes (tiles 2+) | No |
+| KERNELS per tile | 32 (all OC) | 256 or 512 (split) |
+| DATA_SIZE1.CHANNEL | 8 (padded from 3) | 256 |
+| DATA_ENTRIES | 7168-11200 | 112 (constant) |
+| PC_DATA_AMOUNT | 29-55 | 0 |
+| SURF_STRIDE | 49952 | N/A (no DMA_CON2) |
+| DPU_SURF_STRIDE | 49284 | 196 |
+
+The 1x1 conv has much simpler CBUF requirements (small spatial, large channel) and
+doesn't need PC microcode for weight loading — the weights go through the DCOMP path
+(or direct DMA) instead.
+
+## Direct-Spatial Rocket Mapping Status (2026-05-23)
+
+The exact `sweep_b1_c160_h40_w40_oc320_wic160_k3x3_g1` export is still useful
+as the direct-spatial reference, but it is not yet a local Rocket submit recipe.
+The captured RKNN runtime submit has one submit, global `task_number=6`, and
+repeated `subcore_task[0..2]={task_start=0, task_number=2}`. The task GEM backing
+table has 17 task-like records, but those records are backing/cached entries, not
+all active work.
+
+`experimental/compare_conv_direct_regs.py --verify-rocket-task-mapping-proof`
+now encodes the local Rocket proof gate directly. It intentionally fails for the
+current logs because the observed interpretations are ambiguous and incomplete:
+the global six-record interpretation covers `554/1280` qwords, the repeated or
+unique subcore interpretation covers `216/1280` qwords, and multiple candidate
+task boundaries cut through compiler-stitched row bodies. This keeps the
+direct-spatial hardware path guarded while allowing `conv.py` cleanup to proceed
+inside the shared descriptor planner/executor structure.
+
+The passing local `pc_root6` probe remains explicitly separate from that
+conservative proof gate. `conv.py` now centralizes the runtime `pc_root6`
+stitched stream plus raw Rocket spans in
+`direct_spatial_pc_root6_stream_and_spans()`, and
+`--verify-runtime-pc-root6-stream` consumes the same helper before any guarded
+probe. That helper also enforces the exact descriptor-schedule guard, so both
+runtime and verifier callers reject unsupported mirrored sweep schedules before
+building a raw-span stream. The current verified target is still only the exact
+`160x40 -> 320`, `3x3`, groups-1 schedule under
+`RK3588_CONV_DIRECT_SPATIAL=1`,
+`RK3588_CONV_DIRECT_SPATIAL_UNSAFE=1`; the exact schedule now selects `pc_root6`
+automatically without requiring a third env var. The latest local run passed
+with `max_diff=0.0625`, followed by a passing `simple_add.py` smoke test.
+
+The runtime planner structure has also been cleaned up around that boundary.
+Direct spatial is now a normal classified `FAMILY_DIRECT_SPATIAL` producer in
+`DESCRIPTOR_PRODUCERS`. `classify_conv_plan()` selects it only when both unsafe
+environment gates are set and the observed descriptor schedule is available;
+otherwise the regular fallback/classified families are selected. This matches
+the current safety model while keeping one planner shape: the RKNN-style direct
+path is still a guarded Phase D hardware entry, but it participates in the same
+producer dispatch and shared executor path as the other descriptor families.
+The classified plan carries the observed direct-spatial descriptor schedule into
+the direct producer, so materialization no longer repeats the schedule lookup
+after classification.
+The temporary `spatial_im2col_fallback` descriptor producer no longer calls the
+observed direct-spatial planner just to attach fallback debug metadata, keeping
+the CPU-side workaround isolated from the RKNN-style descriptor research path.
+Normal and fallback plan dictionaries likewise no longer carry an empty
+`direct_spatial_descs` field; that schedule is present only for
+`FAMILY_DIRECT_SPATIAL`.
+Descriptor producer dispatch now passes a single build-context dictionary to
+`producer(plan, ctx)`, so each family wrapper reads only the inputs it needs
+instead of sharing a long positional signature.
+That context is now a slotted `ConvBuildContext` object, keeping the shorter
+dispatch shape without repeated string-key field lookups.
+`ConvBuildContext` is now implemented as a frozen slotted dataclass. This is a
+planner-code cleanup only; direct-spatial descriptor materialization, task
+policy selection, and submit arguments are unchanged.
+The executor result path now uses `_read_unpack_output()` before choosing tiled
+writeback or direct-spatial full-output writeback. This is readback plumbing
+cleanup only; emitted registers and submit semantics are unchanged.
+The standalone shape suite now has a `conv_shape()` helper and generates the
+repeated `1x3_{H}x{H}_k1` coverage entries for `H=54..72`; selected shape names
+and coverage are unchanged.
+The conv1d-as-conv2d coverage block now uses `conv1d_shape()` and an explicit
+name/parameter spec list, preserving the previous selected shape names while
+removing repeated dictionary boilerplate.
+Grouped output-channel variants now use `grouped_spatial_shape()` and generated
+`(in_c, groups, out_channels)` coverage. The selected shape names and ordering
+are unchanged.
+The repeated `test_ops.py` small-kernel coverage now uses
+`test_ops_conv2d_shape()` for generated dense `cin=3` and explicit `cin=1`
+shape specs. The selected shape names and ordering are unchanged.
+Small pvalid pointwise clusters now use `pvalid_shape()` for repeated `H=3` and
+`H=2` entries. The selected shape names and ordering are unchanged.

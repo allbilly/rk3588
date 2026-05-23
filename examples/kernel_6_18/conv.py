@@ -1,4 +1,5 @@
 import os, sys, mmap, ctypes, numpy as np
+from dataclasses import dataclass
 from fcntl import ioctl
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../experimental/kernel_6_18")))
@@ -23,12 +24,16 @@ DIRECT_SPATIAL_UNSAFE_ENV = "RK3588_CONV_DIRECT_SPATIAL_UNSAFE"
 DIRECT_SPATIAL_TASKS_ENV = "RK3588_CONV_DIRECT_SPATIAL_TASKS"
 TASK_POLICY_REG_LISTS = "reg_lists"
 TASK_POLICY_RAW_SPANS = "raw_spans"
+DIRECT_SPATIAL_POLICY_SINGLE_STREAM = "single_stream"
+DIRECT_SPATIAL_POLICY_SPARSE_SINGLE = "sparse_single"
+DIRECT_SPATIAL_POLICY_ROCKET_RECORD_AMOUNTS = "rocket_record_amounts"
 BUFFER_SCOPE_TILE = "tile"
 BUFFER_SCOPE_FULL = "full"
 UNPACK_KIND_NC1HWC2 = "nc1hwc2"
 UNPACK_KIND_FLAT_1X1 = "flat_1x1"
 UNPACK_KIND_DIRECT_SPATIAL = "direct_spatial"
 FAMILY_DIRECT_SPATIAL = "direct_spatial"
+FAMILY_DIRECT_SPATIAL_GATED = "direct_spatial_gated"
 FAMILY_GROUPED_SERIAL = "grouped_serial"
 FAMILY_SPATIAL_IM2COL_FALLBACK = "spatial_im2col_fallback"
 FAMILY_SPATIAL_OC_SERIAL = "spatial_oc_serial"
@@ -56,6 +61,49 @@ DIRECT_SPATIAL_PC_ROOT6_H40_SCHEDULE = (
     ("k_tile", 0, 23, 21, 224, 96),
     ("k_tile", 21, 19, 17, 224, 96),
 )
+DIRECT_SPATIAL_OUTC64_H20_POST = {
+    32: ("k_half_y_tile", None),
+    48: ("y_mid_k_tile", (16, 16, 16)),
+    64: ("k_half_y_tile", None),
+    96: ("k_half_k_tile", (32, 32, 32)),
+    112: ("y_mid_y_tile", None),
+    128: ("k_half_y_tile", None),
+    160: ("k_half_y_tile", None),
+    192: ("k_half_k_tile", (64, 64, 64)),
+    224: ("k_half_y_tile", None),
+    256: ("k_half_y_tile", None),
+    288: ("k_half_k_tile", (96, 96, 96)),
+    320: ("k_half_k_tile", (112, 112, 96)),
+    384: ("k_half_k_tile", (128, 128, 128)),
+    512: ("k_half_k_tile", (176, 176, 160)),
+}
+DIRECT_SPATIAL_CHAN320_H20_IN_CHANNELS = frozenset((32, 40, 64, 72, 96, 128, 192, 256))
+DIRECT_SPATIAL_MIX72_H20_K_TILE_COUNTS = (96, 96, 96)
+DIRECT_SPATIAL_CMP32_H14_Y_WINDOWS = ((0, 6, 4), (4, 6, 4), (8, 6, 4))
+DIRECT_SPATIAL_POINTWISE_SIMPLE_Y_WINDOWS = {
+    14: ((0, 5), (5, 5), (10, 4)),
+    20: ((0, 7), (7, 7), (14, 6)),
+    28: ((0, 10), (10, 9), (19, 9)),
+    40: ((0, 14), (14, 13), (27, 13)),
+    56: ((0, 19), (19, 19), (38, 18)),
+}
+DIRECT_SPATIAL_POINTWISE_CROSSED = {
+    (256, 28, 512): {
+        "setup": ((0, 9), (9, 9)),
+        "k_half": ((0, 9), (9, 9), (18, 9), (27, 1)),
+        "y_tile": ((0, 5), (15, 5), (5, 5), (20, 4), (10, 5), (24, 4)),
+    },
+    (528, 20, 32): {
+        "setup": ((0, 15), (15, 5)),
+        "k_half": ((0, 15), (15, 5)),
+        "y_tile": ((0, 7), (7, 7), (14, 6)),
+    },
+    (528, 40, 32): {
+        "setup": ((0, 7), (7, 7)),
+        "k_half": ((0, 7), (7, 7), (14, 7), (21, 7), (28, 7), (35, 5)),
+        "y_tile": ((0, 7), (21, 7), (7, 7), (28, 6), (14, 7), (34, 6)),
+    },
+}
 
 class TileDesc:
     __slots__ = (
@@ -80,11 +128,37 @@ class TileDesc:
             setattr(self, k, v)
         return self
 
+@dataclass(frozen=True, slots=True)
+class TileRecord:
+    family: str
+    split_method: int
+    y_start: int
+    y_count: int
+    k_start: int
+    k_count: int
+    input_h: int
+    output_w: int
+    layout_mode: str
+    unpack_kind: str
+    task_policy: str = TASK_POLICY_REG_LISTS
+    input_y: int = 0
+    output_y: int = 0
+    output_h: int = 0
+    input_w: int = 0
+    tile_in_c: int = 0
+    input_c_start: int = 0
+    tile_groups: int = 1
+    hw_oc: int = 0
+    out_offset: int = 0
+    full_data_bank: bool = False
+    reason: str = ""
+
 class RegList(list):
     pass
 
 class reg:
     CNA  = 0x0201; CORE = 0x0801; DPU  = 0x1001; RDMA = 0x2001
+    PPU  = 0x4001; PPU_RDMA = 0x8001
     PC   = 0x0081; PC_REG = 0x0101; VERSION = 0x0041
     OPERATION_ENABLE    = 0x0008
     PC_BASE_ADDRESS     = 0x0010
@@ -116,6 +190,32 @@ class reg:
     RDMA_SRC_BASE_ADDR    = 0x5018
     RDMA_EW_BASE_ADDR     = 0x5038
     RDMA_FEATURE_MODE_CFG = 0x5044
+    PPU_S_POINTER         = 0x6004
+    PPU_DATA_CUBE_IN_WIDTH = 0x600c
+    PPU_DATA_CUBE_IN_HEIGHT = 0x6010
+    PPU_DATA_CUBE_IN_CHANNEL = 0x6014
+    PPU_DATA_CUBE_OUT_WIDTH = 0x6018
+    PPU_DATA_CUBE_OUT_HEIGHT = 0x601c
+    PPU_DATA_CUBE_OUT_CHANNEL = 0x6020
+    PPU_OPERATION_MODE_CFG = 0x6024
+    PPU_POOLING_KERNEL_CFG = 0x6034
+    PPU_RECIP_KERNEL_WIDTH = 0x6038
+    PPU_RECIP_KERNEL_HEIGHT = 0x603c
+    PPU_POOLING_PADDING_CFG = 0x6040
+    PPU_PADDING_VALUE_1_CFG = 0x6044
+    PPU_PADDING_VALUE_2_CFG = 0x6048
+    PPU_DST_BASE_ADDR     = 0x6070
+    PPU_DST_SURF_STRIDE   = 0x607c
+    PPU_DATA_FORMAT       = 0x6084
+    PPU_MISC_CTRL         = 0x60dc
+    PPU_RDMA_S_POINTER    = 0x7004
+    PPU_RDMA_CUBE_IN_WIDTH = 0x700c
+    PPU_RDMA_CUBE_IN_HEIGHT = 0x7010
+    PPU_RDMA_CUBE_IN_CHANNEL = 0x7014
+    PPU_RDMA_SRC_BASE_ADDR = 0x701c
+    PPU_RDMA_SRC_LINE_STRIDE = 0x7024
+    PPU_RDMA_SRC_SURF_STRIDE = 0x7028
+    PPU_RDMA_DATA_FORMAT  = 0x7030
     CNA_CONV_CON1          = 0x100c
     CNA_CONV_CON2          = 0x1010
     CNA_CONV_CON3          = 0x1014
@@ -590,10 +690,6 @@ def _compute_y_step(in_c, out_c, kh, kw, in_h, in_w, groups, stride, k_step, p):
         return tile_h
 
     data_in_channel_aligned = _align_up(in_c, p["align_c"])
-    tile_in_c = k_step if is_depthwise else in_c
-    tile_data_in_channel_aligned = _align_up(tile_in_c, p["align_c"])
-    row_bytes = p["width_stride"] * tile_data_in_channel_aligned * FP16_BYTES
-
     y_step = out_h
     tile_wb = _ceil_div(kh * kw * data_in_channel_aligned * FP16_BYTES * (k_step if not is_depthwise else 1), CBUF_BANK_SIZE)
     remaining = max(1, RK_CBUF_BANKS - tile_wb)
@@ -665,6 +761,12 @@ def _plan_conv_tiles(in_c, out_c, kh, kw, in_h, in_w, groups, stride):
             tiles.append({"y_start": ys, "y_step": y_span, "k_start": ks, "k_step": k_span})
     return p, split_method, tiles
 
+def plan_conv_tiles(in_c, out_c, kh, kw, in_h, in_w, groups, stride):
+    p, split_method, tiles = _plan_conv_tiles(in_c, out_c, kh, kw, in_h, in_w, groups, stride)
+    y_boundary = sorted({0, *[t["y_start"] for t in tiles], *[t["y_start"] + t["y_step"] for t in tiles]})
+    k_boundary = sorted({0, *[t["k_start"] for t in tiles], *[t["k_start"] + t["k_step"] for t in tiles]})
+    return p, split_method, y_boundary, k_boundary, "", None, None
+
 def execute_conv_descriptors(descs):
     for d in descs:
         _execute_conv_desc(d)
@@ -701,21 +803,24 @@ def _read_flat_1x1_output(count, hw_channels, out_h, out_w, out_width_stride, of
     return _unpack_flat_1x1_output(_read_tile_output(count, offset),
                                    hw_channels, out_h, out_w, out_width_stride, UNPACK_C2)
 
+def _read_unpack_output(u):
+    if u["kind"] == UNPACK_KIND_NC1HWC2:
+        return _read_nc1hwc2_output(u["count"], u["channels"], u["hw_h"], u["out_w"],
+                                    u["stride"], u.get("offset", 0))
+    if u["kind"] == UNPACK_KIND_FLAT_1X1:
+        return _read_flat_1x1_output(u["count"], u["hw_channels"], u["hw_h"], u["out_w"],
+                                     u["stride"], u.get("offset", 0))
+    if u["kind"] == UNPACK_KIND_DIRECT_SPATIAL:
+        return _read_nc1hwc2_output(u["count"], u["channels"], u["out_h"], u["out_w"], u["stride"])
+    raise ValueError(f"unknown unpack kind: {u['kind']}")
+
 def _unpack_tile_result(d):
     u = d["unpack"]
-    if u["kind"] == UNPACK_KIND_NC1HWC2:
-        out = _read_nc1hwc2_output(u["count"], u["channels"], u["hw_h"], u["out_w"],
-                                   u["stride"], u.get("offset", 0))
-        _store_tile_output(u, out)
-    elif u["kind"] == UNPACK_KIND_FLAT_1X1:
-        out = _read_flat_1x1_output(u["count"], u["hw_channels"], u["hw_h"], u["out_w"],
-                                    u["stride"], u.get("offset", 0))
-        _store_tile_output(u, out)
-    elif u["kind"] == UNPACK_KIND_DIRECT_SPATIAL:
-        out = _read_nc1hwc2_output(u["count"], u["channels"], u["out_h"], u["out_w"], u["stride"])
+    out = _read_unpack_output(u)
+    if u["kind"] == UNPACK_KIND_DIRECT_SPATIAL:
         u["result"][u["n"]] = out[:u["channels"]]
     else:
-        raise ValueError(f"unknown unpack kind: {u['kind']}")
+        _store_tile_output(u, out)
 
 def make_tile_exec_desc(family, packed_input, packed_weight, regs, unpack, meta=None,
                         buffer_scope=BUFFER_SCOPE_TILE, clear_output=True,
@@ -791,9 +896,30 @@ def tile_meta(y_start, out_h, oc_start, oc_end, tile_p, reason, **extra):
     meta.update(extra)
     return meta
 
+def make_record_tile_desc(record, result, n, packed_input, packed_weight, regs, tp, out_count,
+                          hw_h=None, channels=None, offset=None):
+    oc_end = record.k_start + record.k_count
+    hw_h = record.y_count if hw_h is None else hw_h
+    channels = record.k_count if channels is None else channels
+    offset = record.out_offset if offset is None else offset
+    meta = tile_meta(record.y_start, record.y_count, record.k_start, oc_end, tp,
+                     record.reason, tile_record=record)
+    if record.unpack_kind == UNPACK_KIND_NC1HWC2:
+        return make_nc1hwc2_tile_desc(record.family, result, n, packed_input, packed_weight, regs,
+                                      record.k_start, oc_end, record.y_start, record.y_count,
+                                      hw_h, record.output_w, channels, tp["out_width_stride"],
+                                      out_count, offset=offset, meta=meta)
+    if record.unpack_kind == UNPACK_KIND_FLAT_1X1:
+        return make_flat_1x1_tile_desc(record.family, result, n, packed_input, packed_weight, regs,
+                                       record.k_start, oc_end, record.y_start, record.y_count,
+                                       hw_h, record.output_w, channels, record.hw_oc,
+                                       tp["out_width_stride"], out_count, meta=meta)
+    raise ValueError(f"unknown record unpack kind: {record.unpack_kind}")
+
 def _rknn_family_bits(family):
     return {
         "setup": 0x00000000,
+        "y_mid": 0x10000000,
         "y_tile": 0x20000000,
         "k_half": 0x40000000,
         "k_tile": 0x50000000,
@@ -801,6 +927,8 @@ def _rknn_family_bits(family):
 
 def _rknn_spatial_y_windows(in_h):
     return {
+        7: [(0, 7, 5)],
+        14: [(0, 14, 12)],
         16: [(0, 16, 14)],
         20: [(0, 20, 18)],
         24: [(0, 24, 22)],
@@ -809,6 +937,11 @@ def _rknn_spatial_y_windows(in_h):
         36: [(0, 25, 23), (23, 13, 11)],
         40: [(0, 23, 21), (21, 19, 17)],
     }.get(in_h)
+
+def _rknn_spatial_full_y_tile_windows(in_h, out_h):
+    if in_h == 20 and out_h == 18:
+        return [(0, 8, 6), (6, 8, 6), (12, 8, 6)]
+    return None
 
 def _rknn_spatial_pc_core(family):
     if family == "setup":
@@ -843,22 +976,172 @@ def _make_observed_spatial_tile_desc(family, input_y, input_h, output_h, output_
         pc_core=0,
     )
 
-def _tile_desc_meta(desc):
-    return {slot: getattr(desc, slot) for slot in TileDesc.__slots__ if slot != "extra"}
+def _observed_spatial_desc_offsets(p, in_c, kh, kw, in_w):
+    return {
+        "weight_per_oc": kh * kw * in_c * FP16_BYTES,
+        "output_per_oc": p["out_width_stride"] * FP16_BYTES,
+        "feature_row": in_w * UNPACK_C2 * FP16_BYTES,
+        "output_row": p["out_w"] * UNPACK_C2 * FP16_BYTES,
+    }
+
+def _append_observed_spatial_desc(descs, p, offsets, family, input_y, input_h, output_h,
+                                  oc_start, oc_count, grain_bits=None, cbuf0=None):
+    descs.append(_make_observed_spatial_tile_desc(
+        family, input_y, input_h, output_h, p["out_w"],
+        oc_start, oc_count,
+        input_y * offsets["feature_row"],
+        oc_start * offsets["weight_per_oc"],
+        oc_start * offsets["output_per_oc"] + input_y * offsets["output_row"],
+        grain_bits=grain_bits,
+        cbuf0=cbuf0,
+    ))
+
+def _append_outc64_h20_setup(descs, p, offsets, in_h, out_c):
+    _append_observed_spatial_desc(descs, p, offsets, "setup", 0, in_h, p["out_h"], 0, out_c)
+
+def _append_outc64_h20_k_half(descs, p, offsets, in_h, out_c):
+    half = _align_up(out_c // 2, 16)
+    for oc_start, oc_count in ((0, half), (half, out_c - half)):
+        _append_observed_spatial_desc(descs, p, offsets, "k_half", 0, in_h, p["out_h"], oc_start, oc_count)
+
+def _append_outc64_h20_y_mid(descs, p, offsets, out_c):
+    for input_y in (0, 9):
+        _append_observed_spatial_desc(descs, p, offsets, "y_mid", input_y, 11, 9, 0, out_c)
+
+def _append_outc64_h20_y_tile(descs, p, offsets, in_h, out_c):
+    for input_y, input_rows, output_rows in _rknn_spatial_full_y_tile_windows(in_h, p["out_h"]):
+        _append_observed_spatial_desc(descs, p, offsets, "y_tile", input_y, input_rows, output_rows, 0, out_c)
+
+def _append_outc64_h20_k_tile(descs, p, offsets, in_h, k_counts):
+    oc_start = 0
+    for oc_count in k_counts:
+        _append_observed_spatial_desc(descs, p, offsets, "k_tile", 0, in_h, p["out_h"], oc_start, oc_count)
+        oc_start += oc_count
+
+def _plan_outc64_h20_descs(p, in_c, out_c, kh, kw, in_h, in_w):
+    mode_k_counts = DIRECT_SPATIAL_OUTC64_H20_POST.get(out_c)
+    if not (in_c == 64 and in_h == 20 and mode_k_counts is not None):
+        return []
+    mode, k_counts = mode_k_counts
+    offsets = _observed_spatial_desc_offsets(p, in_c, kh, kw, in_w)
+    descs = []
+    _append_outc64_h20_setup(descs, p, offsets, in_h, out_c)
+    if mode.startswith("k_half"):
+        _append_outc64_h20_k_half(descs, p, offsets, in_h, out_c)
+    elif mode.startswith("y_mid"):
+        _append_outc64_h20_y_mid(descs, p, offsets, out_c)
+    if mode.endswith("y_tile"):
+        _append_outc64_h20_y_tile(descs, p, offsets, in_h, out_c)
+    elif mode.endswith("k_tile"):
+        _append_outc64_h20_k_tile(descs, p, offsets, in_h, k_counts)
+    return descs
+
+def _plan_chan320_h20_descs(p, in_c, out_c, kh, kw, in_h, in_w):
+    if not (out_c == 320 and in_h == 20 and in_c in DIRECT_SPATIAL_CHAN320_H20_IN_CHANNELS):
+        return []
+    offsets = _observed_spatial_desc_offsets(p, in_c, kh, kw, in_w)
+    descs = []
+    _append_outc64_h20_setup(descs, p, offsets, in_h, out_c)
+    _append_outc64_h20_k_half(descs, p, offsets, in_h, out_c)
+    if in_c in {32, 40}:
+        _append_outc64_h20_y_tile(descs, p, offsets, in_h, out_c)
+    else:
+        _append_outc64_h20_k_tile(descs, p, offsets, in_h, (112, 112, 96))
+    return descs
+
+def _plan_mix72_h20_descs(p, in_c, out_c, kh, kw, in_h, in_w):
+    if not (in_c == 72 and out_c == 288 and in_h == 20):
+        return []
+    offsets = _observed_spatial_desc_offsets(p, in_c, kh, kw, in_w)
+    descs = []
+    _append_outc64_h20_setup(descs, p, offsets, in_h, out_c)
+    _append_outc64_h20_k_half(descs, p, offsets, in_h, out_c)
+    _append_outc64_h20_k_tile(descs, p, offsets, in_h, DIRECT_SPATIAL_MIX72_H20_K_TILE_COUNTS)
+    return descs
+
+def _plan_cmp32_h14_descs(p, in_c, out_c, kh, kw, in_h, in_w):
+    if not (in_c == 32 and out_c == 128 and in_h == 14):
+        return []
+    offsets = _observed_spatial_desc_offsets(p, in_c, kh, kw, in_w)
+    descs = []
+    _append_observed_spatial_desc(descs, p, offsets, "setup", 0, in_h, p["out_h"], 0, out_c,
+                                  grain_bits=0x110)
+    _append_outc64_h20_k_half(descs, p, offsets, in_h, out_c)
+    for desc in descs[1:]:
+        desc.grain_bits = 0x110
+    for input_y, input_h, output_h in DIRECT_SPATIAL_CMP32_H14_Y_WINDOWS:
+        _append_observed_spatial_desc(descs, p, offsets, "y_tile", input_y, input_h, output_h, 0, out_c,
+                                      grain_bits=0x90)
+    return descs
+
+def _append_observed_pointwise_y_list(descs, p, offsets, family, k_windows, y_windows):
+    for oc_start, oc_count in k_windows:
+        for input_y, output_rows in y_windows:
+            _append_observed_spatial_desc(descs, p, offsets, family, input_y,
+                                          output_rows, output_rows, oc_start, oc_count)
+
+def _plan_pointwise_simple_descs(p, in_c, out_c, kh, kw, in_h, in_w):
+    if not (
+        kh == 1 and kw == 1 and in_h == in_w and in_h in DIRECT_SPATIAL_POINTWISE_SIMPLE_Y_WINDOWS
+        and ((in_c, out_c) in {(40, 320), (64, 128)} or
+             (in_c, out_c, in_h) in {(528, 32, 14), (256, 512, 14)})
+    ):
+        return []
+    offsets = _observed_spatial_desc_offsets(p, in_c, kh, kw, in_w)
+    descs = []
+    _append_outc64_h20_setup(descs, p, offsets, in_h, out_c)
+    _append_outc64_h20_k_half(descs, p, offsets, in_h, out_c)
+    for input_y, output_rows in DIRECT_SPATIAL_POINTWISE_SIMPLE_Y_WINDOWS[in_h]:
+        _append_observed_spatial_desc(descs, p, offsets, "y_tile", input_y,
+                                      output_rows, output_rows, 0, out_c)
+    return descs
+
+def _plan_pointwise_crossed_descs(p, in_c, out_c, kh, kw, in_h, in_w):
+    cfg = DIRECT_SPATIAL_POINTWISE_CROSSED.get((in_c, in_h, out_c))
+    if not (kh == 1 and kw == 1 and in_h == in_w and cfg is not None):
+        return []
+    offsets = _observed_spatial_desc_offsets(p, in_c, kh, kw, in_w)
+    half = _align_up(out_c // 2, 16)
+    descs = []
+    _append_observed_pointwise_y_list(descs, p, offsets, "setup", ((0, out_c),), cfg["setup"])
+    _append_observed_pointwise_y_list(descs, p, offsets, "k_half",
+                                      ((0, half), (half, out_c - half)), cfg["k_half"])
+    _append_observed_pointwise_y_list(descs, p, offsets, "y_tile", ((0, out_c),), cfg["y_tile"])
+    return descs
 
 def plan_observed_spatial_tile_descs(p, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
-    if not (groups == 1 and stride == 1 and kh == 3 and kw == 3 and in_c == 160 and out_c == 320 and in_h == in_w):
+    if not (groups == 1 and stride == 1 and in_h == in_w):
+        return []
+    pointwise_simple_descs = _plan_pointwise_simple_descs(p, in_c, out_c, kh, kw, in_h, in_w)
+    if pointwise_simple_descs:
+        return pointwise_simple_descs
+    pointwise_crossed_descs = _plan_pointwise_crossed_descs(p, in_c, out_c, kh, kw, in_h, in_w)
+    if pointwise_crossed_descs:
+        return pointwise_crossed_descs
+    if not (kh == 3 and kw == 3):
+        return []
+    outc64_h20_descs = _plan_outc64_h20_descs(p, in_c, out_c, kh, kw, in_h, in_w)
+    if outc64_h20_descs:
+        return outc64_h20_descs
+    chan320_h20_descs = _plan_chan320_h20_descs(p, in_c, out_c, kh, kw, in_h, in_w)
+    if chan320_h20_descs:
+        return chan320_h20_descs
+    mix72_h20_descs = _plan_mix72_h20_descs(p, in_c, out_c, kh, kw, in_h, in_w)
+    if mix72_h20_descs:
+        return mix72_h20_descs
+    cmp32_h14_descs = _plan_cmp32_h14_descs(p, in_c, out_c, kh, kw, in_h, in_w)
+    if cmp32_h14_descs:
+        return cmp32_h14_descs
+
+    if not (in_c == 160 and out_c == 320):
         return []
     y_windows = _rknn_spatial_y_windows(in_h)
     if y_windows is None:
         return []
+    offsets = _observed_spatial_desc_offsets(p, in_c, kh, kw, in_w)
 
-    weight_per_oc = kh * kw * in_c * FP16_BYTES
-    output_per_oc = p["out_h"] * p["out_w"] * FP16_BYTES
-    feature_row = in_w * UNPACK_C2 * FP16_BYTES
-    output_row = p["out_w"] * UNPACK_C2 * FP16_BYTES
-    observed_grain = 0xc0 if in_h >= 28 else 0xf0
-    observed_cbuf0 = 0x39 if in_h >= 32 else {16: 0x93, 20: 0x84, 24: 0x66, 28: 0x48}.get(in_h, None)
+    observed_grain = {7: 0xa0, 14: 0xf0}.get(in_h, 0xc0 if in_h >= 28 else 0xf0)
+    observed_cbuf0 = 0x39 if in_h >= 32 else {7: 0xb1, 16: 0x93, 20: 0x84, 24: 0x66, 28: 0x48}.get(in_h, None)
     families = [
         ("setup", [(0, out_c)]),
         ("k_half", [(0, 160), (160, 160)]),
@@ -871,47 +1154,55 @@ def plan_observed_spatial_tile_descs(p, in_c, out_c, kh, kw, in_h, in_w, groups,
                 descs.append(_make_observed_spatial_tile_desc(
                     family, input_y, input_rows, output_rows, p["out_w"],
                     oc_start, oc_count,
-                    input_y * feature_row,
-                    oc_start * weight_per_oc,
-                    oc_start * output_per_oc + input_y * output_row,
+                    input_y * offsets["feature_row"],
+                    oc_start * offsets["weight_per_oc"],
+                    oc_start * offsets["output_per_oc"] + input_y * offsets["output_row"],
                     grain_bits=observed_grain,
                     cbuf0=observed_cbuf0,
                 ).update(pc_core=_rknn_spatial_pc_core(family)))
     return descs
 
-def build_direct_spatial_descs(n, input_nchw, weight_nchw, p, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
-    descs = plan_observed_spatial_tile_descs(p, in_c, out_c, kh, kw, in_h, in_w, groups, stride)
+def attach_direct_spatial_regs(desc, p, idx):
+    desc.extra = {"full_data_bank": True}
+    in_dma = input_mem_create.dma_addr
+    weight_dma = weight_mem_create.dma_addr
+    output_dma = output_mem_create.dma_addr
+    regs = RegList(make_conv2d_regs_from_desc(p, desc, in_dma, weight_dma, output_dma))
+    regs.extend(E(reg.DPU, clear_reg, 0) for clear_reg in DPU_CLEAR_REGS)
+    regs.pc_core = desc.pc_core
+    full_regs = RegList(make_rknn_full_conv2d_regs_from_desc(p, desc, in_dma, weight_dma, output_dma))
+    full_regs.pc_core = desc.pc_core
+    desc.extra = {
+        "full_data_bank": True,
+        "regs": [regs],
+        "full_regs": full_regs,
+        "index": idx,
+    }
+
+def build_direct_spatial_descs(n, input_nchw, weight_nchw, p, in_c, out_c, kh, kw, in_h, in_w, groups, stride,
+                               descs=None):
+    if descs is None:
+        descs = plan_observed_spatial_tile_descs(p, in_c, out_c, kh, kw, in_h, in_w, groups, stride)
     if not descs:
         return [], None, None
     packed_input = _pack_cdma_dc_feature_input_fp16(input_nchw[n], p)
-    packed_weight = pack_weights(weight_nchw.reshape(out_c, in_c, kh, kw), out_c, in_c, kh, kw, p["align_c"], groups)
+    packed_weight = pack_weights(weight_nchw.reshape(out_c, in_c, kh, kw),
+                                 out_c, in_c, kh, kw, p["align_c"], groups)
     for idx, desc in enumerate(descs):
-        desc.extra = {"full_data_bank": True}
-        regs = RegList(make_conv2d_regs_from_desc(p, desc,
-                                                  input_mem_create.dma_addr,
-                                                  weight_mem_create.dma_addr,
-                                                  output_mem_create.dma_addr))
-        regs.extend(E(reg.DPU, clear_reg, 0) for clear_reg in DPU_CLEAR_REGS)
-        regs.pc_core = desc.pc_core
-        full_regs = RegList(make_rknn_full_conv2d_regs_from_desc(p, desc,
-                                                                 input_mem_create.dma_addr,
-                                                                 weight_mem_create.dma_addr,
-                                                                 output_mem_create.dma_addr))
-        full_regs.pc_core = desc.pc_core
-        desc.extra = {
-            "full_data_bank": True,
-            "regs": [regs],
-            "full_regs": full_regs,
-            "index": idx,
-        }
+        attach_direct_spatial_regs(desc, p, idx)
     return descs, packed_input, packed_weight
 
 def _submit_task_regs(task_regs):
+    assert len(task_regs) <= tasks_mem_create.size // ctypes.sizeof(struct_rknpu_task), "task buffer too small"
     write_regs_to_npu_task(task_regs)
     if npu_submit(task_count=len(task_regs)) < 0:
         raise RuntimeError("npu_submit failed")
 
 def _submit_raw_task_spans(task_spans):
+    assert len(task_spans) <= tasks_mem_create.size // ctypes.sizeof(struct_rknpu_task), "task buffer too small"
+    regcmd_qwords = regcmd_mem_create.size // ctypes.sizeof(ctypes.c_uint64)
+    for start, amount in task_spans:
+        assert start >= 0 and amount > 0 and start + amount <= regcmd_qwords, "raw task span outside regcmd buffer"
     write_raw_task_spans(task_spans)
     if npu_submit(task_count=len(task_spans)) < 0:
         raise RuntimeError("npu_submit failed")
@@ -949,21 +1240,48 @@ def _load_full_input(packed_input):
 def _load_full_weight(packed_weight):
     _copy_packed_to_bo(packed_weight, weight_map, weight_mem_create, clear=True)
 
-def direct_spatial_task_policy():
+def direct_spatial_default_supported(descs):
+    return descs is not None and direct_spatial_pc_root6_supported(descs)
+
+def direct_spatial_diagnostic_policy_requested():
+    return os.environ.get(DIRECT_SPATIAL_TASKS_ENV, "") in {
+        TASK_POLICY_REG_LISTS,
+        DIRECT_SPATIAL_POLICY_PC_ROOT6,
+        DIRECT_SPATIAL_POLICY_SINGLE_STREAM,
+        DIRECT_SPATIAL_POLICY_SPARSE_SINGLE,
+        DIRECT_SPATIAL_POLICY_ROCKET_RECORD_AMOUNTS,
+    }
+
+def direct_spatial_task_policy_for_descs(descs):
     value = os.environ.get(DIRECT_SPATIAL_TASKS_ENV, "")
     if value == "":
+        if direct_spatial_default_supported(descs):
+            return DIRECT_SPATIAL_POLICY_SINGLE_STREAM
+        return TASK_POLICY_REG_LISTS
+    if value == TASK_POLICY_REG_LISTS:
         return TASK_POLICY_REG_LISTS
     if value == DIRECT_SPATIAL_POLICY_PC_ROOT6:
         return DIRECT_SPATIAL_POLICY_PC_ROOT6
+    if value == DIRECT_SPATIAL_POLICY_SINGLE_STREAM:
+        return DIRECT_SPATIAL_POLICY_SINGLE_STREAM
+    if value == DIRECT_SPATIAL_POLICY_SPARSE_SINGLE:
+        return DIRECT_SPATIAL_POLICY_SPARSE_SINGLE
+    if value == DIRECT_SPATIAL_POLICY_ROCKET_RECORD_AMOUNTS:
+        return DIRECT_SPATIAL_POLICY_ROCKET_RECORD_AMOUNTS
     raise ValueError(f"unknown {DIRECT_SPATIAL_TASKS_ENV} policy: {value}")
 
+def direct_spatial_plan_allowed(descs):
+    return direct_spatial_diagnostic_policy_requested()
+
 def direct_spatial_exec_task_policy(policy):
-    if policy == DIRECT_SPATIAL_POLICY_PC_ROOT6:
+    if policy in {DIRECT_SPATIAL_POLICY_PC_ROOT6, DIRECT_SPATIAL_POLICY_SINGLE_STREAM,
+                  DIRECT_SPATIAL_POLICY_SPARSE_SINGLE,
+                  DIRECT_SPATIAL_POLICY_ROCKET_RECORD_AMOUNTS}:
         return TASK_POLICY_RAW_SPANS
     return TASK_POLICY_REG_LISTS
 
 def make_direct_spatial_tile_desc(result, n, packed_input, packed_weight, descs, p):
-    policy = direct_spatial_task_policy()
+    policy = direct_spatial_task_policy_for_descs(descs)
     regs = direct_spatial_task_regs(descs, policy)
     return make_tile_exec_desc(
         FAMILY_DIRECT_SPATIAL,
@@ -971,7 +1289,8 @@ def make_direct_spatial_tile_desc(result, n, packed_input, packed_weight, descs,
         packed_weight,
         regs,
         make_direct_spatial_unpack(result, n, p),
-        meta={"direct_spatial_descs": descs, "task_policy": policy},
+        meta={"direct_spatial_schedule": direct_spatial_desc_schedule(descs),
+              "task_policy": policy},
         buffer_scope=BUFFER_SCOPE_FULL,
         task_policy=direct_spatial_exec_task_policy(policy),
     )
@@ -979,6 +1298,12 @@ def make_direct_spatial_tile_desc(result, n, packed_input, packed_weight, descs,
 def direct_spatial_task_regs(descs, policy):
     if policy == DIRECT_SPATIAL_POLICY_PC_ROOT6:
         return direct_spatial_pc_root6_task_spans(descs)
+    if policy == DIRECT_SPATIAL_POLICY_SINGLE_STREAM:
+        return direct_spatial_single_stream_task_span(descs)
+    if policy == DIRECT_SPATIAL_POLICY_SPARSE_SINGLE:
+        return direct_spatial_sparse_single_task_span(descs)
+    if policy == DIRECT_SPATIAL_POLICY_ROCKET_RECORD_AMOUNTS:
+        return direct_spatial_rocket_record_amounts_task_span(descs)
     return [desc.extra["regs"][0] for desc in descs]
 
 def direct_spatial_desc_schedule(descs):
@@ -1001,6 +1326,36 @@ def _direct_spatial_pc_tail(base_qword, amount, pc_core):
         E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, (pc_core << 16) | amount),
     ]
 
+def direct_spatial_separator_regs(ppu_src_dma=0, ppu_dst_dma=0):
+    return [
+        E(reg.PPU, reg.PPU_S_POINTER, (1 << 3) | (1 << 2) | (1 << 1)),
+        E(reg.PPU_RDMA, reg.PPU_RDMA_S_POINTER, (1 << 3) | (1 << 2) | (1 << 1)),
+        E(reg.PPU, reg.PPU_DATA_CUBE_IN_WIDTH, 0),
+        E(reg.PPU, reg.PPU_DATA_CUBE_IN_HEIGHT, 0),
+        E(reg.PPU, reg.PPU_DATA_CUBE_IN_CHANNEL, 31),
+        E(reg.PPU, reg.PPU_DATA_CUBE_OUT_WIDTH, 0),
+        E(reg.PPU, reg.PPU_DATA_CUBE_OUT_HEIGHT, 0),
+        E(reg.PPU, reg.PPU_DATA_CUBE_OUT_CHANNEL, 31),
+        E(reg.PPU, reg.PPU_OPERATION_MODE_CFG, (1 << 4) | 1),
+        E(reg.PPU, reg.PPU_POOLING_KERNEL_CFG, 0),
+        E(reg.PPU, reg.PPU_RECIP_KERNEL_WIDTH, 0),
+        E(reg.PPU, reg.PPU_RECIP_KERNEL_HEIGHT, 0),
+        E(reg.PPU, reg.PPU_POOLING_PADDING_CFG, 0),
+        E(reg.PPU, reg.PPU_PADDING_VALUE_1_CFG, 0),
+        E(reg.PPU, reg.PPU_PADDING_VALUE_2_CFG, 0),
+        E(reg.PPU, reg.PPU_DST_BASE_ADDR, ppu_dst_dma),
+        E(reg.PPU, reg.PPU_DST_SURF_STRIDE, 1 << 4),
+        E(reg.PPU, reg.PPU_DATA_FORMAT, 1 << 4),
+        E(reg.PPU, reg.PPU_MISC_CTRL, 3),
+        E(reg.PPU_RDMA, reg.PPU_RDMA_CUBE_IN_WIDTH, 0),
+        E(reg.PPU_RDMA, reg.PPU_RDMA_CUBE_IN_HEIGHT, 0),
+        E(reg.PPU_RDMA, reg.PPU_RDMA_CUBE_IN_CHANNEL, 31),
+        E(reg.PPU_RDMA, reg.PPU_RDMA_SRC_BASE_ADDR, ppu_src_dma),
+        E(reg.PPU_RDMA, reg.PPU_RDMA_SRC_LINE_STRIDE, 1 << 4),
+        E(reg.PPU_RDMA, reg.PPU_RDMA_SRC_SURF_STRIDE, 1 << 4),
+        E(reg.PPU_RDMA, reg.PPU_RDMA_DATA_FORMAT, 1),
+    ]
+
 def direct_spatial_pc_root6_record_starts():
     starts = []
     cursor = 0
@@ -1008,6 +1363,10 @@ def direct_spatial_pc_root6_record_starts():
         starts.append(cursor)
         cursor += _align_up(amount + PC_CHAIN_TAIL_QWORDS, 16)
     return starts
+
+def direct_spatial_pc_root6_backing_qwords():
+    starts = direct_spatial_pc_root6_record_starts()
+    return starts[-1] + DIRECT_SPATIAL_PC_ROOT6_RECORD_AMOUNTS[-1]
 
 def direct_spatial_pc_root6_tail(desc_idx, desc, record_starts):
     record_idx = DIRECT_SPATIAL_PC_ROOT6_LINK_RECORDS[desc_idx]
@@ -1049,26 +1408,108 @@ def direct_spatial_compiler_stitched_stream(descs):
     assert len(stream) == DIRECT_SPATIAL_PC_ROOT6_STREAM_QWORDS, "unexpected direct-spatial compiler stream length"
     return stream
 
+def direct_spatial_sparse_backing_stream(descs):
+    validate_direct_spatial_pc_root6_descs(descs)
+    record_starts = direct_spatial_pc_root6_record_starts()
+    stream = [0] * direct_spatial_pc_root6_backing_qwords()
+    desc_idx = 0
+
+    for record_idx, amount in enumerate(DIRECT_SPATIAL_PC_ROOT6_RECORD_AMOUNTS):
+        start = record_starts[record_idx]
+        if amount == 26:
+            record = direct_spatial_separator_regs()
+        else:
+            body = descs[desc_idx].extra["full_regs"]
+            tail = direct_spatial_pc_root6_tail(desc_idx, descs[desc_idx], record_starts)
+            if desc_idx == 0:
+                record = list(body) + tail
+            elif desc_idx == 1:
+                record = [E(reg.PC, reg.OPERATION_ENABLE, 0x0d)] + list(body)
+            elif desc_idx == 2:
+                record = [E(reg.PC, reg.OPERATION_ENABLE, 0x0d)] + list(body[4:]) + tail
+            else:
+                record = list(body[4:]) + tail
+            desc_idx += 1
+        assert len(record) >= amount, "direct-spatial sparse record shorter than task amount"
+        assert start + len(record) <= len(stream), "direct-spatial sparse record outside backing stream"
+        stream[start:start + len(record)] = record
+
+    assert desc_idx == len(descs), "direct-spatial sparse stream did not consume all descriptors"
+    return stream
+
+def _rocket_kernel_pc_amount_for_task_count(regcmd_count):
+    return (regcmd_count + 1) // 2 - 1
+
+def _direct_spatial_pc_base_for_record_start(record_start):
+    return (regcmd_mem_create.dma_addr + record_start * ctypes.sizeof(ctypes.c_uint64)) & 0xFFFFFFF0
+
+def direct_spatial_rocket_record_amount_patches(stream):
+    record_starts = direct_spatial_pc_root6_record_starts()
+    start_by_pc_base = {
+        _direct_spatial_pc_base_for_record_start(start): idx
+        for idx, start in enumerate(record_starts)
+    }
+    patches = []
+    for idx, qword in enumerate(stream):
+        target = (qword >> 48) & 0xffff
+        reg_addr = qword & 0xffff
+        value = (qword >> 16) & 0xffffffff
+        if (target, reg_addr) != (reg.PC_REG, reg.PC_BASE_ADDRESS):
+            continue
+        if idx + 1 >= len(stream):
+            raise ValueError(f"PC_BASE at sparse[{idx}] has no following PC_REGISTER_AMOUNTS")
+        record_idx = start_by_pc_base.get(value)
+        if record_idx is None:
+            raise ValueError(f"PC_BASE at sparse[{idx}] targets non-record address 0x{value:x}")
+        amount_qword = stream[idx + 1]
+        amount_target = (amount_qword >> 48) & 0xffff
+        amount_reg = amount_qword & 0xffff
+        if (amount_target, amount_reg) != (reg.PC_REG, reg.PC_REGISTER_AMOUNTS):
+            raise ValueError(f"sparse[{idx + 1}] is not PC_REGISTER_AMOUNTS")
+        amount = _rocket_kernel_pc_amount_for_task_count(DIRECT_SPATIAL_PC_ROOT6_RECORD_AMOUNTS[record_idx])
+        patches.append((idx + 1, amount))
+    return patches
+
+def direct_spatial_rocket_record_amounts_stream(descs):
+    stream = direct_spatial_sparse_backing_stream(descs)
+    for amount_qword, amount in direct_spatial_rocket_record_amount_patches(stream):
+        qword = stream[amount_qword]
+        target = (qword >> 48) & 0xffff
+        reg_addr = qword & 0xffff
+        value = (qword >> 16) & 0xffffffff
+        stream[amount_qword] = E(target, reg_addr, (value & 0xffff0000) | amount)
+    return stream
+
 def direct_spatial_pc_root6_task_spans(descs):
     stream, spans = direct_spatial_pc_root6_stream_and_spans(descs)
     for idx, qword in enumerate(stream):
         npu_regcmd[idx] = qword
     return spans
 
+def direct_spatial_single_stream_task_span(descs):
+    validate_direct_spatial_pc_root6_descs(descs)
+    stream = direct_spatial_compiler_stitched_stream(descs)
+    for idx, qword in enumerate(stream):
+        npu_regcmd[idx] = qword
+    return [(0, len(stream))]
+
+def direct_spatial_sparse_single_task_span(descs):
+    stream = direct_spatial_sparse_backing_stream(descs)
+    for idx, qword in enumerate(stream):
+        npu_regcmd[idx] = qword
+    return [(0, len(stream))]
+
+def direct_spatial_rocket_record_amounts_task_span(descs):
+    stream = direct_spatial_rocket_record_amounts_stream(descs)
+    for idx, qword in enumerate(stream):
+        npu_regcmd[idx] = qword
+    return [(0, len(stream))]
+
 def direct_spatial_pc_root6_stream_and_spans(descs):
     validate_direct_spatial_pc_root6_descs(descs)
     stream = direct_spatial_compiler_stitched_stream(descs)
     spans = direct_spatial_pc_root6_expected_spans(len(stream))
     return stream, spans
-
-def _build_direct_spatial_from_plan(n, input_nchw, weight_nchw, result, p, plan,
-                                    in_c, out_c, kh, kw, in_h, in_w, groups, stride):
-    del plan
-    descs, packed_input, packed_weight = build_direct_spatial_descs(
-        n, input_nchw, weight_nchw, p, in_c, out_c, kh, kw, in_h, in_w, groups, stride)
-    if not descs:
-        return []
-    return [make_direct_spatial_tile_desc(result, n, packed_input, packed_weight, descs, p)]
 
 def write_regs_to_npu_task(task_regs):
     def enable_npu_units_and_set_next_pc_addr(next_offset, next_task_regs_len, pc_core=0):
@@ -1233,7 +1674,15 @@ def _needs_grouped_spatial_serial(p, groups):
 
 def classify_conv_plan(p, in_c, out_c, kh, kw, in_h, in_w, groups, split_method, tiles):
     is_spatial, is_depthwise = p["is_spatial"], p["is_depthwise"]
-    if _needs_grouped_spatial_serial(p, groups):
+    direct_spatial_descs = plan_observed_spatial_tile_descs(
+        p, in_c, out_c, kh, kw, in_h, in_w, groups, p["stride"])
+    if direct_spatial_descs and direct_spatial_hw_enabled() and direct_spatial_plan_allowed(direct_spatial_descs):
+        # Special handle: guarded direct spatial descriptors use full input/weight BOs and common executor submit policy.
+        family = FAMILY_DIRECT_SPATIAL
+    elif direct_spatial_descs and _needs_spatial_im2col_fallback(p, in_c, out_c, kh, kw, groups):
+        # Special handle: do not silently use Python im2col for a proven RKNN direct-spatial schedule.
+        family = FAMILY_DIRECT_SPATIAL_GATED
+    elif _needs_grouped_spatial_serial(p, groups):
         # Special handle: grouped spatial weights are serialized group-by-group until native grouped descriptors are known.
         family = FAMILY_GROUPED_SERIAL
     elif _needs_spatial_im2col_fallback(p, in_c, out_c, kh, kw, groups):
@@ -1250,17 +1699,10 @@ def classify_conv_plan(p, in_c, out_c, kh, kw, in_h, in_w, groups, split_method,
         family = FAMILY_POINTWISE_OC
     else:
         family = FAMILY_GENERIC_YK
-    return {"family": family, "tiles": tiles, "split_method": split_method}
-
-def make_grouped_input_tile(input_nchw_n, group, input_per_group):
-    input_start = group * input_per_group
-    input_end = input_start + input_per_group
-    return input_nchw_n[input_start:input_end]
-
-def make_grouped_weight_tile(weight_nchw, group, out_per_group, input_per_group, kh, kw):
-    oc_start = group * out_per_group
-    oc_end = oc_start + out_per_group
-    return weight_nchw[oc_start:oc_end].reshape(out_per_group, input_per_group, kh, kw)
+    plan = {"family": family, "tiles": tiles, "split_method": split_method}
+    if family == FAMILY_DIRECT_SPATIAL:
+        plan["direct_spatial_descs"] = direct_spatial_descs
+    return plan
 
 def tile_range(start, tile_size, total):
     end = min(start + tile_size, total)
@@ -1275,152 +1717,193 @@ def output_row_tiles(out_h, row_tile_h):
     for out_row_start, _, tile_out_h in tile_ranges(out_h, row_tile_h):
         yield out_row_start, tile_out_h
 
+def split_method_for_tile_shape(split_y, split_k):
+    if split_y and split_k:
+        return _SPLIT_BY_YK
+    if split_y:
+        return _SPLIT_BY_Y
+    if split_k:
+        return _SPLIT_BY_K
+    return _SPLIT_NONE
+
 def input_h_for_output_tile(tile_out_h, kh, stride):
     return (tile_out_h - 1) * stride + kh
 
 def hardware_tile_h(tile_out_h, minimum):
     return max(minimum, tile_out_h)
 
-def build_grouped_serial_descs(n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
+def grouped_serial_tile_records(p, in_c, out_c, in_h, in_w, groups, stride):
     out_h, out_w = p["out_h"], p["out_w"]
     input_per_group = in_c // groups
     out_per_group = out_c // groups
-    gp = _conv_params(input_per_group, in_h, in_w, out_per_group, kh, kw, 1, stride=stride)
-    descs = []
+    records = []
     for g, (oc_start, oc_end, tile_out_c) in enumerate(tile_ranges(out_c, out_per_group)):
-        input_tile = make_grouped_input_tile(input_nchw[n], g, input_per_group)
-        group_weight = make_grouped_weight_tile(weight_nchw, g, out_per_group, input_per_group, kh, kw)
-        packed_input, packed_weight, regs, out_count = materialize_conv_tile(
-            gp, input_tile, group_weight, tile_out_c, input_per_group, kh, kw, 1)
-        meta = tile_meta(0, out_h, oc_start, oc_end, gp, "grouped serial group slice")
-        descs.append(make_nc1hwc2_tile_desc(FAMILY_GROUPED_SERIAL, result, n, packed_input, packed_weight, regs,
-                                            oc_start, oc_end, 0, out_h, out_h, out_w,
-                                            gp["align_out_c"], gp["out_width_stride"], out_count,
-                                            meta=meta))
-    return descs
+        records.append(TileRecord(
+            family=FAMILY_GROUPED_SERIAL,
+            split_method=_SPLIT_BY_K,
+            y_start=0,
+            y_count=out_h,
+            k_start=oc_start,
+            k_count=tile_out_c,
+            input_y=0,
+            input_h=in_h,
+            input_w=in_w,
+            output_y=0,
+            output_h=out_h,
+            output_w=out_w,
+            tile_in_c=input_per_group,
+            input_c_start=g * input_per_group,
+            tile_groups=1,
+            hw_oc=tile_out_c,
+            layout_mode="grouped_serial",
+            unpack_kind=UNPACK_KIND_NC1HWC2,
+            reason="grouped serial group slice"))
+    return records
 
-def make_spatial_oc_input_tile(input_nchw_n, out_row_start, tile_in_h, stride):
-    return input_nchw_n[:, out_row_start * stride:out_row_start * stride + tile_in_h, :]
+def materialize_grouped_serial_record(record, n, input_nchw, weight_nchw, result, kh, kw, stride):
+    input_tile = input_nchw[n, record.input_c_start:record.input_c_start + record.tile_in_c]
+    group_weight = weight_nchw[record.k_start:record.k_start + record.k_count].reshape(
+        record.k_count, record.tile_in_c, kh, kw)
+    tp = _conv_params(record.tile_in_c, record.input_h, record.input_w, record.hw_oc,
+                      kh, kw, 1, stride=stride)
+    packed_input, packed_weight, regs, out_count = materialize_conv_tile(
+        tp, input_tile, group_weight, record.hw_oc, record.tile_in_c, kh, kw, 1)
+    return make_record_tile_desc(record, result, n, packed_input, packed_weight, regs,
+                                 tp, out_count, channels=tp["align_out_c"])
 
-def build_spatial_oc_serial_descs(n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, in_w, stride):
+def spatial_oc_serial_tile_records(p, in_c, out_c, kh, in_w, stride):
     out_h, out_w = p["out_h"], p["out_w"]
     oc_tile = UNPACK_C2
-    descs = []
+    row_tile_h = 32
+    split_method = split_method_for_tile_shape(row_tile_h < out_h, oc_tile < out_c)
+    records = []
     for out_row_start, tile_out_h in output_row_tiles(out_h, 32):
         tile_in_h = input_h_for_output_tile(tile_out_h, kh, stride)
-        input_tile = make_spatial_oc_input_tile(input_nchw[n], out_row_start, tile_in_h, stride)
         for oc_start, oc_end, tile_out_c in tile_ranges(out_c, oc_tile):
-            tp = _conv_params(in_c, tile_in_h, in_w, tile_out_c, kh, kw, 1, stride)
-            tile_weight = make_spatial_oc_weight_tile(weight_nchw, oc_start, oc_end, in_c, kh, kw)
-            packed_input, packed_weight, regs, out_count = materialize_conv_tile(
-                tp, input_tile, tile_weight, tile_out_c, in_c, kh, kw, 1, full_data_bank=True)
-            meta = tile_meta(out_row_start, tile_out_h, oc_start, oc_end, tp,
-                             "dense spatial output-channel serial tile")
-            descs.append(make_nc1hwc2_tile_desc(FAMILY_SPATIAL_OC_SERIAL, result, n, packed_input, packed_weight, regs,
-                                                oc_start, oc_end, out_row_start, tile_out_h, tile_out_h,
-                                                out_w, tile_out_c, tp["out_width_stride"], out_count,
-                                                meta=meta))
-    return descs
+            records.append(TileRecord(
+                family=FAMILY_SPATIAL_OC_SERIAL,
+                split_method=split_method,
+                y_start=out_row_start,
+                y_count=tile_out_h,
+                k_start=oc_start,
+                k_count=tile_out_c,
+                input_y=out_row_start * stride,
+                input_h=tile_in_h,
+                input_w=in_w,
+                output_y=out_row_start,
+                output_h=tile_out_h,
+                output_w=out_w,
+                tile_in_c=in_c,
+                tile_groups=1,
+                hw_oc=tile_out_c,
+                full_data_bank=True,
+                layout_mode="spatial_oc_serial",
+                unpack_kind=UNPACK_KIND_NC1HWC2,
+                reason="dense spatial output-channel serial tile"))
+    return records
 
-def make_spatial_oc_weight_tile(weight_nchw, oc_start, oc_end, in_c, kh, kw):
-    tile_out_c = oc_end - oc_start
-    tile_weight = np.zeros((tile_out_c, in_c, kh, kw), dtype=np.float16)
-    tile_weight[:] = weight_nchw[oc_start:oc_end].reshape(tile_out_c, in_c, kh, kw)
-    return tile_weight
+def materialize_spatial_oc_serial_record(record, n, input_nchw, weight_nchw, result, kh, kw, stride):
+    input_tile = input_nchw[n, :, record.input_y:record.input_y + record.input_h, :]
+    tile_weight = weight_nchw[record.k_start:record.k_start + record.k_count].reshape(
+        record.k_count, record.tile_in_c, kh, kw)
+    tp = _conv_params(record.tile_in_c, record.input_h, record.input_w, record.hw_oc, kh, kw, 1, stride)
+    packed_input, packed_weight, regs, out_count = materialize_conv_tile(
+        tp, input_tile, tile_weight, record.hw_oc, record.tile_in_c, kh, kw, 1,
+        full_data_bank=record.full_data_bank)
+    return make_record_tile_desc(record, result, n, packed_input, packed_weight, regs, tp, out_count)
 
-def make_depthwise_input_tile(input_nchw_n, ch_start, ch_end, out_row_start, tile_in_h, in_h, in_w, stride):
-    tile_c = ch_end - ch_start
-    input_tile = np.zeros((tile_c, tile_in_h, in_w), dtype=np.float16)
-    real_in_h = min(tile_in_h, in_h - out_row_start * stride)
-    input_tile[:, :real_in_h] = input_nchw_n[ch_start:ch_end,
-                                             out_row_start * stride:out_row_start * stride + real_in_h, :]
-    return input_tile
-
-def make_depthwise_weight_tile(weight_nchw, ch_start, ch_end, kh, kw):
-    tile_c = ch_end - ch_start
-    tile_weight = np.zeros((tile_c, tile_c, kh, kw), dtype=np.float16)
-    for local_c in range(tile_c):
-        tile_weight[local_c, local_c] = weight_nchw[ch_start + local_c, 0]
-    return tile_weight
-
-def build_depthwise_spatial_descs(n, input_nchw, weight_nchw, result, p, out_c, kh, kw, in_h, in_w, stride):
+def depthwise_spatial_tile_records(p, out_c, kh, kw, in_w, stride):
     out_h, out_w = p["out_h"], p["out_w"]
     channel_tile = min(32, out_c)
     row_tile_h = max(1, _depthwise_tile_h(out_c, out_h, in_w, kh, kw, stride))
-    descs = []
+    split_method = split_method_for_tile_shape(row_tile_h < out_h, channel_tile < out_c)
+    records = []
     for out_row_start, tile_out_h in output_row_tiles(out_h, row_tile_h):
         hw_tile_out_h = hardware_tile_h(tile_out_h, 2)
         tile_in_h = input_h_for_output_tile(hw_tile_out_h, kh, stride)
         for ch_start, ch_end, tile_c in tile_ranges(out_c, channel_tile):
-            tile_p = _conv_params(tile_c, tile_in_h, in_w, tile_c, kh, kw, tile_c, stride=stride)
-            input_tile = make_depthwise_input_tile(input_nchw[n], ch_start, ch_end, out_row_start,
-                                                   tile_in_h, in_h, in_w, stride)
-            tile_weight = make_depthwise_weight_tile(weight_nchw, ch_start, ch_end, kh, kw)
-            packed_input, packed_weight, regs, out_count = materialize_conv_tile(
-                tile_p, input_tile, tile_weight, tile_c, tile_c, kh, kw, tile_c)
-            meta = tile_meta(out_row_start, tile_out_h, ch_start, ch_end, tile_p,
-                             "depthwise spatial channel and row tile")
-            descs.append(make_nc1hwc2_tile_desc(FAMILY_DEPTHWISE_SPATIAL_TILED, result, n, packed_input, packed_weight, regs,
-                                                ch_start, ch_end, out_row_start, tile_out_h, hw_tile_out_h,
-                                                out_w, tile_c, tile_p["out_width_stride"], out_count,
-                                                meta=meta))
-    return descs
+            records.append(TileRecord(
+                family=FAMILY_DEPTHWISE_SPATIAL_TILED,
+                split_method=split_method,
+                y_start=out_row_start,
+                y_count=tile_out_h,
+                k_start=ch_start,
+                k_count=tile_c,
+                input_y=out_row_start * stride,
+                input_h=tile_in_h,
+                input_w=in_w,
+                output_y=out_row_start,
+                output_h=tile_out_h,
+                output_w=out_w,
+                tile_in_c=tile_c,
+                tile_groups=tile_c,
+                hw_oc=tile_c,
+                layout_mode="depthwise_spatial",
+                unpack_kind=UNPACK_KIND_NC1HWC2,
+                reason="depthwise spatial channel and row tile"))
+    return records
 
-def make_pointwise_input_tile(input_nchw_n, out_row_start, tile_out_h, hw_tile_h, in_w, in_c, stride):
-    input_tile = np.zeros((in_c, hw_tile_h, in_w), dtype=np.float16)
-    input_tile[:, :tile_out_h] = input_nchw_n[:, out_row_start * stride:out_row_start * stride + tile_out_h, :]
-    return input_tile
+def materialize_depthwise_spatial_record(record, n, input_nchw, weight_nchw, result, kh, kw, in_h, stride):
+    real_in_h = min(record.input_h, in_h - record.input_y)
+    input_tile = np.zeros((record.tile_in_c, record.input_h, record.input_w), dtype=np.float16)
+    input_tile[:, :real_in_h] = input_nchw[n, record.k_start:record.k_start + record.k_count,
+                                           record.input_y:record.input_y + real_in_h, :]
+    tile_weight = np.zeros((record.k_count, record.k_count, kh, kw), dtype=np.float16)
+    for local_c in range(record.k_count):
+        tile_weight[local_c, local_c] = weight_nchw[record.k_start + local_c, 0]
+    tp = _conv_params(record.tile_in_c, record.input_h, record.input_w, record.hw_oc,
+                      kh, kw, record.tile_groups, stride=stride)
+    packed_input, packed_weight, regs, out_count = materialize_conv_tile(
+        tp, input_tile, tile_weight, record.hw_oc, record.tile_in_c, kh, kw, record.tile_groups)
+    return make_record_tile_desc(record, result, n, packed_input, packed_weight, regs,
+                                 tp, out_count, hw_h=hardware_tile_h(record.y_count, 2))
 
 def padded_oc_count(tile_out_c, oc_tile):
     return oc_tile if tile_out_c < oc_tile else tile_out_c
 
-def build_pointwise_oc_descs(n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, in_w, groups, stride):
+def pointwise_oc_tile_records(p, in_c, out_c, in_w, stride):
     out_h, out_w = p["out_h"], p["out_w"]
     oc_tile = _pointwise_oc_tile_c(in_c)
     row_tile_h = _pointwise_oc_tile_h(in_c, out_h, out_w, oc_tile, stride)
-    tw = weight_nchw.reshape(out_c, in_c // groups, kh, kw)
-    descs = []
+    split_method = split_method_for_tile_shape(row_tile_h < out_h, oc_tile < out_c)
+    records = []
     for out_row_start, tile_out_h in output_row_tiles(out_h, row_tile_h):
         hw_tile_h = hardware_tile_h(tile_out_h, 7)
-        input_tile = make_pointwise_input_tile(input_nchw[n], out_row_start, tile_out_h,
-                                               hw_tile_h, in_w, in_c, stride)
         for oc_start, oc_end, tile_out_c in tile_ranges(out_c, oc_tile):
             hw_out_c = padded_oc_count(tile_out_c, oc_tile)
-            tp = _conv_params(in_c, hw_tile_h, in_w, hw_out_c, kh, kw, groups, stride)
-            tile_wt = tw[oc_start:oc_end]
-            tile_wt = pad_output_channels(tile_wt, tile_out_c, hw_out_c)
-            packed_input, packed_weight, regs, out_count = materialize_conv_tile(
-                tp, input_tile, tile_wt, hw_out_c, in_c, kh, kw, groups, full_data_bank=True)
-            meta = tile_meta(out_row_start, tile_out_h, oc_start, oc_end, tp,
-                             "pointwise output-channel tile")
-            descs.append(make_flat_1x1_tile_desc(FAMILY_POINTWISE_OC, result, n, packed_input, packed_weight, regs,
-                                                 oc_start, oc_end, out_row_start, tile_out_h, hw_tile_h,
-                                                 out_w, tile_out_c, hw_out_c, tp["out_width_stride"], out_count,
-                                                 meta=meta))
-    return descs
+            records.append(TileRecord(
+                family=FAMILY_POINTWISE_OC,
+                split_method=split_method,
+                y_start=out_row_start,
+                y_count=tile_out_h,
+                k_start=oc_start,
+                k_count=tile_out_c,
+                input_y=out_row_start * stride,
+                input_h=hw_tile_h,
+                input_w=in_w,
+                output_y=out_row_start,
+                output_h=tile_out_h,
+                output_w=out_w,
+                tile_in_c=in_c,
+                tile_groups=p["groups"],
+                hw_oc=hw_out_c,
+                full_data_bank=True,
+                layout_mode="pointwise_oc",
+                unpack_kind=UNPACK_KIND_FLAT_1X1,
+                reason="pointwise output-channel tile"))
+    return records
 
-def make_spatial_im2col_input_tile(input_nchw_n, out_row_start, tile_out_h, hw_tile_h, out_w, in_c, kh, kw, stride):
-    im2col = np.zeros((in_c * kh * kw, hw_tile_h, out_w), dtype=np.float16)
-    flat = 0
-    for ic in range(in_c):
-        for ky in range(kh):
-            src_y = out_row_start * stride + ky
-            for kx in range(kw):
-                im2col[flat, :tile_out_h] = input_nchw_n[ic, src_y:src_y + tile_out_h * stride:stride,
-                                                          kx:kx + out_w * stride:stride]
-                flat += 1
-    return im2col
-
-def make_spatial_im2col_weight_tile(weight_nchw, oc_start, oc_end, hw_out_c, in_c, kh, kw):
-    tile_weight = np.zeros((hw_out_c, in_c * kh * kw, 1, 1), dtype=np.float16)
-    for local_oc, oc in enumerate(range(oc_start, oc_end)):
-        flat = 0
-        for ic in range(in_c):
-            for ky in range(kh):
-                for kx in range(kw):
-                    tile_weight[local_oc, flat, 0, 0] = weight_nchw[oc, ic, ky, kx]
-                    flat += 1
-    return tile_weight
+def materialize_pointwise_oc_record(record, n, input_nchw, weight_nchw, result, kh, kw, groups, stride):
+    input_tile = np.zeros((record.tile_in_c, record.input_h, record.input_w), dtype=np.float16)
+    input_tile[:, :record.y_count] = input_nchw[n, :, record.input_y:record.input_y + record.y_count, :]
+    tile_weight = weight_nchw.reshape(-1, record.tile_in_c // groups, kh, kw)[record.k_start:record.k_start + record.k_count]
+    tile_weight = pad_output_channels(tile_weight, record.k_count, record.hw_oc)
+    tp = _conv_params(record.tile_in_c, record.input_h, record.input_w, record.hw_oc, kh, kw, groups, stride)
+    packed_input, packed_weight, regs, out_count = materialize_conv_tile(
+        tp, input_tile, tile_weight, record.hw_oc, record.tile_in_c, kh, kw, groups,
+        full_data_bank=record.full_data_bank)
+    return make_record_tile_desc(record, result, n, packed_input, packed_weight, regs,
+                                 tp, out_count, hw_h=record.input_h)
 
 def pad_output_channels(weight_tile, real_out_c, hw_out_c):
     if hw_out_c <= real_out_c:
@@ -1429,41 +1912,112 @@ def pad_output_channels(weight_tile, real_out_c, hw_out_c):
     padded[:real_out_c] = weight_tile
     return padded
 
-def build_spatial_im2col_fallback_descs(n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, stride):
+def spatial_im2col_fallback_tile_records(p, in_c, out_c, kh, kw, stride):
     out_h, out_w = p["out_h"], p["out_w"]
     flat_c = in_c * kh * kw
     oc_tile = _pointwise_oc_tile_c(flat_c)
     row_tile_h = _pointwise_oc_tile_h(flat_c, out_h, out_w, oc_tile)
-    direct_descs = plan_observed_spatial_tile_descs(
-        p, in_c, out_c, kh, kw, input_nchw.shape[2], input_nchw.shape[3], 1, stride)
-    direct_meta = [_tile_desc_meta(d) for d in direct_descs]
-    descs = []
+    split_method = split_method_for_tile_shape(row_tile_h < out_h, oc_tile < out_c)
+    records = []
     for out_row_start, tile_out_h in output_row_tiles(out_h, row_tile_h):
         hw_tile_h = hardware_tile_h(tile_out_h, 7)
-        im2col = make_spatial_im2col_input_tile(input_nchw[n], out_row_start, tile_out_h,
-                                                hw_tile_h, out_w, in_c, kh, kw, stride)
         for oc_start, oc_end, tile_out_c in tile_ranges(out_c, oc_tile):
             hw_out_c = padded_oc_count(tile_out_c, oc_tile)
-            tile_p = _conv_params(flat_c, hw_tile_h, out_w, hw_out_c, 1, 1, 1)
+            records.append(TileRecord(
+                family=FAMILY_SPATIAL_IM2COL_FALLBACK,
+                split_method=split_method,
+                y_start=out_row_start,
+                y_count=tile_out_h,
+                k_start=oc_start,
+                k_count=tile_out_c,
+                input_y=out_row_start * stride,
+                input_h=hw_tile_h,
+                input_w=out_w,
+                output_y=out_row_start,
+                output_h=tile_out_h,
+                output_w=out_w,
+                tile_in_c=flat_c,
+                hw_oc=hw_out_c,
+                full_data_bank=True,
+                layout_mode="spatial_im2col_fallback",
+                unpack_kind=UNPACK_KIND_FLAT_1X1,
+                reason="temporary software im2col fallback"))
+    return records
 
-            tile_weight = make_spatial_im2col_weight_tile(weight_nchw, oc_start, oc_end,
-                                                          hw_out_c, in_c, kh, kw)
-            packed_input, packed_weight, regs, out_count = materialize_conv_tile(
-                tile_p, im2col, tile_weight, hw_out_c, flat_c, 1, 1, 1, full_data_bank=True)
-            meta = tile_meta(out_row_start, tile_out_h, oc_start, oc_end, tile_p,
-                             "temporary software im2col fallback",
-                             direct_spatial_descs=direct_meta)
-            descs.append(make_flat_1x1_tile_desc(FAMILY_SPATIAL_IM2COL_FALLBACK, result, n, packed_input, packed_weight, regs,
-                                                 oc_start, oc_end, out_row_start, tile_out_h, hw_tile_h,
-                                                 out_w, tile_out_c, hw_out_c, tile_p["out_width_stride"], out_count,
-                                                 meta=meta))
-    return descs
+def materialize_spatial_im2col_fallback_record(record, n, input_nchw, weight_nchw, result,
+                                               in_c, kh, kw, stride):
+    im2col = np.zeros((record.tile_in_c, record.input_h, record.input_w), dtype=np.float16)
+    flat = 0
+    for ic in range(in_c):
+        for ky in range(kh):
+            src_y = record.input_y + ky
+            for kx in range(kw):
+                im2col[flat, :record.y_count] = input_nchw[n, ic,
+                                                           src_y:src_y + record.y_count * stride:stride,
+                                                           kx:kx + record.output_w * stride:stride]
+                flat += 1
 
-def _get_generic_input_tile(inp, tile, p, in_c, kh, in_h, in_w, stride):
-    ys, y_span = tile["y_start"], tile["y_step"]
-    k_span = tile["k_step"]
+    tile_weight = np.zeros((record.hw_oc, record.tile_in_c, 1, 1), dtype=np.float16)
+    for local_oc, oc in enumerate(range(record.k_start, record.k_start + record.k_count)):
+        flat = 0
+        for ic in range(in_c):
+            for ky in range(kh):
+                for kx in range(kw):
+                    tile_weight[local_oc, flat, 0, 0] = weight_nchw[oc, ic, ky, kx]
+                    flat += 1
+
+    tp = _conv_params(record.tile_in_c, record.input_h, record.input_w, record.hw_oc, 1, 1, 1)
+    packed_input, packed_weight, regs, out_count = materialize_conv_tile(
+        tp, im2col, tile_weight, record.hw_oc, record.tile_in_c, 1, 1, 1,
+        full_data_bank=record.full_data_bank)
+    return make_record_tile_desc(record, result, n, packed_input, packed_weight, regs,
+                                 tp, out_count, hw_h=record.input_h)
+
+def generic_yk_tile_records(plan, p, in_c, kh, in_h, in_w, stride):
+    records = []
+    out_offset = 0
+    for tile in plan["tiles"]:
+        ys, y_span = tile["y_start"], tile["y_step"]
+        ks, k_span = tile["k_start"], tile["k_step"]
+        if p["is_depthwise"]:
+            tile_ic, tile_g, hw_oc = k_span, k_span, k_span
+            input_h = min((y_span - 1) * stride + kh, in_h - ys * stride)
+        else:
+            tile_ic, tile_g = in_c, p["groups"]
+            hw_oc = padded_oc_count(k_span, _pointwise_oc_tile_c(in_c))
+            t_in = input_h_for_output_tile(y_span, kh, stride)
+            input_h = min(t_in, in_h - ys * stride)
+        records.append(TileRecord(
+            family=FAMILY_GENERIC_YK,
+            split_method=plan["split_method"],
+            y_start=ys,
+            y_count=y_span,
+            k_start=ks,
+            k_count=k_span,
+            input_y=ys * stride,
+            input_h=input_h,
+            input_w=in_w,
+            output_y=ys,
+            output_h=y_span,
+            output_w=p["out_w"],
+            tile_in_c=tile_ic,
+            tile_groups=tile_g,
+            hw_oc=hw_oc,
+            out_offset=out_offset,
+            full_data_bank=(plan["split_method"] != _SPLIT_NONE or
+                            (p["is_spatial"] and p["groups"] == 1)),
+            layout_mode=("depthwise" if p["is_depthwise"] else "dense"),
+            unpack_kind=UNPACK_KIND_NC1HWC2,
+            reason="generic RKNN-style Y/K tile planner"))
+        tile_p = _conv_params(tile_ic, input_h, in_w, hw_oc, kh, p["kw"], tile_g, stride)
+        out_offset += conv_output_bytes(tile_p)
+    return records
+
+def _get_generic_input_tile(inp, record, p, in_c, kh, in_h, in_w, stride):
+    ys, y_span = record.y_start, record.y_count
+    k_span = record.k_count
     if p["is_depthwise"]:
-        ks = tile["k_start"]
+        ks = record.k_start
         tn = min((y_span - 1) * stride + kh, in_h - ys * stride)
         ti = np.zeros((k_span, tn, in_w), dtype=np.float16)
         rih = min(tn, in_h - ys * stride)
@@ -1477,8 +2031,8 @@ def _get_generic_input_tile(inp, tile, p, in_c, kh, in_h, in_w, stride):
     ti[:, :rih] = inp[:, ys * stride:ys * stride + rih, :]
     return ti, tn
 
-def _get_generic_weight_tile(wt, tile, p, in_c, kh, kw):
-    ks, k_span = tile["k_start"], tile["k_step"]
+def _get_generic_weight_tile(wt, record, p, in_c, kh, kw):
+    ks, k_span = record.k_start, record.k_count
     groups = p["groups"]
     if p["is_depthwise"]:
         tw = np.zeros((k_span, k_span, kh, kw), dtype=np.float16)
@@ -1490,97 +2044,112 @@ def _get_generic_weight_tile(wt, tile, p, in_c, kh, kw):
         tw = _expand_grouped_weights(tw, in_c, k_span, kh, kw, groups)
     return tw
 
-def generic_tile_channels(p, in_c, tile_out_c):
-    if p["is_depthwise"]:
-        return tile_out_c, tile_out_c, tile_out_c
-    oc_tile = _pointwise_oc_tile_c(in_c)
-    hw_oc = oc_tile if tile_out_c < oc_tile else tile_out_c
-    return in_c, p["groups"], hw_oc
+def materialize_generic_tile_record(record, n, input_nchw, weight_nchw, result, p,
+                                    in_c, kh, kw, in_h, in_w, stride):
+    ti, tn_actual = _get_generic_input_tile(input_nchw[n], record, p, in_c, kh, in_h, in_w, stride)
+    tw = _get_generic_weight_tile(weight_nchw, record, p, in_c, kh, kw)
+    tw = pad_output_channels(tw, record.k_count, record.hw_oc)
 
-def generic_tile_full_data_bank(p, split_method):
-    return split_method != _SPLIT_NONE or (p["is_spatial"] and p["groups"] == 1)
+    tp = _conv_params(record.tile_in_c, tn_actual, in_w, record.hw_oc, kh, kw,
+                      record.tile_groups, stride)
+    out_dma = output_mem_create.dma_addr + record.out_offset
+    packed_input, packed_weight, regs, out_count = materialize_conv_tile(
+        tp, ti, tw, record.hw_oc, record.tile_in_c, kh, kw, record.tile_groups,
+        out_dma=out_dma, full_data_bank=record.full_data_bank)
+    return make_record_tile_desc(record, result, n, packed_input, packed_weight, regs, tp, out_count)
 
-def build_generic_yk_descs(n, input_nchw, weight_nchw, result, p, plan, in_c, kh, kw, in_h, in_w, stride):
-    descs = []
-    out_offset = 0
-    for tile in plan["tiles"]:
-        ys, y_span = tile["y_start"], tile["y_step"]
-        ks, k_span = tile["k_start"], tile["k_step"]
-        ti, tn_actual = _get_generic_input_tile(input_nchw[n], tile, p, in_c, kh, in_h, in_w, stride)
-        tw = _get_generic_weight_tile(weight_nchw, tile, p, in_c, kh, kw)
+def _build_direct_spatial_from_plan(plan, ctx):
+    descs, packed_input, packed_weight = build_direct_spatial_descs(
+        ctx.n, ctx.input_nchw, ctx.weight_nchw, ctx.p,
+        ctx.in_c, ctx.out_c, ctx.kh, ctx.kw, ctx.in_h, ctx.in_w, ctx.groups, ctx.stride,
+        descs=plan.get("direct_spatial_descs"))
+    if not descs:
+        return []
+    return [make_direct_spatial_tile_desc(ctx.result, ctx.n, packed_input, packed_weight, descs, ctx.p)]
 
-        tile_out_c = k_span
-        oc_end = ks + tile_out_c
-        tile_ic, tile_g, hw_oc = generic_tile_channels(p, in_c, tile_out_c)
-        tw = pad_output_channels(tw, tile_out_c, hw_oc)
+def _build_gated_direct_spatial_from_plan(plan, ctx):
+    del plan, ctx
+    raise RuntimeError(
+        f"direct-spatial RKNN descriptor schedule is available but hardware execution is gated; "
+        f"set {DIRECT_SPATIAL_ENV}=1 and {DIRECT_SPATIAL_UNSAFE_ENV}=1 for the explicit probe")
 
-        tp = _conv_params(tile_ic, tn_actual, in_w, hw_oc, kh, kw, tile_g, stride)
+@dataclass(frozen=True, slots=True)
+class ConvBuildContext:
+    n: int
+    input_nchw: np.ndarray
+    weight_nchw: np.ndarray
+    result: np.ndarray
+    p: dict
+    in_c: int
+    out_c: int
+    kh: int
+    kw: int
+    in_h: int
+    in_w: int
+    groups: int
+    stride: int
 
-        full_data_bank = generic_tile_full_data_bank(p, plan["split_method"])
-        out_dma = output_mem_create.dma_addr + out_offset
-        packed_input, packed_weight, regs, out_count = materialize_conv_tile(
-            tp, ti, tw, hw_oc, tile_ic, kh, kw, tile_g, out_dma=out_dma,
-            full_data_bank=full_data_bank)
-        meta = tile_meta(ys, y_span, ks, oc_end, tp,
-                         "generic RKNN-style Y/K tile planner")
-        descs.append(make_nc1hwc2_tile_desc(FAMILY_GENERIC_YK, result, n, packed_input, packed_weight, regs,
-                                            ks, oc_end, ys, y_span, y_span,
-                                            p["out_w"], tile_out_c, tp["out_width_stride"], out_count,
-                                            offset=out_offset, meta=meta))
-        out_offset += conv_output_bytes(tp)
-    return descs
+def _record_planner(plan, ctx):
+    family = plan["family"]
+    if family == FAMILY_GROUPED_SERIAL:
+        return grouped_serial_tile_records(ctx.p, ctx.in_c, ctx.out_c, ctx.in_h, ctx.in_w, ctx.groups, ctx.stride)
+    if family == FAMILY_SPATIAL_IM2COL_FALLBACK:
+        return spatial_im2col_fallback_tile_records(ctx.p, ctx.in_c, ctx.out_c, ctx.kh, ctx.kw, ctx.stride)
+    if family == FAMILY_SPATIAL_OC_SERIAL:
+        return spatial_oc_serial_tile_records(ctx.p, ctx.in_c, ctx.out_c, ctx.kh, ctx.in_w, ctx.stride)
+    if family == FAMILY_DEPTHWISE_SPATIAL_TILED:
+        return depthwise_spatial_tile_records(ctx.p, ctx.out_c, ctx.kh, ctx.kw, ctx.in_w, ctx.stride)
+    if family == FAMILY_POINTWISE_OC:
+        return pointwise_oc_tile_records(ctx.p, ctx.in_c, ctx.out_c, ctx.in_w, ctx.stride)
+    if family == FAMILY_GENERIC_YK:
+        return generic_yk_tile_records(plan, ctx.p, ctx.in_c, ctx.kh, ctx.in_h, ctx.in_w, ctx.stride)
+    raise ValueError(f"unknown record family: {family}")
 
-def _build_grouped_serial_from_plan(n, input_nchw, weight_nchw, result, p, plan, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
-    return build_grouped_serial_descs(
-        n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, in_h, in_w, groups, stride)
+def _materialize_record(record, ctx):
+    if record.family == FAMILY_GROUPED_SERIAL:
+        return materialize_grouped_serial_record(record, ctx.n, ctx.input_nchw, ctx.weight_nchw,
+                                                 ctx.result, ctx.kh, ctx.kw, ctx.stride)
+    if record.family == FAMILY_SPATIAL_IM2COL_FALLBACK:
+        return materialize_spatial_im2col_fallback_record(record, ctx.n, ctx.input_nchw, ctx.weight_nchw,
+                                                          ctx.result, ctx.in_c, ctx.kh, ctx.kw, ctx.stride)
+    if record.family == FAMILY_SPATIAL_OC_SERIAL:
+        return materialize_spatial_oc_serial_record(record, ctx.n, ctx.input_nchw, ctx.weight_nchw,
+                                                    ctx.result, ctx.kh, ctx.kw, ctx.stride)
+    if record.family == FAMILY_DEPTHWISE_SPATIAL_TILED:
+        return materialize_depthwise_spatial_record(record, ctx.n, ctx.input_nchw, ctx.weight_nchw,
+                                                    ctx.result, ctx.kh, ctx.kw, ctx.in_h, ctx.stride)
+    if record.family == FAMILY_POINTWISE_OC:
+        return materialize_pointwise_oc_record(record, ctx.n, ctx.input_nchw, ctx.weight_nchw,
+                                               ctx.result, ctx.kh, ctx.kw, ctx.groups, ctx.stride)
+    if record.family == FAMILY_GENERIC_YK:
+        return materialize_generic_tile_record(record, ctx.n, ctx.input_nchw, ctx.weight_nchw,
+                                               ctx.result, ctx.p, ctx.in_c, ctx.kh, ctx.kw,
+                                               ctx.in_h, ctx.in_w, ctx.stride)
+    raise ValueError(f"unknown record family: {record.family}")
 
-def _build_spatial_im2col_fallback_from_plan(n, input_nchw, weight_nchw, result, p, plan, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
-    return build_spatial_im2col_fallback_descs(
-        n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, stride)
-
-def _build_spatial_oc_serial_from_plan(n, input_nchw, weight_nchw, result, p, plan, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
-    return build_spatial_oc_serial_descs(
-        n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, in_w, stride)
-
-def _build_depthwise_spatial_from_plan(n, input_nchw, weight_nchw, result, p, plan, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
-    return build_depthwise_spatial_descs(
-        n, input_nchw, weight_nchw, result, p, out_c, kh, kw, in_h, in_w, stride)
-
-def _build_pointwise_oc_from_plan(n, input_nchw, weight_nchw, result, p, plan, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
-    return build_pointwise_oc_descs(
-        n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, in_w, groups, stride)
-
-def _build_generic_yk_from_plan(n, input_nchw, weight_nchw, result, p, plan, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
-    return build_generic_yk_descs(
-        n, input_nchw, weight_nchw, result, p, plan, in_c, kh, kw, in_h, in_w, stride)
+def _build_record_descriptors(plan, ctx):
+    return [_materialize_record(record, ctx) for record in _record_planner(plan, ctx)]
 
 DESCRIPTOR_PRODUCERS = {
     FAMILY_DIRECT_SPATIAL: _build_direct_spatial_from_plan,
-    FAMILY_GROUPED_SERIAL: _build_grouped_serial_from_plan,
-    FAMILY_SPATIAL_IM2COL_FALLBACK: _build_spatial_im2col_fallback_from_plan,
-    FAMILY_SPATIAL_OC_SERIAL: _build_spatial_oc_serial_from_plan,
-    FAMILY_DEPTHWISE_SPATIAL_TILED: _build_depthwise_spatial_from_plan,
-    FAMILY_POINTWISE_OC: _build_pointwise_oc_from_plan,
-    FAMILY_GENERIC_YK: _build_generic_yk_from_plan,
+    FAMILY_DIRECT_SPATIAL_GATED: _build_gated_direct_spatial_from_plan,
+    FAMILY_GROUPED_SERIAL: _build_record_descriptors,
+    FAMILY_SPATIAL_IM2COL_FALLBACK: _build_record_descriptors,
+    FAMILY_SPATIAL_OC_SERIAL: _build_record_descriptors,
+    FAMILY_DEPTHWISE_SPATIAL_TILED: _build_record_descriptors,
+    FAMILY_POINTWISE_OC: _build_record_descriptors,
+    FAMILY_GENERIC_YK: _build_record_descriptors,
 }
-
-def build_conv_descriptors(plan, n, input_nchw, weight_nchw, result, p, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
-    producer = DESCRIPTOR_PRODUCERS[plan["family"]]
-    return producer(n, input_nchw, weight_nchw, result, p, plan,
-                    in_c, out_c, kh, kw, in_h, in_w, groups, stride)
 
 def plan_conv_descriptors(n, input_nchw, weight_nchw, result, in_c, out_c, kh, kw, input_hw, groups=1, stride=1):
     in_h, in_w = input_hw
     p, split_method, tiles = _plan_conv_tiles(in_c, out_c, kh, kw, in_h, in_w, groups, stride)
-    if direct_spatial_hw_enabled():
-        descs = build_conv_descriptors({"family": FAMILY_DIRECT_SPATIAL}, n, input_nchw, weight_nchw, result, p,
-                                       in_c, out_c, kh, kw, in_h, in_w, groups, stride)
-        if descs:
-            return descs
     plan = classify_conv_plan(p, in_c, out_c, kh, kw, in_h, in_w, groups,
                               split_method, tiles)
-    return build_conv_descriptors(plan, n, input_nchw, weight_nchw, result, p,
-                                  in_c, out_c, kh, kw, in_h, in_w, groups, stride)
+    ctx = ConvBuildContext(n, input_nchw, weight_nchw, result, p,
+                           in_c, out_c, kh, kw, in_h, in_w, groups, stride)
+    producer = DESCRIPTOR_PRODUCERS[plan["family"]]
+    return producer(plan, ctx)
 
 def direct_spatial_hw_enabled():
     return (os.environ.get(DIRECT_SPATIAL_ENV) == "1" and
@@ -1634,10 +2203,27 @@ def shape_output_text(s):
     out_h, out_w = conv_output_hw(s["in_h"], s["in_w"], s["kh"], s["kw"], shape_stride(s))
     return f"{s['out_c']}x{out_h}x{out_w}"
 
-def print_shape_result(s, nw, iw, ok, max_diff):
-    print(f"  {s['name']:<{nw}s} {shape_input_text(s):<{iw}s} -> {shape_output_text(s)}  {'PASS' if ok else 'FAIL'}  (max_diff={max_diff:.4f})")
+def shape_direct_spatial_descs(s):
+    stride = shape_stride(s)
+    p = _conv_params(s["in_c"], s["in_h"], s["in_w"], s["out_c"], s["kh"], s["kw"], s["groups"], stride)
+    return plan_observed_spatial_tile_descs(
+        p, s["in_c"], s["out_c"], s["kh"], s["kw"], s["in_h"], s["in_w"], s["groups"], stride)
+
+def shape_requires_direct_spatial_gate(s):
+    descs = shape_direct_spatial_descs(s)
+    if not descs or direct_spatial_hw_enabled():
+        return False
+    stride = shape_stride(s)
+    p = _conv_params(s["in_c"], s["in_h"], s["in_w"], s["out_c"], s["kh"], s["kw"], s["groups"], stride)
+    return _needs_spatial_im2col_fallback(p, s["in_c"], s["out_c"], s["kh"], s["kw"], s["groups"])
+
+def print_shape_result(s, nw, iw, status, max_diff=None):
+    diff_text = "" if max_diff is None else f"  (max_diff={max_diff:.4f})"
+    print(f"  {s['name']:<{nw}s} {shape_input_text(s):<{iw}s} -> {shape_output_text(s)}  {status}{diff_text}")
 
 def run_shape_check(s):
+    if shape_requires_direct_spatial_gate(s):
+        return "GATED", None
     stride = shape_stride(s)
     result, inp, wt = run_conv(s["batch"], s["in_c"], s["out_c"], s["kh"], s["kw"],
                                (s["in_h"], s["in_w"]), groups=s["groups"], stride=stride)
@@ -1645,153 +2231,181 @@ def run_shape_check(s):
                                      s["out_c"], s["kh"], s["kw"], groups=s["groups"], stride=stride)
     max_diff = float(np.max(np.abs(result.astype(np.float64) - expected)))
     ok = np.allclose(result, expected, atol=0.2) and not np.any(np.isinf(result))
-    return ok, max_diff
+    return "PASS" if ok else "FAIL", max_diff
 
 def run_shape_suite(shapes, requested):
     shapes = select_shapes(shapes, requested)
     name_width = max(len(s["name"]) for s in shapes)
     input_width = max(len(shape_input_text(s)) for s in shapes)
     for s in shapes:
-        ok, max_diff = run_shape_check(s)
-        print_shape_result(s, name_width, input_width, ok, max_diff)
+        status, max_diff = run_shape_check(s)
+        print_shape_result(s, name_width, input_width, status, max_diff)
+
+def conv_shape(name, batch, in_c, in_h, in_w, out_c, kh, kw, groups, stride=1):
+    s = dict(name=name, batch=batch, in_c=in_c, in_h=in_h, in_w=in_w, out_c=out_c, kh=kh, kw=kw, groups=groups)
+    if stride != 1:
+        s["stride"] = stride
+    return s
+
+def shape_specs(specs): return [conv_shape(*spec) for spec in specs]
+
+def conv2d_b1_shape(in_c, in_h, in_w, out_c, kh, kw, groups=1):
+    return conv_shape(f"conv2d_b1_c{in_c}_h{in_h}_w{in_w}_oc{out_c}_wic{in_c // groups}_k{kh}x{kw}_g{groups}", 1, in_c, in_h, in_w, out_c, kh, kw, groups)
+
+def conv2d_b1_shapes(specs): return [conv2d_b1_shape(*spec) for spec in specs]
+
+def conv1d_shape(name, batch, in_c, kw, groups=1): return conv_shape(name, batch, in_c, 1, 11, 6, 1, kw, groups)
+
+def grouped_spatial_shape(in_c, out_c, groups): return conv2d_b1_shape(in_c, 5, 5, out_c, 3, 3, groups)
+
+def test_ops_conv2d_shape(name, in_c, kh, kw, groups=1): return conv_shape(name, 1, in_c, 5, 7, 6, kh, kw, groups)
+
+def square_shape(in_c, hw, out_c, kh, kw, groups=1):
+    return conv_shape(f"b1_c{in_c}_h{hw}_w{hw}_oc{out_c}_wic{in_c // groups}_k{kh}x{kw}_g{groups}", 1, in_c, hw, hw, out_c, kh, kw, groups)
+
+def square_shapes(specs): return [square_shape(*spec) for spec in specs]
+
+def cc_shape(in_c, hw, out_c, kh, kw, groups=1):
+    return conv_shape(f"conv2d_cc_b1_c{in_c}_h{hw}_w{hw}_oc{out_c}_wic{in_c // groups}_k{kh}x{kw}_g{groups}", 1, in_c, hw, hw, out_c, kh, kw, groups)
+
+def cc_shapes(specs): return [cc_shape(*spec) for spec in specs]
+
+def pvalid_shape(in_c, hw, out_c, kh, kw, groups=1):
+    return conv_shape(f"b1_c{in_c}_h{hw}_w{hw}_oc{out_c}_wic{in_c // groups}_k{kh}x{kw}_g{groups}_s1_pvalid", 1, in_c, hw, hw, out_c, kh, kw, groups)
+
+def pvalid_shapes(specs): return [pvalid_shape(*spec) for spec in specs]
+def pvalid_pointwise_shapes(in_c, hw, out_channels): return [pvalid_shape(in_c, hw, out_c, 1, 1) for out_c in out_channels]
+def pvalid_pointwise_clusters(specs): return [pvalid_shape(in_c, hw, out_c, 1, 1) for in_c, hw, out_channels in specs for out_c in out_channels]
 
 def conv_shapes():
     return [
         # -- 1x1 kernels (fully supported via NHWC mode + channel slicing for ic>=5) --
-        dict(name="conv2d_1x6_1x1_4x4",                batch=1, in_c=1,  in_h=4,  in_w=4,  out_c=6, kh=1, kw=1, groups=1),
-        dict(name="conv2d_3x3_1x1_4x4",                batch=1, in_c=3,  in_h=4,  in_w=4,  out_c=3, kh=1, kw=1, groups=1),
-        dict(name="conv2d_4x2_1x1_4x4",                batch=1, in_c=4,  in_h=4,  in_w=4,  out_c=2, kh=1, kw=1, groups=1),
-        dict(name="conv2d_b1_c4_h9_w9_oc4_wic4_k1x1_g1",  batch=1, in_c=4,  in_h=9,  in_w=9,  out_c=4, kh=1, kw=1, groups=1),
-        dict(name="conv2d_b1_c3_h52_w52_oc6_wic3_k1x1_g1", batch=1, in_c=3,  in_h=52, in_w=52, out_c=6, kh=1, kw=1, groups=1),
-        dict(name="conv2d_b1_c96_h56_w56_oc24_wic96_k1x1_g1", batch=1, in_c=96, in_h=56, in_w=56, out_c=24, kh=1, kw=1, groups=1),
-        dict(name="conv2d_b1_c144_h56_w56_oc24_wic144_k1x1_g1", batch=1, in_c=144, in_h=56, in_w=56, out_c=24, kh=1, kw=1, groups=1),
-        dict(name="conv2d_b1_c144_h28_w28_oc32_wic144_k1x1_g1", batch=1, in_c=144, in_h=28, in_w=28, out_c=32, kh=1, kw=1, groups=1),
-        dict(name="conv2d_b1_c192_h28_w28_oc32_wic192_k1x1_g1", batch=1, in_c=192, in_h=28, in_w=28, out_c=32, kh=1, kw=1, groups=1),
-        dict(name="conv2d_b1_c192_h28_w28_oc16_wic192_k1x1_g1", batch=1, in_c=192, in_h=28, in_w=28, out_c=16, kh=1, kw=1, groups=1),
-        dict(name="conv2d_b1_c256_h28_w28_oc32_wic256_k1x1_g1", batch=1, in_c=256, in_h=28, in_w=28, out_c=32, kh=1, kw=1, groups=1),
-        dict(name="conv2d_16x16_1x1_8x8",              batch=1, in_c=16, in_h=8,  in_w=8,  out_c=16, kh=1, kw=1, groups=1),
-        dict(name="conv2d_b1_c16_h32_w32_oc16_wic16_k1x1_g1", batch=1, in_c=16, in_h=32, in_w=32, out_c=16, kh=1, kw=1, groups=1),
+        *shape_specs((
+            ("conv2d_1x6_1x1_4x4", 1, 1, 4, 4, 6, 1, 1, 1),
+            ("conv2d_3x3_1x1_4x4", 1, 3, 4, 4, 3, 1, 1, 1),
+            ("conv2d_4x2_1x1_4x4", 1, 4, 4, 4, 2, 1, 1, 1),
+        )),
+        *conv2d_b1_shapes((
+            (4, 9, 9, 4, 1, 1),
+            (3, 52, 52, 6, 1, 1),
+            (96, 56, 56, 24, 1, 1),
+            (144, 56, 56, 24, 1, 1),
+            (144, 28, 28, 32, 1, 1),
+            (192, 28, 28, 32, 1, 1),
+            (192, 28, 28, 16, 1, 1),
+            (256, 28, 28, 32, 1, 1),
+        )),
+        conv_shape("conv2d_16x16_1x1_8x8", 1, 16, 8, 8, 16, 1, 1, 1),
+        conv2d_b1_shape(16, 32, 32, 16, 1, 1),
 
         # -- Non-1x1 kernels (partial output -- known NPU hardware limitation) --
-        dict(name="conv2d_b1_c4_h9_w9_oc4_wic4_k3x3_g1",  batch=1, in_c=4,  in_h=9,  in_w=9,  out_c=4, kh=3, kw=3, groups=1),
-        dict(name="conv2d_b1_c16_h18_w18_oc16_wic16_k3x3_g1", batch=1, in_c=16, in_h=18, in_w=18, out_c=16, kh=3, kw=3, groups=1),
-        dict(name="conv2d_b2_c4_h9_w9_oc4_wic4_k3x3_g1",  batch=2, in_c=4,  in_h=9,  in_w=9,  out_c=4, kh=3, kw=3, groups=1),
-        dict(name="conv2d_b1_c1_h5_w7_oc6_wic1_k3x3_g1",  batch=1, in_c=1,  in_h=5,  in_w=7,  out_c=6, kh=3, kw=3, groups=1),
+        *conv2d_b1_shapes((
+            (4, 9, 9, 4, 3, 3),
+            (16, 18, 18, 16, 3, 3),
+            (1, 5, 7, 6, 3, 3),
+        )),
+        conv_shape("conv2d_b2_c4_h9_w9_oc4_wic4_k3x3_g1", 2, 4, 9, 9, 4, 3, 3, 1),
 
         # Depthwise
-        dict(name="conv2d_b1_c3_h11_w28_oc3_wic1_k3x3_g3", batch=1, in_c=3, in_h=11, in_w=28, out_c=3, kh=3, kw=3, groups=3),
+        conv2d_b1_shape(3, 11, 28, 3, 3, 3, 3),
 
         # Non-square kernels
-        dict(name="conv2d_3x6_1x3_5x5", batch=1, in_c=3, in_h=5, in_w=5, out_c=6, kh=1, kw=3, groups=1),
+        conv_shape("conv2d_3x6_1x3_5x5", 1, 3, 5, 5, 6, 1, 3, 1),
 
         # -- test_ops.py _test_conv2d(cin=3): (3,5,7) @ (6,kh,kw) --
-        dict(name="conv2d_b1_c3_h5_w7_oc6_wic1_k3x3_g3", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, kh=3, kw=3, groups=3),
-        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k2x1_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, kh=2, kw=1, groups=1),
-        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k2x3_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, kh=2, kw=3, groups=1),
-        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k2x5_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, kh=2, kw=5, groups=1),
-        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k3x1_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, kh=3, kw=1, groups=1),
-        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k3x3_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, kh=3, kw=3, groups=1),
-        dict(name="conv2d_b1_c3_h5_w7_oc6_wic3_k3x5_g1", batch=1, in_c=3, in_h=5, in_w=7, out_c=6, kh=3, kw=5, groups=1),
+        conv2d_b1_shape(3, 5, 7, 6, 3, 3, 3),
+        *[test_ops_conv2d_shape(f"conv2d_b1_c3_h5_w7_oc6_wic3_k{kh}x{kw}_g1", 3, kh, kw)
+          for kh in (2, 3) for kw in (1, 3, 5)],
 
         # -- test_ops.py _test_conv2d(cin=1): (1,5,7) @ (6,kh,kw) --
-        dict(name="conv2d_1x6_2x1_5x7", batch=1, in_c=1, in_h=5, in_w=7, out_c=6, kh=2, kw=1, groups=1),
-        dict(name="conv2d_1x6_2x3_5x7", batch=1, in_c=1, in_h=5, in_w=7, out_c=6, kh=2, kw=3, groups=1),
-        dict(name="conv2d_1x6_3x1_5x7_b", batch=1, in_c=1, in_h=5, in_w=7, out_c=6, kh=3, kw=1, groups=1),
-        dict(name="conv2d_1x6_3x5_5x7",   batch=1, in_c=1, in_h=5, in_w=7, out_c=6, kh=3, kw=5, groups=1),
+        *[test_ops_conv2d_shape(name, 1, kh, kw)
+          for name, kh, kw in (
+              ("conv2d_1x6_2x1_5x7", 2, 1),
+              ("conv2d_1x6_2x3_5x7", 2, 3),
+              ("conv2d_1x6_3x1_5x7_b", 3, 1),
+              ("conv2d_1x6_3x5_5x7", 3, 5),
+          )],
 
         # -- Grouped convs from test_ops.py --
-        dict(name="conv2d_b1_c4_h1_w1_oc2_wic2_k1x1_g2",     batch=1,  in_c=4,  in_h=1,  in_w=1,  out_c=2,  kh=1, kw=1, groups=2),
-        dict(name="conv2d_4x4_1x1_1x1_g2",                   batch=1,  in_c=4,  in_h=1,  in_w=1,  out_c=4,  kh=1, kw=1, groups=2),
-        dict(name="conv2d_b1_c32_h32_w32_oc32_wic1_k1x1_g32", batch=1, in_c=32, in_h=32, in_w=32, out_c=32,  kh=1, kw=1, groups=32),
-        dict(name="conv2d_b1_c15_h5_w5_oc35_wic3_k3x3_g5",   batch=1,  in_c=15, in_h=5,  in_w=5,  out_c=35,  kh=3, kw=3, groups=5),
+        *shape_specs((
+            ("conv2d_b1_c4_h1_w1_oc2_wic2_k1x1_g2", 1, 4, 1, 1, 2, 1, 1, 2),
+            ("conv2d_4x4_1x1_1x1_g2", 1, 4, 1, 1, 4, 1, 1, 2),
+        )),
+        conv2d_b1_shape(32, 32, 32, 32, 1, 1, 32),
+        conv2d_b1_shape(15, 5, 5, 35, 3, 3, 5),
 
         # -- Batch >1 coverage --
-        dict(name="conv2d_b2_c3_h11_w28_oc3_wic1_k3x3_g3", batch=2, in_c=3,  in_h=11, in_w=28, out_c=3, kh=3, kw=3, groups=3),
-        dict(name="conv2d_b4_c15_h5_w5_oc35_wic3_k3x3_g5", batch=4, in_c=15, in_h=5,  in_w=5,  out_c=35, kh=3, kw=3, groups=5),
+        *shape_specs((
+            ("conv2d_b2_c3_h11_w28_oc3_wic1_k3x3_g3", 2, 3, 11, 28, 3, 3, 3, 3),
+            ("conv2d_b4_c15_h5_w5_oc35_wic3_k3x3_g5", 4, 15, 5, 5, 35, 3, 3, 5),
+        )),
 
         # -- Grouped output-channel variants --
-        dict(name="conv2d_b1_c4_h5_w5_oc4_wic2_k3x3_g2",   batch=1, in_c=4,  in_h=5, in_w=5, out_c=4, kh=3, kw=3, groups=2),
-        dict(name="conv2d_b1_c4_h5_w5_oc8_wic2_k3x3_g2",   batch=1, in_c=4,  in_h=5, in_w=5, out_c=8, kh=3, kw=3, groups=2),
-        dict(name="conv2d_b1_c4_h5_w5_oc12_wic2_k3x3_g2",  batch=1, in_c=4,  in_h=5, in_w=5, out_c=12, kh=3, kw=3, groups=2),
-        dict(name="conv2d_b1_c6_h5_w5_oc6_wic2_k3x3_g3",   batch=1, in_c=6,  in_h=5, in_w=5, out_c=6, kh=3, kw=3, groups=3),
-        dict(name="conv2d_b1_c6_h5_w5_oc12_wic2_k3x3_g3",  batch=1, in_c=6,  in_h=5, in_w=5, out_c=12, kh=3, kw=3, groups=3),
-        dict(name="conv2d_b1_c6_h5_w5_oc18_wic2_k3x3_g3",  batch=1, in_c=6,  in_h=5, in_w=5, out_c=18, kh=3, kw=3, groups=3),
-        dict(name="conv2d_b1_c15_h5_w5_oc20_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=20, kh=3, kw=3, groups=5),
-        dict(name="conv2d_b1_c15_h5_w5_oc25_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=25, kh=3, kw=3, groups=5),
-        dict(name="conv2d_b1_c15_h5_w5_oc30_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=30, kh=3, kw=3, groups=5),
-        dict(name="conv2d_b1_c15_h5_w5_oc40_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=40, kh=3, kw=3, groups=5),
-        dict(name="conv2d_2x2_1x1_4x4",  batch=1, in_c=2, in_h=4, in_w=4, out_c=2, kh=1, kw=1, groups=1),
-        dict(name="conv2d_8x8_1x1_5x5",       batch=1, in_c=8,  in_h=5,  in_w=5,  out_c=8,  kh=1, kw=1, groups=1),
-        dict(name="conv2d_10x20_3x3_9x9",     batch=1, in_c=10, in_h=9,  in_w=9,  out_c=20, kh=3, kw=3, groups=1),
-        dict(name="conv2d_16x16_3x3_9x9",     batch=1, in_c=16, in_h=9,  in_w=9,  out_c=16, kh=3, kw=3, groups=1),
-        dict(name="conv2d_2x4_3x3_6x6",       batch=1, in_c=2,  in_h=6,  in_w=6,  out_c=4,  kh=3, kw=3, groups=1),
-        dict(name="conv2d_2x4_2x2_5x5",       batch=1, in_c=2,  in_h=5,  in_w=5,  out_c=4,  kh=2, kw=2, groups=1),
-        dict(name="conv2d_1x32_5x5_10x10",    batch=1, in_c=1,  in_h=10, in_w=10, out_c=32,  kh=5, kw=5, groups=1),
-        dict(name="conv2d_8x4_4x4_10x10",     batch=1, in_c=8,  in_h=10, in_w=10, out_c=4,  kh=4, kw=4, groups=1),
+        *[grouped_spatial_shape(in_c, out_c, groups)
+          for in_c, groups, out_channels in (
+              (4, 2, (4, 8, 12)),
+              (6, 3, (6, 12, 18)),
+              (15, 5, (20, 25, 30, 40)),
+          )
+          for out_c in out_channels],
+        *shape_specs((
+            ("conv2d_2x2_1x1_4x4", 1, 2, 4, 4, 2, 1, 1, 1),
+            ("conv2d_8x8_1x1_5x5", 1, 8, 5, 5, 8, 1, 1, 1),
+            ("conv2d_10x20_3x3_9x9", 1, 10, 9, 9, 20, 3, 3, 1),
+            ("conv2d_16x16_3x3_9x9", 1, 16, 9, 9, 16, 3, 3, 1),
+            ("conv2d_2x4_3x3_6x6", 1, 2, 6, 6, 4, 3, 3, 1),
+            ("conv2d_2x4_2x2_5x5", 1, 2, 5, 5, 4, 2, 2, 1),
+            ("conv2d_1x32_5x5_10x10", 1, 1, 10, 10, 32, 5, 5, 1),
+            ("conv2d_8x4_4x4_10x10", 1, 8, 10, 10, 4, 4, 4, 1),
+        )),
 
         # MobileNet layers
-        # first spatial conv (RGB->32ch)
-        dict(name="conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1", batch=1, in_c=3, in_h=224, in_w=224, out_c=32, kh=3, kw=3, groups=1),
-        #  depthwise conv (3x3 sep)
-        dict(name="conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32", batch=1, in_c=32, in_h=112, in_w=112, out_c=32, kh=3, kw=3, groups=32),
-        # pointwise (1x1 projection)
-        dict(name="conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1", batch=1, in_c=32, in_h=112, in_w=112, out_c=64, kh=1, kw=1, groups=1),
-        # depthwise conv (64ch)
-        dict(name="conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64", batch=1, in_c=64, in_h=112, in_w=112, out_c=64, kh=3, kw=3, groups=64),
-        # pointwise expansion
-        dict(name="conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1", batch=1, in_c=64, in_h=56, in_w=56, out_c=128, kh=1, kw=1, groups=1),
-        # depthwise conv (128ch)
-        dict(name="conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128", batch=1, in_c=128, in_h=56, in_w=56, out_c=128, kh=3, kw=3, groups=128),
-        # pointwise (1x1 projection, same-channel)
-        dict(name="conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1", batch=1, in_c=128, in_h=56, in_w=56, out_c=128, kh=1, kw=1, groups=1),
-        # Pointwise 128->256
-        dict(name="conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1", batch=1, in_c=128, in_h=28, in_w=28, out_c=256, kh=1, kw=1, groups=1),
-        # Depthwise 256x28
-        dict(name="conv2d_cc_b1_c256_h28_w28_oc256_wic1_k3x3_g256", batch=1, in_c=256, in_h=28, in_w=28, out_c=256, kh=3, kw=3, groups=256),
-        # Pointwise 256->256
-        dict(name="conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1", batch=1, in_c=256, in_h=28, in_w=28, out_c=256, kh=1, kw=1, groups=1),
-        # Pointwise 256->512
-        dict(name="conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1", batch=1, in_c=256, in_h=14, in_w=14, out_c=512, kh=1, kw=1, groups=1),
-        # Depthwise 512x14
-        dict(name="conv2d_cc_b1_c512_h14_w14_oc512_wic1_k3x3_g512", batch=1, in_c=512, in_h=14, in_w=14, out_c=512, kh=3, kw=3, groups=512),
-        # Pointwise 512->512
-        dict(name="conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1", batch=1, in_c=512, in_h=14, in_w=14, out_c=512, kh=1, kw=1, groups=1),
-        # 7x7 and classifier-head fixes
-        dict(name="conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1", batch=1, in_c=512, in_h=7, in_w=7, out_c=1024, kh=1, kw=1, groups=1),
-        dict(name="conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024", batch=1, in_c=1024, in_h=7, in_w=7, out_c=1024, kh=3, kw=3, groups=1024),
-        dict(name="conv2d_cc_b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1", batch=1, in_c=1024, in_h=7, in_w=7, out_c=1024, kh=1, kw=1, groups=1),
-        dict(name="conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024", batch=1, in_c=1024, in_h=7, in_w=7, out_c=1024, kh=7, kw=7, groups=1024),
-        dict(name="conv2d_cc_b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1", batch=1, in_c=1024, in_h=1, in_w=1, out_c=1001, kh=1, kw=1, groups=1),
+        *cc_shapes((
+            (3, 224, 32, 3, 3),          # first spatial conv (RGB->32ch)
+            (32, 112, 32, 3, 3, 32),     #  depthwise conv (3x3 sep)
+            (32, 112, 64, 1, 1),         # pointwise (1x1 projection)
+            (64, 112, 64, 3, 3, 64),     # depthwise conv (64ch)
+            (64, 56, 128, 1, 1),         # pointwise expansion
+            (128, 56, 128, 3, 3, 128),   # depthwise conv (128ch)
+            (128, 56, 128, 1, 1),        # pointwise (1x1 projection, same-channel)
+            (128, 28, 256, 1, 1),        # Pointwise 128->256
+            (256, 28, 256, 3, 3, 256),   # Depthwise 256x28
+            (256, 28, 256, 1, 1),        # Pointwise 256->256
+            (256, 14, 512, 1, 1),        # Pointwise 256->512
+            (512, 14, 512, 3, 3, 512),   # Depthwise 512x14
+            (512, 14, 512, 1, 1),        # Pointwise 512->512
+            # 7x7 and classifier-head fixes
+            (512, 7, 1024, 1, 1),
+            (1024, 7, 1024, 3, 3, 1024),
+            (1024, 7, 1024, 1, 1),
+            (1024, 7, 1024, 7, 7, 1024),
+            (1024, 1, 1001, 1, 1),
+        )),
 
         # conv1d expressed as conv2d: input H=1, W=input_size; kernel H=1, W=kernel_size.
-        dict(name="conv1d_bs1_as_conv2d", batch=1, in_c=1, in_h=1, in_w=11, out_c=6, kh=1, kw=1, groups=1),
-        dict(name="conv1d_bs8_as_conv2d", batch=8, in_c=1, in_h=1, in_w=11, out_c=6, kh=1, kw=1, groups=1),
-        dict(name="conv1d_bs1_612_as_conv2d", batch=1, in_c=1, in_h=1, in_w=11, out_c=6, kh=1, kw=2, groups=1),
-        dict(name="conv1d_bs1_615_as_conv2d", batch=1, in_c=1, in_h=1, in_w=11, out_c=6, kh=1, kw=5, groups=1),
-        dict(name="conv1d_bs1_1311_631_as_conv2d", batch=1, in_c=3, in_h=1, in_w=11, out_c=6, kh=1, kw=1, groups=1),
-        dict(name="conv1d_bs1_1311_632_as_conv2d", batch=1, in_c=3, in_h=1, in_w=11, out_c=6, kh=1, kw=2, groups=1),
-        dict(name="conv1d_bs1_1311_635_as_conv2d", batch=1, in_c=3, in_h=1, in_w=11, out_c=6, kh=1, kw=5, groups=1),
-        dict(name="conv1d_bs1_1311_615_g3_as_conv2d", batch=1, in_c=3, in_h=1, in_w=11, out_c=6, kh=1, kw=5, groups=3),
-        dict(name="conv1d_bs8_8111_611_as_conv2d", batch=8, in_c=1, in_h=1, in_w=11, out_c=6, kh=1, kw=1, groups=1),
-        dict(name="conv1d_bs8_8111_612_a_as_conv2d", batch=8, in_c=1, in_h=1, in_w=11, out_c=6, kh=1, kw=2, groups=1),
-        dict(name="conv1d_bs8_8111_612_b_as_conv2d", batch=8, in_c=1, in_h=1, in_w=11, out_c=6, kh=1, kw=2, groups=1),
-        dict(name="conv1d_bs8_8111_615_as_conv2d", batch=8, in_c=1, in_h=1, in_w=11, out_c=6, kh=1, kw=5, groups=1),
-        dict(name="conv1d_bs8_8311_631_as_conv2d", batch=8, in_c=3, in_h=1, in_w=11, out_c=6, kh=1, kw=1, groups=1),
-        dict(name="conv1d_bs8_8311_632_as_conv2d", batch=8, in_c=3, in_h=1, in_w=11, out_c=6, kh=1, kw=2, groups=1),
-        dict(name="conv1d_bs8_8311_635_a_as_conv2d", batch=8, in_c=3, in_h=1, in_w=11, out_c=6, kh=1, kw=5, groups=1),
-        dict(name="conv1d_bs8_8311_635_g3_as_conv2d", batch=8, in_c=3, in_h=1, in_w=11, out_c=6, kh=1, kw=5, groups=3),
+        *[conv1d_shape(name, batch, in_c, kw, groups)
+          for name, batch, in_c, kw, groups in (
+              ("conv1d_bs1_as_conv2d", 1, 1, 1, 1),
+              ("conv1d_bs8_as_conv2d", 8, 1, 1, 1),
+              ("conv1d_bs1_612_as_conv2d", 1, 1, 2, 1),
+              ("conv1d_bs1_615_as_conv2d", 1, 1, 5, 1),
+              ("conv1d_bs1_1311_631_as_conv2d", 1, 3, 1, 1),
+              ("conv1d_bs1_1311_632_as_conv2d", 1, 3, 2, 1),
+              ("conv1d_bs1_1311_635_as_conv2d", 1, 3, 5, 1),
+              ("conv1d_bs1_1311_615_g3_as_conv2d", 1, 3, 5, 3),
+              ("conv1d_bs8_8111_611_as_conv2d", 8, 1, 1, 1),
+              ("conv1d_bs8_8111_612_a_as_conv2d", 8, 1, 2, 1),
+              ("conv1d_bs8_8111_612_b_as_conv2d", 8, 1, 2, 1),
+              ("conv1d_bs8_8111_615_as_conv2d", 8, 1, 5, 1),
+              ("conv1d_bs8_8311_631_as_conv2d", 8, 3, 1, 1),
+              ("conv1d_bs8_8311_632_as_conv2d", 8, 3, 2, 1),
+              ("conv1d_bs8_8311_635_a_as_conv2d", 8, 3, 5, 1),
+              ("conv1d_bs8_8311_635_g3_as_conv2d", 8, 3, 5, 3),
+          )],
 
         # -- Large spatial 1x1 conv where IC=3, OC=6 (fixed; promoted above) --
-        dict(name="1x3_54x54_k1",  batch=1, in_c=3, in_h=54, in_w=54, out_c=6, kh=1, kw=1, groups=1),
-        dict(name="1x3_56x56_k1",  batch=1, in_c=3, in_h=56, in_w=56, out_c=6, kh=1, kw=1, groups=1),
-        dict(name="1x3_58x58_k1",  batch=1, in_c=3, in_h=58, in_w=58, out_c=6, kh=1, kw=1, groups=1),
-        dict(name="1x3_60x60_k1",  batch=1, in_c=3, in_h=60, in_w=60, out_c=6, kh=1, kw=1, groups=1),
-        dict(name="1x3_62x62_k1",  batch=1, in_c=3, in_h=62, in_w=62, out_c=6, kh=1, kw=1, groups=1),
-        dict(name="1x3_64x64_k1",  batch=1, in_c=3, in_h=64, in_w=64, out_c=6, kh=1, kw=1, groups=1),
-        dict(name="1x3_66x66_k1",  batch=1, in_c=3, in_h=66, in_w=66, out_c=6, kh=1, kw=1, groups=1),
-        dict(name="1x3_68x68_k1",  batch=1, in_c=3, in_h=68, in_w=68, out_c=6, kh=1, kw=1, groups=1),
-        dict(name="1x3_70x70_k1",  batch=1, in_c=3, in_h=70, in_w=70, out_c=6, kh=1, kw=1, groups=1),
-        dict(name="1x3_72x72_k1",  batch=1, in_c=3, in_h=72, in_w=72, out_c=6, kh=1, kw=1, groups=1),
+        *[conv_shape(f"1x3_{hw}x{hw}_k1", 1, 3, hw, hw, 6, 1, 1, 1)
+          for hw in range(54, 74, 2)],
 
         # -- 1x1 conv large input channel >> output channel (wrong numerical result) --
         # From mobilenetv2 depthwise expand/project layers
@@ -1801,129 +2415,136 @@ def conv_shapes():
         # fixed/promoted above: b1_c192_h28_w28_oc32_wic192_k1x1_g1
         # fixed/promoted above: b1_c192_h28_w28_oc16_wic192_k1x1_g1
         # fixed/promoted above: b1_c256_h28_w28_oc32_wic256_k1x1_g1
-        dict(name="b1_c256_h14_w14_oc512_wic256_k1x1_g1",  batch=1, in_c=256, in_h=14,  in_w=14,  out_c=512, kh=1, kw=1, groups=1),
-        dict(name="b1_c384_h14_w14_oc96_wic384_k1x1_g1",   batch=1, in_c=384, in_h=14,  in_w=14,  out_c=96, kh=1, kw=1, groups=1),
-        dict(name="b1_c480_h14_w14_oc96_wic480_k1x1_g1",   batch=1, in_c=480, in_h=14,  in_w=14,  out_c=96, kh=1, kw=1, groups=1),
-        dict(name="b1_c480_h14_w14_oc16_wic480_k1x1_g1",   batch=1, in_c=480, in_h=14,  in_w=14,  out_c=16, kh=1, kw=1, groups=1),
-        dict(name="b1_c512_h14_w14_oc112_wic512_k1x1_g1",  batch=1, in_c=512, in_h=14,  in_w=14,  out_c=112, kh=1, kw=1, groups=1),
-        dict(name="b1_c512_h14_w14_oc24_wic512_k1x1_g1",   batch=1, in_c=512, in_h=14,  in_w=14,  out_c=24, kh=1, kw=1, groups=1),
-        dict(name="b1_c512_h14_w14_oc32_wic512_k1x1_g1",   batch=1, in_c=512, in_h=14,  in_w=14,  out_c=32, kh=1, kw=1, groups=1),
-        dict(name="b1_c512_h14_w14_oc512_wic512_k1x1_g1",  batch=1, in_c=512, in_h=14,  in_w=14,  out_c=512, kh=1, kw=1, groups=1),
-        dict(name="b1_c512_h7_w7_oc1024_wic512_k1x1_g1",   batch=1, in_c=512, in_h=7,   in_w=7,   out_c=1024, kh=1, kw=1, groups=1),
-        dict(name="b1_c528_h14_w14_oc256_wic528_k1x1_g1",  batch=1, in_c=528, in_h=14,  in_w=14,  out_c=256, kh=1, kw=1, groups=1),
-        dict(name="b1_c528_h14_w14_oc160_wic528_k1x1_g1",  batch=1, in_c=528, in_h=14,  in_w=14,  out_c=160, kh=1, kw=1, groups=1),
-        dict(name="b1_c528_h14_w14_oc32_wic528_k1x1_g1",   batch=1, in_c=528, in_h=14,  in_w=14,  out_c=32, kh=1, kw=1, groups=1),
-        dict(name="b1_c528_h14_w14_oc128_wic528_k1x1_g1",  batch=1, in_c=528, in_h=14,  in_w=14,  out_c=128, kh=1, kw=1, groups=1),
-        dict(name="b1_c576_h14_w14_oc96_wic576_k1x1_g1",   batch=1, in_c=576, in_h=14,  in_w=14,  out_c=96, kh=1, kw=1, groups=1),
-        dict(name="b1_c832_h7_w7_oc48_wic832_k1x1_g1",     batch=1, in_c=832, in_h=7,   in_w=7,   out_c=48, kh=1, kw=1, groups=1),
-        dict(name="b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1", batch=1, in_c=1024, in_h=7,  in_w=7,   out_c=1024, kh=1, kw=1, groups=1),
-        dict(name="b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1", batch=1, in_c=1024, in_h=1,  in_w=1,   out_c=1001, kh=1, kw=1, groups=1),
-        dict(name="b1_c1280_h10_w10_oc24_wic1280_k1x1_g1", batch=1, in_c=1280, in_h=10, in_w=10,  out_c=24, kh=1, kw=1, groups=1),
-        dict(name="b1_c1280_h10_w10_oc546_wic1280_k1x1_g1", batch=1, in_c=1280, in_h=10, in_w=10, out_c=546, kh=1, kw=1, groups=1),
+        *square_shapes((
+            (256, 14, 512, 1, 1),
+            (384, 14, 96, 1, 1),
+            (480, 14, 96, 1, 1),
+            (480, 14, 16, 1, 1),
+            (512, 14, 112, 1, 1),
+            (512, 14, 24, 1, 1),
+            (512, 14, 32, 1, 1),
+            (512, 14, 512, 1, 1),
+            (512, 7, 1024, 1, 1),
+            (528, 14, 256, 1, 1),
+            (528, 14, 160, 1, 1),
+            (528, 14, 32, 1, 1),
+            (528, 14, 128, 1, 1),
+            (576, 14, 96, 1, 1),
+            (832, 7, 48, 1, 1),
+            (1024, 7, 1024, 1, 1),
+            (1024, 1, 1001, 1, 1),
+            (1280, 10, 24, 1, 1),
+            (1280, 10, 546, 1, 1),
+            (32, 112, 32, 3, 3, 32),
+            (64, 112, 64, 3, 3, 64),
+            (128, 56, 128, 3, 3, 128),
+            (256, 28, 256, 3, 3, 256),
+            (512, 14, 512, 3, 3, 512),
+            (1024, 7, 1024, 3, 3, 1024),
+            (1024, 7, 1024, 7, 7, 1024),
+            (32, 112, 16, 1, 1),
+            (32, 112, 64, 1, 1),
+            (64, 56, 128, 1, 1),
+            (128, 56, 128, 1, 1),
+            (128, 28, 256, 1, 1),
+            (256, 28, 256, 1, 1),
+            (3, 224, 32, 3, 3),
+        )),
 
-        dict(name="b1_c32_h112_w112_oc32_wic1_k3x3_g32",   batch=1, in_c=32,  in_h=112, in_w=112, out_c=32,  kh=3, kw=3, groups=32),
-        dict(name="b1_c64_h112_w112_oc64_wic1_k3x3_g64",   batch=1, in_c=64,  in_h=112, in_w=112, out_c=64,  kh=3, kw=3, groups=64),
-        dict(name="b1_c128_h56_w56_oc128_wic1_k3x3_g128",  batch=1, in_c=128, in_h=56,  in_w=56,  out_c=128,  kh=3, kw=3, groups=128),
-        dict(name="b1_c256_h28_w28_oc256_wic1_k3x3_g256",  batch=1, in_c=256, in_h=28,  in_w=28,  out_c=256,  kh=3, kw=3, groups=256),
-        dict(name="b1_c512_h14_w14_oc512_wic1_k3x3_g512",  batch=1, in_c=512, in_h=14,  in_w=14,  out_c=512,  kh=3, kw=3, groups=512),
-        dict(name="b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024", batch=1, in_c=1024, in_h=7,  in_w=7,   out_c=1024,  kh=3, kw=3, groups=1024),
-        dict(name="b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024", batch=1, in_c=1024, in_h=7,  in_w=7,   out_c=1024,  kh=7, kw=7, groups=1024),
-
-        dict(name="b1_c32_h112_w112_oc16_wic32_k1x1_g1",   batch=1, in_c=32,  in_h=112, in_w=112, out_c=16,  kh=1, kw=1, groups=1),
-        dict(name="b1_c32_h112_w112_oc64_wic32_k1x1_g1",   batch=1, in_c=32,  in_h=112, in_w=112, out_c=64,  kh=1, kw=1, groups=1),
-        dict(name="b1_c64_h56_w56_oc128_wic64_k1x1_g1",    batch=1, in_c=64,  in_h=56,  in_w=56,  out_c=128,  kh=1, kw=1, groups=1),
-        dict(name="b1_c128_h56_w56_oc128_wic128_k1x1_g1",  batch=1, in_c=128, in_h=56,  in_w=56,  out_c=128, kh=1, kw=1, groups=1),
-        dict(name="b1_c128_h28_w28_oc256_wic128_k1x1_g1",  batch=1, in_c=128, in_h=28,  in_w=28,  out_c=256, kh=1, kw=1, groups=1),
-        dict(name="b1_c256_h28_w28_oc256_wic256_k1x1_g1",  batch=1, in_c=256, in_h=28,  in_w=28,  out_c=256, kh=1, kw=1, groups=1),
-        dict(name="b1_c3_h224_w224_oc32_wic3_k3x3_g1",     batch=1, in_c=3,   in_h=224, in_w=224, out_c=32,   kh=3, kw=3, groups=1),
-
-        dict(name="b1_c96_h112_w112_oc96_wic1_k3x3_g96_s1_pvalid", batch=1, in_c=96, in_h=112, in_w=112, out_c=96, kh=3, kw=3, groups=96),
-        dict(name="b1_c144_h56_w56_oc144_wic1_k3x3_g144_s1_pvalid", batch=1, in_c=144, in_h=56, in_w=56, out_c=144, kh=3, kw=3, groups=144),
-        dict(name="b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid", batch=1, in_c=192, in_h=28, in_w=28, out_c=96, kh=1, kw=1, groups=1),
-        dict(name="b1_c32_h14_w14_oc64_wic32_k3x3_g1_s1_pvalid", batch=1, in_c=32, in_h=14, in_w=14, out_c=64, kh=3, kw=3, groups=1),
-        dict(name="b1_c528_h14_w14_oc256_wic528_k1x1_g1_s1_pvalid", batch=1, in_c=528, in_h=14, in_w=14, out_c=256, kh=1, kw=1, groups=1),
-        dict(name="b1_c528_h14_w14_oc160_wic528_k1x1_g1_s1_pvalid", batch=1, in_c=528, in_h=14, in_w=14, out_c=160, kh=1, kw=1, groups=1),
-        dict(name="b1_c160_h14_w14_oc320_wic160_k3x3_g1_s1_pvalid", batch=1, in_c=160, in_h=14, in_w=14, out_c=320, kh=3, kw=3, groups=1),
-        dict(name="b1_c160_h40_w40_oc320_wic160_k3x3_g1_s1_pvalid", batch=1, in_c=160, in_h=40, in_w=40, out_c=320, kh=3, kw=3, groups=1),
-        dict(name="b1_c528_h14_w14_oc32_wic528_k1x1_g1_s1_pvalid", batch=1, in_c=528, in_h=14, in_w=14, out_c=32, kh=1, kw=1, groups=1),
-        dict(name="b1_c32_h14_w14_oc128_wic32_k3x3_g1_s1_pvalid", batch=1, in_c=32, in_h=14, in_w=14, out_c=128, kh=3, kw=3, groups=1),
-        dict(name="b1_c528_h14_w14_oc128_wic528_k1x1_g1_s1_pvalid", batch=1, in_c=528, in_h=14, in_w=14, out_c=128, kh=1, kw=1, groups=1),
-        dict(name="b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid", batch=1, in_c=160, in_h=7, in_w=7, out_c=320, kh=3, kw=3, groups=1),
-        dict(name="b1_c32_h7_w7_oc128_wic32_k3x3_g1_s1_pvalid", batch=1, in_c=32, in_h=7, in_w=7, out_c=128, kh=3, kw=3, groups=1),
-        dict(name="b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid", batch=1, in_c=192, in_h=7, in_w=7, out_c=384, kh=3, kw=3, groups=1),
-        dict(name="b1_c832_h7_w7_oc48_wic832_k1x1_g1_s1_pvalid", batch=1, in_c=832, in_h=7, in_w=7, out_c=48, kh=1, kw=1, groups=1),
-        dict(name="b1_c32_h150_w150_oc32_wic1_k3x3_g32_s1_pvalid", batch=1, in_c=32, in_h=150, in_w=150, out_c=32, kh=3, kw=3, groups=32),
-        dict(name="b1_c32_h150_w150_oc16_wic32_k1x1_g1_s1_pvalid", batch=1, in_c=32, in_h=150, in_w=150, out_c=16, kh=1, kw=1, groups=1),
-        dict(name="b1_c16_h150_w150_oc96_wic16_k1x1_g1_s1_pvalid", batch=1, in_c=16, in_h=150, in_w=150, out_c=96, kh=1, kw=1, groups=1),
-        dict(name="b1_c96_h150_w150_oc96_wic1_k3x3_g96_s1_pvalid", batch=1, in_c=96, in_h=150, in_w=150, out_c=96, kh=3, kw=3, groups=96),
-        dict(name="b1_c96_h75_w75_oc24_wic96_k1x1_g1_s1_pvalid", batch=1, in_c=96, in_h=75, in_w=75, out_c=24, kh=1, kw=1, groups=1),
-        dict(name="b1_c144_h75_w75_oc144_wic1_k3x3_g144_s1_pvalid", batch=1, in_c=144, in_h=75, in_w=75, out_c=144, kh=3, kw=3, groups=144),
-        dict(name="b1_c144_h75_w75_oc24_wic144_k1x1_g1_s1_pvalid", batch=1, in_c=144, in_h=75, in_w=75, out_c=24, kh=1, kw=1, groups=1),
-        dict(name="b1_c144_h38_w38_oc32_wic144_k1x1_g1_s1_pvalid", batch=1, in_c=144, in_h=38, in_w=38, out_c=32, kh=1, kw=1, groups=1),
-        dict(name="b1_c192_h38_w38_oc192_wic1_k3x3_g192_s1_pvalid", batch=1, in_c=192, in_h=38, in_w=38, out_c=192, kh=3, kw=3, groups=192),
-        dict(name="b1_c192_h38_w38_oc32_wic192_k1x1_g1_s1_pvalid", batch=1, in_c=192, in_h=38, in_w=38, out_c=32, kh=1, kw=1, groups=1),
-        dict(name="b1_c384_h19_w19_oc384_wic1_k3x3_g384_s1_pvalid", batch=1, in_c=384, in_h=19, in_w=19, out_c=384, kh=3, kw=3, groups=384),
-        dict(name="b1_c384_h19_w19_oc64_wic384_k1x1_g1_s1_pvalid", batch=1, in_c=384, in_h=19, in_w=19, out_c=64, kh=1, kw=1, groups=1),
-        dict(name="b1_c384_h19_w19_oc96_wic384_k1x1_g1_s1_pvalid", batch=1, in_c=384, in_h=19, in_w=19, out_c=96, kh=1, kw=1, groups=1),
-        dict(name="b1_c576_h19_w19_oc576_wic1_k3x3_g576_s1_pvalid", batch=1, in_c=576, in_h=19, in_w=19, out_c=576, kh=3, kw=3, groups=576),
-        dict(name="b1_c576_h19_w19_oc96_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=19, in_w=19, out_c=96, kh=1, kw=1, groups=1),
-        dict(name="b1_c576_h19_w19_oc12_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=19, in_w=19, out_c=12, kh=1, kw=1, groups=1),
-        dict(name="b1_c576_h19_w19_oc273_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=19, in_w=19, out_c=273, kh=1, kw=1, groups=1),
-        dict(name="b1_c960_h10_w10_oc960_wic1_k3x3_g960_s1_pvalid", batch=1, in_c=960, in_h=10, in_w=10, out_c=960, kh=3, kw=3, groups=960),
-        dict(name="b1_c1280_h10_w10_oc24_wic1280_k1x1_g1_s1_pvalid", batch=1, in_c=1280, in_h=10, in_w=10, out_c=24, kh=1, kw=1, groups=1),
-        dict(name="b1_c1280_h10_w10_oc546_wic1280_k1x1_g1_s1_pvalid", batch=1, in_c=1280, in_h=10, in_w=10, out_c=546, kh=1, kw=1, groups=1),
-        dict(name="b1_c256_h10_w10_oc512_wic256_k3x3_g1_s1_pvalid", batch=1, in_c=256, in_h=10, in_w=10, out_c=512, kh=3, kw=3, groups=1),
-        dict(name="b1_c128_h5_w5_oc256_wic128_k3x3_g1_s1_pvalid", batch=1, in_c=128, in_h=5, in_w=5, out_c=256, kh=3, kw=3, groups=1),
-        dict(name="b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=3, in_w=3, out_c=24, kh=1, kw=1, groups=1),
-        dict(name="b1_c256_h3_w3_oc546_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=3, in_w=3, out_c=546, kh=1, kw=1, groups=1),
-        dict(name="b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=3, in_w=3, out_c=128, kh=1, kw=1, groups=1),
-        dict(name="b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid", batch=1, in_c=128, in_h=3, in_w=3, out_c=256, kh=3, kw=3, groups=1),
-        dict(name="b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=2, in_w=2, out_c=24, kh=1, kw=1, groups=1),
-        dict(name="b1_c256_h2_w2_oc546_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=2, in_w=2, out_c=546, kh=1, kw=1, groups=1),
-        dict(name="b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid", batch=1, in_c=256, in_h=2, in_w=2, out_c=64, kh=1, kw=1, groups=1),
-        dict(name="b1_c128_h1_w1_oc24_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=1, in_w=1, out_c=24, kh=1, kw=1, groups=1),
-        dict(name="b1_c3_h320_w320_oc32_wic3_k3x3_g1_s1_pvalid", batch=1, in_c=3, in_h=320, in_w=320, out_c=32, kh=3, kw=3, groups=1),
-        dict(name="b1_c32_h160_w160_oc8_wic32_k1x1_g1_s1_pvalid", batch=1, in_c=32, in_h=160, in_w=160, out_c=8, kh=1, kw=1, groups=1),
-        dict(name="b1_c8_h160_w160_oc16_wic8_k3x3_g1_s1_pvalid", batch=1, in_c=8, in_h=160, in_w=160, out_c=16, kh=3, kw=3, groups=1),
-        dict(name="b1_c16_h160_w160_oc128_wic16_k3x3_g1_s1_pvalid", batch=1, in_c=16, in_h=160, in_w=160, out_c=128, kh=3, kw=3, groups=1),
-        dict(name="b1_c128_h80_w80_oc16_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=80, in_w=80, out_c=16, kh=1, kw=1, groups=1),
-        dict(name="b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid", batch=1, in_c=16, in_h=80, in_w=80, out_c=64, kh=3, kw=3, groups=1),
-        dict(name="b1_c64_h80_w80_oc16_wic64_k1x1_g1_s1_pvalid", batch=1, in_c=64, in_h=80, in_w=80, out_c=16, kh=1, kw=1, groups=1),
-        dict(name="b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid", batch=1, in_c=16, in_h=80, in_w=80, out_c=128, kh=3, kw=3, groups=1),
-        dict(name="b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid", batch=1, in_c=16, in_h=80, in_w=80, out_c=128, kh=5, kw=5, groups=1),
-        dict(name="b1_c128_h40_w40_oc40_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=40, in_w=40, out_c=40, kh=1, kw=1, groups=1),
-        dict(name="b1_c40_h40_w40_oc160_wic40_k3x3_g1_s1_pvalid", batch=1, in_c=40, in_h=40, in_w=40, out_c=160, kh=3, kw=3, groups=1),
-        dict(name="b1_c160_h40_w40_oc40_wic160_k1x1_g1_s1_pvalid", batch=1, in_c=160, in_h=40, in_w=40, out_c=40, kh=1, kw=1, groups=1),
-        dict(name="b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid", batch=1, in_c=40, in_h=40, in_w=40, out_c=320, kh=1, kw=1, groups=1),
-        dict(name="b1_c320_h40_w40_oc320_wic1_k3x3_g320_s1_pvalid", batch=1, in_c=320, in_h=40, in_w=40, out_c=320, kh=3, kw=3, groups=320),
-        dict(name="b1_c320_h20_w20_oc72_wic320_k1x1_g1_s1_pvalid", batch=1, in_c=320, in_h=20, in_w=20, out_c=72, kh=1, kw=1, groups=1),
-        dict(name="b1_c72_h20_w20_oc576_wic72_k1x1_g1_s1_pvalid", batch=1, in_c=72, in_h=20, in_w=20, out_c=576, kh=1, kw=1, groups=1),
-        dict(name="b1_c576_h20_w20_oc576_wic1_k3x3_g576_s1_pvalid", batch=1, in_c=576, in_h=20, in_w=20, out_c=576, kh=3, kw=3, groups=576),
-        dict(name="b1_c576_h20_w20_oc72_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=20, in_w=20, out_c=72, kh=1, kw=1, groups=1),
-        dict(name="b1_c72_h20_w20_oc288_wic72_k3x3_g1_s1_pvalid", batch=1, in_c=72, in_h=20, in_w=20, out_c=288, kh=3, kw=3, groups=1),
-        dict(name="b1_c288_h20_w20_oc72_wic288_k1x1_g1_s1_pvalid", batch=1, in_c=288, in_h=20, in_w=20, out_c=72, kh=1, kw=1, groups=1),
-        dict(name="b1_c576_h20_w20_oc576_wic1_k5x5_g576_s1_pvalid", batch=1, in_c=576, in_h=20, in_w=20, out_c=576, kh=5, kw=5, groups=576),
-        dict(name="b1_c576_h20_w20_oc96_wic576_k1x1_g1_s1_pvalid", batch=1, in_c=576, in_h=20, in_w=20, out_c=96, kh=1, kw=1, groups=1),
-        dict(name="b1_c768_h20_w20_oc768_wic1_k5x5_g768_s1_pvalid", batch=1, in_c=768, in_h=20, in_w=20, out_c=768, kh=5, kw=5, groups=768),
-        dict(name="b1_c768_h20_w20_oc96_wic768_k1x1_g1_s1_pvalid", batch=1, in_c=768, in_h=20, in_w=20, out_c=96, kh=1, kw=1, groups=1),
-        dict(name="b1_c768_h20_w20_oc768_wic1_k3x3_g768_s1_pvalid", batch=1, in_c=768, in_h=20, in_w=20, out_c=768, kh=3, kw=3, groups=768),
-        dict(name="b1_c768_h10_w10_oc120_wic768_k1x1_g1_s1_pvalid", batch=1, in_c=768, in_h=10, in_w=10, out_c=120, kh=1, kw=1, groups=1),
-        dict(name="b1_c960_h10_w10_oc120_wic960_k1x1_g1_s1_pvalid", batch=1, in_c=960, in_h=10, in_w=10, out_c=120, kh=1, kw=1, groups=1),
-        dict(name="b1_c480_h10_w10_oc480_wic1_k5x5_g480_s1_pvalid", batch=1, in_c=480, in_h=10, in_w=10, out_c=480, kh=5, kw=5, groups=480),
-        dict(name="b1_c480_h10_w10_oc120_wic480_k1x1_g1_s1_pvalid", batch=1, in_c=480, in_h=10, in_w=10, out_c=120, kh=1, kw=1, groups=1),
-        dict(name="b1_c960_h10_w10_oc960_wic1_k5x5_g960_s1_pvalid", batch=1, in_c=960, in_h=10, in_w=10, out_c=960, kh=5, kw=5, groups=960),
-        dict(name="b1_c256_h10_w10_oc256_wic1_k3x3_g256_s1_pvalid", batch=1, in_c=256, in_h=10, in_w=10, out_c=256, kh=3, kw=3, groups=256),
-        dict(name="b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=3, in_w=3, out_c=256, kh=1, kw=1, groups=1),
-        dict(name="b1_c128_h3_w3_oc128_wic1_k3x3_g128_s1_pvalid", batch=1, in_c=128, in_h=3, in_w=3, out_c=128, kh=3, kw=3, groups=128),
-        dict(name="b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid", batch=1, in_c=128, in_h=2, in_w=2, out_c=256, kh=1, kw=1, groups=1),
-        dict(name="b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid", batch=1, in_c=64, in_h=1, in_w=1, out_c=128, kh=1, kw=1, groups=1),
-        dict(name="b1_c96_h20_w20_oc96_wic1_k3x3_g96_s1_pvalid", batch=1, in_c=96, in_h=20, in_w=20, out_c=96, kh=3, kw=3, groups=96),
-        dict(name="b1_c384_h10_w10_oc384_wic1_k3x3_g384_s1_pvalid", batch=1, in_c=384, in_h=10, in_w=10, out_c=384, kh=3, kw=3, groups=384),
-        dict(name="b1_c512_h5_w5_oc512_wic1_k3x3_g512_s1_pvalid", batch=1, in_c=512, in_h=5, in_w=5, out_c=512, kh=3, kw=3, groups=512),
-        dict(name="b1_c256_h3_w3_oc256_wic1_k3x3_g256_s1_pvalid", batch=1, in_c=256, in_h=3, in_w=3, out_c=256, kh=3, kw=3, groups=256),
-        dict(name="b1_c96_h20_w20_oc12_wic96_k1x1_g1_s1_pvalid", batch=1, in_c=96, in_h=20, in_w=20, out_c=12, kh=1, kw=1, groups=1),
-        dict(name="b1_c96_h20_w20_oc273_wic96_k1x1_g1_s1_pvalid", batch=1, in_c=96, in_h=20, in_w=20, out_c=273, kh=1, kw=1, groups=1),
-        dict(name="b1_c384_h10_w10_oc546_wic384_k1x1_g1_s1_pvalid", batch=1, in_c=384, in_h=10, in_w=10, out_c=546, kh=1, kw=1, groups=1),
+        *pvalid_shapes((
+            (96, 112, 96, 3, 3, 96),
+            (144, 56, 144, 3, 3, 144),
+            (192, 28, 96, 1, 1),
+            (32, 14, 64, 3, 3),
+        )),
+        *pvalid_pointwise_shapes(528, 14, (256, 160)),
+        *pvalid_shapes((
+            (160, 14, 320, 3, 3),
+            (160, 40, 320, 3, 3),
+        )),
+        pvalid_shape(528, 14, 32, 1, 1),
+        pvalid_shape(32, 14, 128, 3, 3),
+        pvalid_shape(528, 14, 128, 1, 1),
+        *pvalid_shapes((
+            (160, 7, 320, 3, 3),
+            (32, 7, 128, 3, 3),
+            (192, 7, 384, 3, 3),
+        )),
+        pvalid_shape(832, 7, 48, 1, 1),
+        pvalid_shape(32, 150, 32, 3, 3, 32),
+        *pvalid_pointwise_clusters((
+            (32, 150, (16,)),
+            (16, 150, (96,)),
+        )),
+        pvalid_shape(96, 150, 96, 3, 3, 96),
+        pvalid_shape(96, 75, 24, 1, 1),
+        pvalid_shape(144, 75, 144, 3, 3, 144),
+        *pvalid_pointwise_clusters((
+            (144, 75, (24,)),
+            (144, 38, (32,)),
+        )),
+        pvalid_shape(192, 38, 192, 3, 3, 192),
+        pvalid_shape(192, 38, 32, 1, 1),
+        pvalid_shape(384, 19, 384, 3, 3, 384),
+        *pvalid_pointwise_shapes(384, 19, (64, 96)),
+        pvalid_shape(576, 19, 576, 3, 3, 576),
+        *pvalid_pointwise_shapes(576, 19, (96, 12, 273)),
+        pvalid_shape(960, 10, 960, 3, 3, 960),
+        *pvalid_pointwise_shapes(1280, 10, (24, 546)),
+        *pvalid_shapes((
+            (256, 10, 512, 3, 3),
+            (128, 5, 256, 3, 3),
+        )),
+        *pvalid_pointwise_shapes(256, 3, (24, 546, 128)),
+        *pvalid_shapes((
+            (128, 3, 256, 3, 3),
+        )),
+        *pvalid_pointwise_shapes(256, 2, (24, 546, 64)),
+        *pvalid_shapes((
+            (128, 1, 24, 1, 1),
+            (3, 320, 32, 3, 3),
+            (32, 160, 8, 1, 1),
+            (8, 160, 16, 3, 3),
+            (16, 160, 128, 3, 3),
+            (128, 80, 16, 1, 1),
+            (16, 80, 64, 3, 3),
+            (64, 80, 16, 1, 1),
+            (16, 80, 128, 3, 3),
+            (16, 80, 128, 5, 5),
+            (128, 40, 40, 1, 1),
+            (40, 40, 160, 3, 3),
+            (160, 40, 40, 1, 1),
+            (40, 40, 320, 1, 1),
+            (320, 40, 320, 3, 3, 320),
+            (320, 20, 72, 1, 1),
+            (72, 20, 576, 1, 1),
+            (576, 20, 576, 3, 3, 576),
+            (576, 20, 72, 1, 1),
+            (72, 20, 288, 3, 3),
+            (288, 20, 72, 1, 1),
+            (576, 20, 576, 5, 5, 576),
+            (576, 20, 96, 1, 1),
+            (768, 20, 768, 5, 5, 768),
+            (768, 20, 96, 1, 1),
+            (768, 20, 768, 3, 3, 768),
+            (768, 10, 120, 1, 1),
+            (960, 10, 120, 1, 1),
+            (480, 10, 480, 5, 5, 480),
+            (480, 10, 120, 1, 1),
+            (960, 10, 960, 5, 5, 960),
+            (256, 10, 256, 3, 3, 256),
+            (128, 3, 256, 1, 1),
+            (128, 3, 128, 3, 3, 128),
+            (128, 2, 256, 1, 1),
+            (64, 1, 128, 1, 1),
+            (96, 20, 96, 3, 3, 96),
+            (384, 10, 384, 3, 3, 384),
+            (512, 5, 512, 3, 3, 512),
+            (256, 3, 256, 3, 3, 256),
+            (96, 20, 12, 1, 1),
+            (96, 20, 273, 1, 1),
+            (384, 10, 546, 1, 1),
+        )),
     ]
 
 def main(argv):

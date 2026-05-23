@@ -1,0 +1,40 @@
+Breakpoint 1 (ioctl) pending.
+Function "ioctl" not defined.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/aarch64-linux-gnu/libthread_db.so.1".
+MEM_CREATE #1 size=680 flags=0x0000040b handle=0x0 obj=0x0 dma=0x0 sram=0
+MEM_SYNC flags=0x00000003 obj=0xffffff8148bdcc00 offset=0 size=680
+MEM_CREATE #2 size=936384 flags=0x00000403 handle=0x0 obj=0x0 dma=0x0 sram=0
+MEM_SYNC flags=0x00000003 obj=0xffffff8148bdb800 offset=0 size=936384
+MEM_SYNC flags=0x00000001 obj=0xffffff8148bdb800 offset=0 size=936384
+MEM_SYNC flags=0x00000001 obj=0xffffff8148bdcc00 offset=0 size=680
+MEM_CREATE #3 size=1436160 flags=0x00000403 handle=0x0 obj=0x0 dma=0x0 sram=0
+MEM_SYNC flags=0x00000003 obj=0xffffff8148b3d800 offset=0 size=1436160
+inputs=1 outputs=1
+Input[0] dims=1x40x40x160 size=512000 type=1
+MEM_CREATE #4 size=512000 flags=0x00000403 handle=0x0 obj=0x0 dma=0x0 sram=0
+MEM_SYNC flags=0x00000003 obj=0xffffff8148b3e400 offset=0 size=512000
+MEM_CREATE #5 size=924160 flags=0x00000403 handle=0x0 obj=0x0 dma=0x0 sram=0
+MEM_SYNC flags=0x00000003 obj=0xffffff8148b3ec00 offset=0 size=924160
+MEM_SYNC flags=0x00000001 obj=0xffffff8148bdb800 offset=923648 size=12032
+MEM_SYNC flags=0x00000001 obj=0xffffff8148b3e400 offset=0 size=512000
+MEM_SYNC flags=0x00000001 obj=0xffffff8148bdb800 offset=923648 size=12032
+
+=== DRM_IOCTL_RKNPU_SUBMIT #1 cmd=0xc0686441 size=104 arg=0x7fffffa3e0 ===
+  flags=0x00000005 timeout=6000 task_start=0 task_number=6
+  task_counter=0 priority=0 task_obj_addr=0xffffff8148bdcc00
+  regcfg_obj_addr=0x0 task_base_addr=0x0 user_data=0x0
+  core_mask=0x00000000 fence_fd=-1
+  subcore_task[0]={task_start=0, task_number=2}
+  subcore_task[1]={task_start=0, task_number=2}
+  subcore_task[2]={task_start=0, task_number=2}
+  subcore_task[3]={task_start=0, task_number=0}
+  subcore_task[4]={task_start=0, task_number=0}
+  task_obj_mem_create_matches=0
+  task_obj_mem_sync_matches=2
+    sync flags=0x00000003 offset=0 size=680
+    sync flags=0x00000001 offset=0 size=680
+MEM_SYNC flags=0x00000002 obj=0xffffff8148b3ec00 offset=0 size=924160
+MEM_SYNC flags=0x00000002 obj=0xffffff8148b3ec00 offset=0 size=924160
+rknn_run OK
+[Inferior 1 (process 112167) exited normally]

@@ -1,0 +1,110 @@
+Breakpoint 1 (ioctl) pending.
+Function "ioctl" not defined.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/aarch64-linux-gnu/libthread_db.so.1".
+inputs=1 outputs=1
+Input[0] dims=1x40x40x160 size=512000 type=1
+GEM 1: handle=1 size=4096 map_offset=0x100000000
+  task_like_entries=17
+  task_like[0] off=0x0000 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=108 regcfg_offset=0 regcmd_addr=0x00000000ffffb800
+  task_like[1] off=0x0028 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=108 regcfg_offset=0 regcmd_addr=0x00000000ffffbb80
+  task_like[2] off=0x0050 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x00000000ffffbf00
+  task_like[3] off=0x0078 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x00000000ffffc280
+  task_like[4] off=0x00a0 flags=0x00000000 op_idx=1 enable_mask=0x00000060 int_mask=0x00000c00 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=26 regcfg_offset=0 regcmd_addr=0x00000000ffffc600
+  task_like[5] off=0x00c8 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x00000000ffffc700
+  task_like[6] off=0x00f0 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x00000000ffffca80
+  task_like[7] off=0x0118 flags=0x00000000 op_idx=1 enable_mask=0x00000060 int_mask=0x00000c00 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=26 regcfg_offset=0 regcmd_addr=0x00000000ffffce00
+  task_like[8] off=0x0140 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x00000000ffffcf00
+  task_like[9] off=0x0168 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x00000000ffffd280
+  task_like[10] off=0x0190 flags=0x00000000 op_idx=1 enable_mask=0x00000060 int_mask=0x00000c00 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=26 regcfg_offset=0 regcmd_addr=0x00000000ffffd600
+  task_like[11] off=0x01b8 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x00000000ffffd700
+  task_like[12] off=0x01e0 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x00000000ffffda80
+  task_like[13] off=0x0208 flags=0x00000000 op_idx=1 enable_mask=0x00000060 int_mask=0x00000c00 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=26 regcfg_offset=0 regcmd_addr=0x00000000ffffde00
+  task_like[14] off=0x0230 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x00000000ffffdf00
+  task_like[15] off=0x0258 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x00000000ffffe280
+  task_like[16] off=0x0280 flags=0x00000000 op_idx=1 enable_mask=0x00000060 int_mask=0x00000c00 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=26 regcfg_offset=0 regcmd_addr=0x00000000ffffe600
+GEM 2: handle=2 size=937984 map_offset=0x100001000
+  task_like_entries=73
+  task_like[0] off=0xe1708 flags=0x00000000 op_idx=9 enable_mask=0x00000003 int_mask=0x00000000 int_clear=0x00000001 int_status=0x00000000 regcfg_amount=4 regcfg_offset=0 regcmd_addr=0x0000000000000000
+  task_like[1] off=0xe1938 flags=0x00001150 op_idx=33619968 enable_mask=0x00001154 int_mask=0x02010000 int_clear=0x00001158 int_status=0x02010000 regcfg_amount=4444 regcfg_offset=33619968 regcmd_addr=0x0201000000001160
+  task_like[2] off=0xe1988 flags=0x00001178 op_idx=33619968 enable_mask=0x0000117c int_mask=0x02010000 int_clear=0x00001180 int_status=0x02010000 regcfg_amount=4484 regcfg_offset=33619968 regcmd_addr=0x0801000002003010
+  task_like[3] off=0xe1a78 flags=0x03834070 op_idx=268500992 enable_mask=0x00004074 int_mask=0x10010000 int_clear=0x00014078 int_status=0x10010000 regcfg_amount=16508 regcfg_offset=268500992 regcmd_addr=0x1001000000004080
+  task_like[4] off=0xe1b40 flags=0x00004120 op_idx=268500992 enable_mask=0x00004124 int_mask=0x10010000 int_clear=0x00004128 int_status=0x10010000 regcfg_amount=16684 regcfg_offset=268500992 regcmd_addr=0x0101ffffbb800010
+  task_like[5] off=0xe1cf8 flags=0x00001170 op_idx=33619968 enable_mask=0x00001174 int_mask=0x02010000 int_clear=0x00001178 int_status=0x02010000 regcfg_amount=4476 regcfg_offset=33619968 regcmd_addr=0x0201000000001180
+  task_like[6] off=0xe1d48 flags=0x00003030 op_idx=134283264 enable_mask=0x01e4400c int_mask=0x10010000 int_clear=0x00024010 int_status=0x10014800 regcfg_amount=16404 regcfg_offset=268500992 regcmd_addr=0x1001ffc5f1e04020
+  task_like[7] off=0xe1d98 flags=0x00534040 op_idx=268500992 enable_mask=0x00004044 int_mask=0x10010000 int_clear=0x00004048 int_status=0x10010000 regcfg_amount=16460 regcfg_offset=268500992 regcmd_addr=0x1001000001264050
+  task_like[8] off=0xe1e10 flags=0x0000407c op_idx=268500992 enable_mask=0x00004080 int_mask=0x10010000 int_clear=0x00014084 int_status=0x10010001 regcfg_amount=16520 regcfg_offset=268500992 regcmd_addr=0x1001000000004090
+  task_like[9] off=0xe1e60 flags=0x000040a8 op_idx=268500992 enable_mask=0x000040ac int_mask=0x10010000 int_clear=0xb48040c0 int_status=0x10010000 regcfg_amount=16580 regcfg_offset=268500992 regcmd_addr=0x1001000000004100
+  task_like[10] off=0xe2018 flags=0x00001150 op_idx=33619968 enable_mask=0x00001154 int_mask=0x02010000 int_clear=0x00001158 int_status=0x02010000 regcfg_amount=4444 regcfg_offset=33619968 regcmd_addr=0x0201000000001160
+  task_like[11] off=0xe2068 flags=0x00001178 op_idx=33619968 enable_mask=0x0000117c int_mask=0x02010000 int_clear=0x00001180 int_status=0x02010000 regcfg_amount=4484 regcfg_offset=33619968 regcmd_addr=0x0801000002003010
+  task_like[12] off=0xe2158 flags=0x03834070 op_idx=268500992 enable_mask=0x00004074 int_mask=0x10010000 int_clear=0x00014078 int_status=0x10010000 regcfg_amount=16508 regcfg_offset=268500992 regcmd_addr=0x1001000000004080
+  task_like[13] off=0xe2220 flags=0x00004120 op_idx=268500992 enable_mask=0x00004124 int_mask=0x10010000 int_clear=0x00004128 int_status=0x10010000 regcfg_amount=16684 regcfg_offset=268500992 regcmd_addr=0x0101ffffc2800010
+  task_like[14] off=0xe23d8 flags=0x00001170 op_idx=33619968 enable_mask=0x00001174 int_mask=0x02010000 int_clear=0x00001178 int_status=0x02010000 regcfg_amount=4476 regcfg_offset=33619968 regcmd_addr=0x0201000000001180
+  task_like[15] off=0xe2428 flags=0x00003030 op_idx=134283264 enable_mask=0x01e4400c int_mask=0x10010000 int_clear=0x00024010 int_status=0x10014800 regcfg_amount=16404 regcfg_offset=268500992 regcmd_addr=0x1001ffc5f1e04020
+  task_like[16] off=0xe2478 flags=0x00534040 op_idx=268500992 enable_mask=0x00004044 int_mask=0x10010000 int_clear=0x00004048 int_status=0x10010000 regcfg_amount=16460 regcfg_offset=268500992 regcmd_addr=0x1001000001264050
+  task_like[17] off=0xe24f0 flags=0x0000407c op_idx=268500992 enable_mask=0x00004080 int_mask=0x10010000 int_clear=0x00014084 int_status=0x10010001 regcfg_amount=16520 regcfg_offset=268500992 regcmd_addr=0x1001000000004090
+  task_like[18] off=0xe2540 flags=0x000040a8 op_idx=268500992 enable_mask=0x000040ac int_mask=0x10010000 int_clear=0xb48040c0 int_status=0x10010000 regcfg_amount=16580 regcfg_offset=268500992 regcmd_addr=0x1001000000004100
+  task_like[19] off=0xe2658 flags=0x0000603c op_idx=1073807360 enable_mask=0x00006040 int_mask=0x40010000 int_clear=0x00006044 int_status=0x40010000 regcfg_amount=24648 regcfg_offset=1073807360 regcmd_addr=0x4001ffffb0006070
+  task_like[20] off=0xe2680 flags=0x0010607c op_idx=1073807360 enable_mask=0x00106084 int_mask=0x40010000 int_clear=0x000360dc int_status=0x40010000 regcfg_amount=28684 regcfg_offset=2147549184 regcmd_addr=0x8001000000007010
+  task_like[21] off=0xe2770 flags=0x00001050 op_idx=33619969 enable_mask=0x00001054 int_mask=0x02010001 int_clear=0x00001058 int_status=0x02010001 regcfg_amount=4188 regcfg_offset=33619969 regcmd_addr=0x0201000000001060
+  task_like[22] off=0xe2838 flags=0x00001160 op_idx=33619968 enable_mask=0x00001164 int_mask=0x02010000 int_clear=0x00001168 int_status=0x02010000 regcfg_amount=4460 regcfg_offset=33619968 regcmd_addr=0x0201000000001170
+  task_like[23] off=0xe2888 flags=0x02003010 op_idx=134283264 enable_mask=0x00253014 int_mask=0x08010014 int_clear=0x009f3018 int_status=0x08010000 regcfg_amount=12316 regcfg_offset=134283264 regcmd_addr=0x0801000000003030
+  task_like[24] off=0xe2b08 flags=0x0000105c op_idx=33619969 enable_mask=0x00001060 int_mask=0x02010000 int_clear=0x00001064 int_status=0x02010000 regcfg_amount=4200 regcfg_offset=33619968 regcmd_addr=0x0201ffd414801070
+  task_like[25] off=0xe2d10 flags=0x00004090 op_idx=268500992 enable_mask=0x00004094 int_mask=0x10010000 int_clear=0x00004098 int_status=0x10010000 regcfg_amount=16540 regcfg_offset=268500992 regcmd_addr=0x10010000000040a0
+  task_like[26] off=0xe2d60 flags=0x00004100 op_idx=268500992 enable_mask=0x00004104 int_mask=0x10010000 int_clear=0x00004108 int_status=0x10010000 regcfg_amount=16652 regcfg_offset=268500992 regcmd_addr=0x1001000000004110
+  task_like[27] off=0xe3058 flags=0x00001170 op_idx=33619968 enable_mask=0x00001174 int_mask=0x02010000 int_clear=0x00001178 int_status=0x02010000 regcfg_amount=4476 regcfg_offset=33619968 regcmd_addr=0x0201000000001180
+  task_like[28] off=0xe30a8 flags=0x00003030 op_idx=134283264 enable_mask=0x01e4400c int_mask=0x10010000 int_clear=0x00024010 int_status=0x10014800 regcfg_amount=16404 regcfg_offset=268500992 regcmd_addr=0x1001ffc5c0004020
+  task_like[29] off=0xe30f8 flags=0x00534040 op_idx=268500992 enable_mask=0x00004044 int_mask=0x10010000 int_clear=0x00004048 int_status=0x10010000 regcfg_amount=16460 regcfg_offset=268500992 regcmd_addr=0x1001000001264050
+  task_like[30] off=0xe3170 flags=0x0000407c op_idx=268500992 enable_mask=0x00004080 int_mask=0x10010000 int_clear=0x00014084 int_status=0x10010001 regcfg_amount=16520 regcfg_offset=268500992 regcmd_addr=0x1001000000004090
+  task_like[31] off=0xe31c0 flags=0x000040a8 op_idx=268500992 enable_mask=0x000040ac int_mask=0x10010000 int_clear=0xb48040c0 int_status=0x10010000 regcfg_amount=16580 regcfg_offset=268500992 regcmd_addr=0x1001000000004100
+  task_like[32] off=0xe3350 flags=0x00131084 op_idx=33620008 enable_mask=0x00a01088 int_mask=0x02010000 int_clear=0x00001100 int_status=0x02010000 regcfg_amount=4356 regcfg_offset=33619968 regcmd_addr=0x0201fff1a0001110
+  task_like[33] off=0xe3378 flags=0x00001140 op_idx=33619968 enable_mask=0x00001144 int_mask=0x02010000 int_clear=0x00001148 int_status=0x02010000 regcfg_amount=4428 regcfg_offset=33619968 regcmd_addr=0x0201000000001150
+  task_like[34] off=0xe34b8 flags=0x00534060 op_idx=268500992 enable_mask=0x00004064 int_mask=0x10010000 int_clear=0x00004068 int_status=0x10010000 regcfg_amount=16492 regcfg_offset=268500992 regcmd_addr=0x1001000003834070
+  task_like[35] off=0xe3530 flags=0x000040a0 op_idx=268500992 enable_mask=0x000040a4 int_mask=0x10010000 int_clear=0x000040a8 int_status=0x10010000 regcfg_amount=16556 regcfg_offset=268500992 regcmd_addr=0x10010000b48040c0
+  task_like[36] off=0xe3580 flags=0x00004110 op_idx=268500992 enable_mask=0x00004114 int_mask=0x10010000 int_clear=0x00004118 int_status=0x10010000 regcfg_amount=16668 regcfg_offset=268500992 regcmd_addr=0x1001000000004120
+  task_like[37] off=0xe35f8 flags=0x00000000 op_idx=0 enable_mask=0x000e6004 int_mask=0x40010000 int_clear=0x000e7004 int_status=0x80010000 regcfg_amount=24588 regcfg_offset=1073807360 regcmd_addr=0x4001000000006010
+  task_like[38] off=0xe36c0 flags=0x00107028 op_idx=2147549184 enable_mask=0x00017030 int_mask=0x80010000 int_clear=0x00000000 int_status=0x00000000 regcfg_amount=20 regcfg_offset=16842752 regcmd_addr=0x0041000000000000
+  task_like[39] off=0xe3788 flags=0x0000105c op_idx=33619969 enable_mask=0x00001060 int_mask=0x02010000 int_clear=0x00001064 int_status=0x02010000 regcfg_amount=4200 regcfg_offset=33619968 regcmd_addr=0x0201ffd3e0001070
+  task_like[40] off=0xe3990 flags=0x00004090 op_idx=268500992 enable_mask=0x00004094 int_mask=0x10010000 int_clear=0x00004098 int_status=0x10010000 regcfg_amount=16540 regcfg_offset=268500992 regcmd_addr=0x10010000000040a0
+  task_like[41] off=0xe39e0 flags=0x00004100 op_idx=268500992 enable_mask=0x00004104 int_mask=0x10010000 int_clear=0x00004108 int_status=0x10010000 regcfg_amount=16652 regcfg_offset=268500992 regcmd_addr=0x1001000000004110
+  task_like[42] off=0xe3b98 flags=0x00001150 op_idx=33619968 enable_mask=0x00001154 int_mask=0x02010000 int_clear=0x00001158 int_status=0x02010000 regcfg_amount=4444 regcfg_offset=33619968 regcmd_addr=0x0201000000001160
+  task_like[43] off=0xe3be8 flags=0x00001178 op_idx=33619968 enable_mask=0x0000117c int_mask=0x02010000 int_clear=0x00001180 int_status=0x02010000 regcfg_amount=4484 regcfg_offset=33619968 regcmd_addr=0x0801000002003010
+  task_like[44] off=0xe3cd8 flags=0x03834070 op_idx=268500992 enable_mask=0x00004074 int_mask=0x10010000 int_clear=0x00014078 int_status=0x10010000 regcfg_amount=16508 regcfg_offset=268500992 regcmd_addr=0x1001000000004080
+  task_like[45] off=0xe3da0 flags=0x00004120 op_idx=268500992 enable_mask=0x00004124 int_mask=0x10010000 int_clear=0x00004128 int_status=0x10010000 regcfg_amount=16684 regcfg_offset=268500992 regcmd_addr=0x0101ffffde000010
+  task_like[46] off=0xe3e18 flags=0x00006010 op_idx=1073807360 enable_mask=0x001f6014 int_mask=0x40010000 int_clear=0x00006018 int_status=0x40010000 regcfg_amount=24604 regcfg_offset=1073807360 regcmd_addr=0x40010000001f6020
+  task_like[47] off=0xe3e40 flags=0x00116024 op_idx=1073807360 enable_mask=0x00006034 int_mask=0x40010000 int_clear=0x00006038 int_status=0x40010000 regcfg_amount=24636 regcfg_offset=1073807360 regcmd_addr=0x4001000000006040
+  task_like[48] off=0xe3fd0 flags=0x00171084 op_idx=33620008 enable_mask=0x00a01088 int_mask=0x02010000 int_clear=0x00001100 int_status=0x02010000 regcfg_amount=4356 regcfg_offset=33619968 regcmd_addr=0x0201fffb78001110
+  task_like[49] off=0xe3ff8 flags=0x00001140 op_idx=33619968 enable_mask=0x00001144 int_mask=0x02010000 int_clear=0x00001148 int_status=0x02010000 regcfg_amount=4428 regcfg_offset=33619968 regcmd_addr=0x0201000000001150
+  task_like[50] off=0xe4138 flags=0x00534060 op_idx=268500992 enable_mask=0x00004064 int_mask=0x10010000 int_clear=0x00004068 int_status=0x10010000 regcfg_amount=16492 regcfg_offset=268500992 regcmd_addr=0x1001000003834070
+  task_like[51] off=0xe41b0 flags=0x000040a0 op_idx=268500992 enable_mask=0x000040a4 int_mask=0x10010000 int_clear=0x000040a8 int_status=0x10010000 regcfg_amount=16556 regcfg_offset=268500992 regcmd_addr=0x10010000b48040c0
+  task_like[52] off=0xe4200 flags=0x00004110 op_idx=268500992 enable_mask=0x00004114 int_mask=0x10010000 int_clear=0x00004118 int_status=0x10010000 regcfg_amount=16668 regcfg_offset=268500992 regcmd_addr=0x1001000000004120
+  task_like[53] off=0xe42f0 flags=0x00001050 op_idx=33619969 enable_mask=0x00001054 int_mask=0x02010001 int_clear=0x00001058 int_status=0x02010001 regcfg_amount=4188 regcfg_offset=33619969 regcmd_addr=0x0201000000001060
+  task_like[54] off=0xe43b8 flags=0x00001160 op_idx=33619968 enable_mask=0x00001164 int_mask=0x02010000 int_clear=0x00001168 int_status=0x02010000 regcfg_amount=4460 regcfg_offset=33619968 regcmd_addr=0x0201000000001170
+  task_like[55] off=0xe4408 flags=0x02003010 op_idx=134283264 enable_mask=0x00253014 int_mask=0x08010010 int_clear=0x005f3018 int_status=0x08010000 regcfg_amount=12316 regcfg_offset=134283264 regcmd_addr=0x0801000000003030
+  task_like[56] off=0xe4700 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=108 regcfg_offset=0 regcmd_addr=0x0000000000000000
+  task_like[57] off=0xe4728 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=108 regcfg_offset=0 regcmd_addr=0x0000000000000380
+  task_like[58] off=0xe4750 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x0000000000000700
+  task_like[59] off=0xe4778 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x0000000000000a80
+  task_like[60] off=0xe47a0 flags=0x00000000 op_idx=1 enable_mask=0x00000060 int_mask=0x00000c00 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=26 regcfg_offset=0 regcmd_addr=0x0000000000000e00
+  task_like[61] off=0xe47c8 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x0000000000000f00
+  task_like[62] off=0xe47f0 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x0000000000001280
+  task_like[63] off=0xe4818 flags=0x00000000 op_idx=1 enable_mask=0x00000060 int_mask=0x00000c00 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=26 regcfg_offset=0 regcmd_addr=0x0000000000001600
+  task_like[64] off=0xe4840 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x0000000000001700
+  task_like[65] off=0xe4868 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x0000000000001a80
+  task_like[66] off=0xe4890 flags=0x00000000 op_idx=1 enable_mask=0x00000060 int_mask=0x00000c00 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=26 regcfg_offset=0 regcmd_addr=0x0000000000001e00
+  task_like[67] off=0xe48b8 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x0000000000001f00
+  task_like[68] off=0xe48e0 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x0000000000002280
+  task_like[69] off=0xe4908 flags=0x00000000 op_idx=1 enable_mask=0x00000060 int_mask=0x00000c00 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=26 regcfg_offset=0 regcmd_addr=0x0000000000002600
+  task_like[70] off=0xe4930 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x0000000000002700
+  task_like[71] off=0xe4958 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x0000000000002a80
+  task_like[72] off=0xe4980 flags=0x00000000 op_idx=1 enable_mask=0x00000060 int_mask=0x00000c00 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=26 regcfg_offset=0 regcmd_addr=0x0000000000002e00
+GEM 3: handle=3 size=1437696 map_offset=0x1000e6000
+  task_like_entries=0
+GEM 4: handle=4 size=512000 map_offset=0x100245000
+  task_like_entries=0
+GEM 5: handle=5 size=925696 map_offset=0x1002c2000
+  task_like_entries=0
+GEM 6: unavailable: [Errno 2] No such file or directory
+submit #1: task_number=6 task_obj_addr=0xffffff8148ae4800
+rknn_run OK
+[Inferior 1 (process 112688) exited normally]

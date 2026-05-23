@@ -244,8 +244,9 @@ def _conv_align_c(in_c, groups, out_c):
     if not _is_depthwise(in_c, out_c, groups) and in_c > 4: return 16
     return np.clip(1 << (max(1, in_c) - 1).bit_length(), 8, 32)
 
-def _conv_input_pack_c2(in_c, groups, out_c, align_c):
-    # C2 selection is RK packing layered on top of 16-value FP16 atoms.
+def _cdma_dc_feature_input_pack_c2(in_c, groups, out_c, align_c):
+    # C2 selection for CDMA_DC feature input.  This file programs direct
+    # convolution with CNA_FEATURE_DATA_ADDR; CDMA_WG and CDMA_IMG are not used.
     if in_c == 1: return 2
     if not _is_depthwise(in_c, out_c, groups) and groups == 1 and 1 < in_c <= 4: return 8
     if _is_depthwise(in_c, out_c, groups) or groups > 1 or in_c > 4: return 8
@@ -271,8 +272,8 @@ def _conv_input_pack_c2(in_c, groups, out_c, align_c):
     #     task.input_surface_stride = 112
 
 def _dma_strides(in_h, width_stride, use_nhwc_pack):
-    # CDMA stride registers are in 32B units. RK NHWC/pixel rows use direct row
-    # stride; packed feature mode uses four atom groups per logical row here.
+    # CDMA_DC stride registers are in 32B units. Narrow non-aligned feature rows
+    # use direct row stride; packed feature mode uses four atom groups per row.
     if use_nhwc_pack:
         line_stride = width_stride
         return line_stride, line_stride * (in_h - 1) if in_h > 1 else 0
@@ -317,7 +318,7 @@ def _conv_params(batch, in_c, in_h, in_w, out_c, kh, kw, groups, stride=1):
     out_width_stride = out_atoms if not is_spatial else _align_up(out_atoms, 4)
 
     mesa_aligned_small = (not is_depthwise) and groups == 1 and 1 < in_c <= 4
-    input_pack_c2 = _conv_input_pack_c2(in_c, groups, out_c, align_c)
+    input_pack_c2 = _cdma_dc_feature_input_pack_c2(in_c, groups, out_c, align_c)
     use_nhwc = (not mesa_aligned_small) and (not is_depthwise) and (in_c > 0 and input_pack_c2 // in_c == 2)
     return {
         "batch": batch, "in_c": in_c, "in_h": in_h, "in_w": in_w,
@@ -379,7 +380,9 @@ def pack_conv_weights_for_shape(weight_full, out_c, in_c, kh, kw, align_c, group
         return _pack_kh_major(weight_full, out_c, in_c, kh, kw, align_c)
     return _pack_default(weight_full, out_c, in_c, kh, kw, align_c)
 
-def _pack_conv_input_fp16(input_nchw, p):
+def _pack_cdma_dc_feature_input_fp16(input_nchw, p):
+    # CDMA_DC feature input packing.  CDMA_WG would need Winograd-transformed
+    # feature tiles; CDMA_IMG would use pixel/image format registers instead.
     in_c, in_h, in_w = input_nchw.shape
     if p["use_nhwc"]:
         out = np.zeros((in_h, p["width_stride"], in_c), dtype=np.float16)
@@ -729,7 +732,7 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
                     tile_out_c = oc_end - oc_start
                     hw_out_c = oc_tile if tile_out_c < oc_tile else tile_out_c
                     tile_p = _conv_params(1, flat_c, hw_tile_h, out_w, hw_out_c, 1, 1, 1)
-                    input_flat = _pack_conv_input_fp16(im2col, tile_p).view(np.uint16).tolist()
+                    input_flat = _pack_cdma_dc_feature_input_fp16(im2col, tile_p).view(np.uint16).tolist()
                     ct_inputs = (ctypes.c_uint16 * len(input_flat)).from_buffer(input_map)
                     ct_inputs[:] = input_flat
 
@@ -777,7 +780,7 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
                 oc_start = g * out_per_group
                 oc_end = oc_start + out_per_group
                 input_tile = input_nchw[n, input_start:input_end]
-                input_flat = _pack_conv_input_fp16(input_tile, gp).view(np.uint16).tolist()
+                input_flat = _pack_cdma_dc_feature_input_fp16(input_tile, gp).view(np.uint16).tolist()
                 ct_inputs = (ctypes.c_uint16 * len(input_flat)).from_buffer(input_map)
                 ct_inputs[:] = input_flat
 
@@ -814,7 +817,7 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
                     oc_end = min(oc_start + oc_tile, out_c)
                     tile_out_c = oc_end - oc_start
                     tile_p = _conv_params(1, in_c, tile_in_h, in_w, tile_out_c, kh, kw, 1, stride=stride)
-                    input_flat = _pack_conv_input_fp16(input_tile, tile_p).view(np.uint16).tolist()
+                    input_flat = _pack_cdma_dc_feature_input_fp16(input_tile, tile_p).view(np.uint16).tolist()
                     ct_inputs = (ctypes.c_uint16 * len(input_flat)).from_buffer(input_map)
                     ct_inputs[:] = input_flat
 
@@ -855,7 +858,7 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
                     input_tile = np.zeros((tile_c, tile_in_h, in_w), dtype=np.float16)
                     real_in_h = min(tile_in_h, in_h - out_row_start * stride)
                     input_tile[:, :real_in_h] = input_nchw[n, ch_start:ch_end, out_row_start * stride:out_row_start * stride + real_in_h, :]
-                    input_flat = _pack_conv_input_fp16(input_tile, tile_p).view(np.uint16).tolist()
+                    input_flat = _pack_cdma_dc_feature_input_fp16(input_tile, tile_p).view(np.uint16).tolist()
                     ct_inputs = (ctypes.c_uint16 * len(input_flat)).from_buffer(input_map)
                     ct_inputs[:] = input_flat
 
@@ -897,7 +900,7 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
                     tile_out_c = oc_end - oc_start
                     hw_out_c = oc_tile if tile_out_c < oc_tile else tile_out_c
                     tile_p = _conv_params(1, in_c, hw_tile_h, in_w, hw_out_c, kh, kw, groups, stride=stride)
-                    input_flat = _pack_conv_input_fp16(input_tile, tile_p).view(np.uint16).tolist()
+                    input_flat = _pack_cdma_dc_feature_input_fp16(input_tile, tile_p).view(np.uint16).tolist()
                     ct_inputs = (ctypes.c_uint16 * len(input_flat)).from_buffer(input_map)
                     ct_inputs[:] = input_flat
 
@@ -936,7 +939,7 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
                 tile_in_h = (tile_out_h - 1) * stride + kh
                 tile_p = p if tile_in_h == in_h else _conv_params(1, in_c, tile_in_h, in_w, out_c, kh, kw, groups, stride=stride)
                 input_tile = input_nchw[n, :, row_start * stride:row_start * stride + tile_in_h, :]
-                input_flat = _pack_conv_input_fp16(input_tile, tile_p).view(np.uint16)
+                input_flat = _pack_cdma_dc_feature_input_fp16(input_tile, tile_p).view(np.uint16)
                 input_bytes = input_flat.nbytes
                 assert input_offset + input_bytes <= input_mem_create.size, "input buffer too small"
                 ctypes.memmove(input_ptr + input_offset, input_flat.ctypes.data, input_bytes)
@@ -976,7 +979,7 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None,
             tile_p = p if tile_in_h == in_h else _conv_params(1, in_c, tile_in_h, in_w, out_c, kh, kw, groups, stride=stride)
             tile_out_h = tile_p["out_h"]
             input_tile = input_nchw[n, :, input_row_start:input_row_start + tile_in_h, :]
-            input_flat = _pack_conv_input_fp16(input_tile, tile_p).view(np.uint16).tolist()
+            input_flat = _pack_cdma_dc_feature_input_fp16(input_tile, tile_p).view(np.uint16).tolist()
             ct_inputs = (ctypes.c_uint16 * len(input_flat)).from_buffer(input_map)
             ct_inputs[:] = input_flat
 

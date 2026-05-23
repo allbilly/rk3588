@@ -1,0 +1,20 @@
+Breakpoint 1 (ioctl) pending.
+Function "ioctl" not defined.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/aarch64-linux-gnu/libthread_db.so.1".
+inputs=1 outputs=1
+Input[0] dims=1x40x40x160 size=512000 type=1
+
+=== DRM_IOCTL_RKNPU_SUBMIT #1 cmd=0xc0686441 size=104 arg=0x7fffffa3e0 ===
+  flags=0x00000005 timeout=6000 task_start=0 task_number=6
+  task_counter=0 priority=0 task_obj_addr=0xffffff8148b38800
+  field32=0x00000000 field36=0x00000000 task_base_addr=0x0 field48=0x0
+  core_mask=0x00000000 fence_fd=-1
+  subcore_task[0]={task_start=0, task_number=2}
+  subcore_task[1]={task_start=0, task_number=2}
+  subcore_task[2]={task_start=0, task_number=2}
+  subcore_task[3]={task_start=0, task_number=0}
+  subcore_task[4]={task_start=0, task_number=0}
+  task[0] unreadable at 0xffffff8148b38800
+rknn_run OK
+[Inferior 1 (process 111636) exited normally]

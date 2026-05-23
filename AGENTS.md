@@ -8,6 +8,7 @@ On this Orange Pi RK3588 machine, the NPU card is present. Do not assume hardwar
 unavailable just because an earlier probe failed; 
 To prove the card userfule, or testing if NPU state is corruptued/polluted
 - `python examples/simple_add.py` is a known quick check that proves the card can be used.
+- `python examples/kernel_6_18/simple_add.py` is a known quick check that proves the card can be used.
 - or `python examples/kerenl_6_18/simple_add.py` if you are on kerenl 6.18 
 
 Use `deepwiki_ask_question` on these repos:
@@ -25,7 +26,14 @@ Use `deepwiki_ask_question` on these repos:
 - `torvalds/linux` (drivers/accel/rocket/) — The **upstream Linux kernel** "rocket" driver for Rockchip NPU. Contains the canonical register definitions in `rocket_registers.h` (auto-generated from Mesa). When `rockchip.py` or `conv.py` register values seem wrong, check this file for ground-truth bitfield masks/shifts. Tomu got multicore NPU working on the merged linux mainline rocket NPU driver.
 - `allbilly/npu` — another NPU reverse-engineering repo, contains how to run model in ops_rknn and gdb dump scripts
 
-CONV compiler
+For simulator reference
+- 'nvdla/vp'
+- 'boopdotpng/rdna-sim'
+- 'https://anuraagw.me/book/blackhole-emulator'
+- 'gpgpu-sim/gpgpu-sim_distribution'
+- 'adam-maj/tiny-gpu'
+
+CONV compiler/tiling reference
 - `chaotic-cx/mesa-mirror` — CONV compiler for RK3588 NPU in gallrium rocket, detailed in examples/kernel_6_18/conv_vs_mesa.md , For the Mesa Gallium driver (`src/gallium/drivers/rocket/`), which includes the `registers.xml` that generates `rocket_registers.h`. Useful for understanding how convolution is compiled for RK3588. Tomu got multicore working with mesa.
 - `ONNC/onnc` — Compile CONV for NVDLA(origins of RK3588 NPU), Open Neural Network Compiler, includes NVDLA backend support. Useful for understanding compiler-level convolution partitioning.
 - `nvdla/sw` — Compile CONV for NVDLA(origins of RK3588 NPU), For compiler loadable format, UMD/KMD driver logic, how the software stack partitions and programs layers. Key files:
@@ -38,3 +46,7 @@ folder structure
 - examples/*.py , each op example py file shd be standalone and contain only decoded registers, no hex blob. coding style shd reference to gemm.py and each op.py shd have min line diff comparing to gemm.py as the golden reference, compare with command diff ops.py gemm.py
 - *rawbuf*.py is keeping its hexblob intentionally
 - Dont edit files in examples/kernel6_18/ unless specified
+
+DO NOT KILL LONG RUNNING NPU PROCESS, it will crash and reboot
+
+BE SUPER CAREFUL when modifying submit-related args (npu_submit, task_count, regcmd_addr, regcfg_amount, enable_mask). Wrong submit parameters will crash/reboot the board. 

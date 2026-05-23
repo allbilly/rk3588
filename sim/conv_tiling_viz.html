@@ -1,0 +1,986 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RK3588 NPU Conv Tiling Visualizer</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; background: #0d1117; color: #c9d1d9; padding: 20px; }
+h1 { font-size: 16px; color: #58a6ff; margin-bottom: 6px; letter-spacing: 0.3px; }
+h2 { font-size: 13px; color: #8b949e; margin-bottom: 10px; font-weight: 400; }
+.subtitle { color: #8b949e; font-size: 12px; margin-bottom: 18px; }
+.split-layout { display: flex; gap: 20px; flex-wrap: wrap; }
+.controls { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; width: 340px; flex-shrink: 0; }
+.controls h3 { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 12px; }
+.param-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; }
+.param-group { margin-bottom: 4px; }
+.param-group label { display: block; font-size: 11px; color: #8b949e; margin-bottom: 2px; }
+.param-group input { width: 100%; background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 4px 8px; font-size: 12px; color: #c9d1d9; font-family: inherit; }
+.param-group input:focus { outline: none; border-color: #58a6ff; }
+.btn { background: #238636; border: none; border-radius: 6px; padding: 6px 16px; font-size: 12px; color: #fff; cursor: pointer; font-family: inherit; margin-top: 10px; width: 100%; }
+.btn:hover { background: #2ea043; }
+.btn-sm { background: #21262d; border: 1px solid #30363d; border-radius: 4px; padding: 2px 6px; font-size: 10px; color: #c9d1d9; cursor: pointer; font-family: inherit; }
+.btn-sm:hover { background: #30363d; }
+.param-section { margin-top: 12px; padding-top: 12px; border-top: 1px solid #30363d; }
+
+.result-panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; flex: 1; min-width: 500px; }
+.result-panel h3 { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px; }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 6px; margin-bottom: 12px; }
+.stat { background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 6px 10px; text-align: center; }
+.stat .val { font-size: 16px; font-weight: 600; color: #58a6ff; }
+.stat .lbl { font-size: 9px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 1px; }
+
+.grid-container { position: relative; overflow-x: auto; margin-bottom: 12px; }
+#tileGrid { border-collapse: collapse; min-width: 300px; }
+#tileGrid td { border: 2px solid #0d1117; text-align: center; font-size: 10px; padding: 6px 4px; cursor: pointer; transition: opacity 0.15s; min-width: 48px; height: 40px; position: relative; }
+#tileGrid td .tile-label { font-size: 9px; color: rgba(255,255,255,0.8); font-weight: 500; }
+#tileGrid td .tile-dims { font-size: 8px; color: rgba(255,255,255,0.5); margin-top: 1px; }
+#tileGrid td:hover { filter: brightness(1.3); }
+#tileGrid td.selected { outline: 2px solid #f0883e; outline-offset: -1px; z-index: 1; }
+#tileGrid th { font-size: 9px; color: #8b949e; padding: 2px 4px; font-weight: 400; }
+#tileGrid .y-label { text-align: right; padding-right: 6px; font-size: 9px; color: #d2a8ff; border: none; }
+#tileGrid .k-label { text-align: center; font-size: 9px; color: #ffa657; border: none; padding-bottom: 4px; }
+td.color-none { background: #21262d; }
+td.color-by_y { background: #3d2e5c; }
+td.color-by_k { background: #583d25; }
+td.color-by_yk { background: #1d3d24; }
+
+.tile-info { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; font-size: 12px; min-height: 80px; }
+.tile-info .info-title { font-size: 10px; color: #8b949e; margin-bottom: 4px; }
+.tile-info .info-row { display: flex; gap: 16px; flex-wrap: wrap; }
+.tile-info .info-row span { display: inline-flex; gap: 4px; }
+.tile-info .info-key { color: #8b949e; }
+.tile-info .info-val { color: #f0883e; font-weight: 500; }
+.tile-info .no-selection { color: #484f58; font-style: italic; }
+
+.legend { display: flex; gap: 16px; font-size: 10px; margin-top: 10px; padding-top: 10px; border-top: 1px solid #30363d; }
+.legend-item { display: flex; align-items: center; gap: 5px; }
+.legend-swatch { width: 12px; height: 12px; border-radius: 2px; border: 1px solid #30363d; }
+table.params-table { width: 100%; font-size: 11px; border-collapse: collapse; margin-top: 6px; }
+table.params-table td { padding: 3px 8px; border-bottom: 1px solid #21262d; }
+table.params-table td:first-child { color: #8b949e; width: 50%; }
+table.params-table td:last-child { color: #c9d1d9; font-weight: 500; text-align: right; }
+
+.tile-count-badge { display: inline-block; background: #1f6feb22; border: 1px solid #1f6feb44; border-radius: 10px; padding: 2px 10px; font-size: 11px; color: #58a6ff; margin-left: 6px; }
+
+.method-badge { display: inline-block; border-radius: 4px; padding: 1px 8px; font-size: 10px; font-weight: 600; }
+.method-none { background: #21262d; color: #8b949e; }
+.method-y { background: #3d2e5c; color: #d2a8ff; }
+.method-k { background: #583d25; color: #ffa657; }
+.method-yk { background: #1d3d24; color: #3fb950; }
+
+.flow-diagram { margin-top: 14px; padding-top: 14px; border-top: 1px solid #30363d; }
+.flow-step { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 6px; font-size: 11px; }
+.flow-num { background: #21262d; border-radius: 50%; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; font-size: 9px; color: #8b949e; flex-shrink: 0; margin-top: 1px; }
+.flow-text { color: #c9d1d9; line-height: 1.5; }
+.flow-text code { background: #21262d; padding: 1px 4px; border-radius: 3px; font-size: 10px; color: #f0883e; font-family: inherit; }
+
+.family-badge { display: inline-block; border-radius: 3px; padding: 1px 6px; font-size: 9px; font-weight: 600; letter-spacing: 0.3px; }
+.fam-direct_spatial, .fam-direct_spatial_gated { background: #1f6feb22; color: #58a6ff; }
+.fam-grouped_serial { background: #3d2e5c; color: #d2a8ff; }
+
+.fam-spatial_oc_serial { background: #583d25; color: #ffa657; }
+.fam-depthwise_spatial_tiled { background: #1d3d24; color: #3fb950; }
+.fam-pointwise_oc { background: #1f6feb44; color: #79c0ff; }
+.fam-generic_yk { background: #21262d; color: #8b949e; }
+
+/* ─── CONV Internals ──────────────────────────────────────────── */
+.internals-section { margin-top: 14px; padding-top: 14px; border-top: 1px solid #30363d; }
+.internals-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 8px; }
+.internal-panel { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; }
+.internal-panel .panel-title { font-size: 10px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+.internal-panel .panel-subtitle { color: #484f58; font-size: 9px; text-transform: none; letter-spacing: 0; }
+
+.cbuf-bar { display: flex; height: 28px; border-radius: 4px; overflow: hidden; border: 1px solid #30363d; }
+.cbuf-bank { display: flex; align-items: center; justify-content: center; font-size: 8px; font-weight: 600; transition: all 0.2s; position: relative; }
+.cbuf-bank:hover { filter: brightness(1.3); transform: scaleY(1.1); z-index: 1; }
+.cbuf-data { background: #1f6feb; color: #fff; }
+.cbuf-weight { background: #d29922; color: #000; }
+.cbuf-own { outline: 2px solid #fff; outline-offset: -2px; }
+.cbuf-legend { display: flex; gap: 12px; margin-top: 4px; font-size: 9px; color: #8b949e; }
+.cbuf-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: middle; margin-right: 3px; }
+
+.desc-flow { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.desc-node { display: inline-flex; align-items: center; gap: 4px; background: #21262d; border-radius: 4px; padding: 4px 8px; font-size: 9px; border: 1px solid #30363d; cursor: default; }
+.desc-node .dn-family { font-weight: 600; }
+.desc-node .dn-count { color: #8b949e; font-size: 8px; }
+.desc-arrow { color: #484f58; font-size: 10px; }
+.desc-node.setup .dn-family { color: #58a6ff; }
+.desc-node.k_half .dn-family { color: #d2a8ff; }
+.desc-node.k_tile .dn-family { color: #ffa657; }
+.desc-node.y_mid .dn-family { color: #3fb950; }
+.desc-node.y_tile .dn-family { color: #f0883e; }
+
+.pipe-flow { display: flex; align-items: center; gap: 0; justify-content: center; padding: 8px 0; }
+.pipe-stage { display: flex; align-items: center; }
+.pipe-box { text-align: center; padding: 8px 14px; border-radius: 6px; font-size: 10px; font-weight: 600; min-width: 60px; }
+.pipe-box .pipe-sub { font-size: 8px; font-weight: 400; opacity: 0.7; }
+.pipe-cna { background: #1f6feb33; border: 1px solid #1f6feb88; color: #58a6ff; }
+.pipe-core { background: #d2992233; border: 1px solid #d2992288; color: #d29922; }
+.pipe-dpu { background: #3fb95033; border: 1px solid #3fb95088; color: #3fb950; }
+.pipe-ppu { background: #f0883e33; border: 1px solid #f0883e88; color: #f0883e; }
+.pipe-arrow { color: #484f58; font-size: 14px; margin: 0 4px; }
+
+.reg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; font-size: 10px; }
+.reg-row { display: flex; justify-content: space-between; padding: 2px 6px; border-radius: 3px; background: #161b22; }
+.reg-key { color: #8b949e; }
+.reg-val { color: #f0883e; font-weight: 500; font-family: monospace; }
+
+@media (max-width: 860px) {
+  .internals-grid { grid-template-columns: 1fr; }
+}
+
+.quick-shape-link { cursor: pointer; color: #c9d1d9; text-decoration: none; display: inline-block; padding: 1px 4px; border-radius: 2px; font-size: 10px; }
+.quick-shape-link:hover { background: #30363d; color: #58a6ff; }
+.family-group { margin-bottom: 8px; }
+.family-group .fg-title { font-size: 10px; color: #8b949e; margin-bottom: 3px; display: flex; gap: 6px; align-items: center; }
+
+@media (max-width: 860px) {
+  .split-layout { flex-direction: column; }
+  .controls { width: 100%; }
+  .result-panel { min-width: unset; }
+}
+</style>
+</head>
+<body>
+
+<h1>▎RK3588 NPU Conv Tiling Visualizer</h1>
+<h2>Interactive explanation of <code>_plan_conv_tiles()</code> from examples/kernel_6_18/conv.py</h2>
+<div class="subtitle">Implements the RKNN decompiled unified planner: one planner, one split_method enum (0=NONE, 1=BY_Y, 2=BY_K, 3=BY_YK).<br>
+RKNN compiler emits observed descriptor families (setup, k_half, k_tile, y_mid, y_tile) — this Python view approximates the tile grid only.</div>
+
+<div class="split-layout">
+
+<div class="controls">
+  <h3>Layer Parameters</h3>
+  <div class="param-grid">
+    <div class="param-group"><label>in_c (input channels)</label><input id="in_c" type="number" value="16" min="1" max="2048"></div>
+    <div class="param-group"><label>out_c (output channels)</label><input id="out_c" type="number" value="32" min="1" max="2048"></div>
+    <div class="param-group"><label>in_h (input height)</label><input id="in_h" type="number" value="9" min="1" max="1024"></div>
+    <div class="param-group"><label>in_w (input width)</label><input id="in_w" type="number" value="9" min="1" max="1024"></div>
+    <div class="param-group"><label>kh (kernel height)</label><input id="kh" type="number" value="3" min="1" max="16"></div>
+    <div class="param-group"><label>kw (kernel width)</label><input id="kw" type="number" value="3" min="1" max="16"></div>
+    <div class="param-group"><label>groups</label><input id="groups" type="number" value="1" min="1" max="2048"></div>
+    <div class="param-group"><label>stride</label><input id="stride" type="number" value="1" min="1" max="16"></div>
+  </div>
+  <button class="btn" onclick="recompute()">Recompute Tiling</button>
+
+  <div class="param-section">
+    <h3>Quick Shapes</h3>
+    <table class="params-table" id="quickShapes">
+    </table>
+  </div>
+</div>
+
+<div class="result-panel">
+  <h3>Tiling Result <span id="tileBadge" class="tile-count-badge">0 tiles</span> <span id="methodBadge"></span></h3>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="grid-container">
+    <table id="tileGrid">
+      <tr><th></th><th id="gridHeaderK" colspan="1">K (output channels) →</th></tr>
+      <tr id="gridBody"><td class="y-label" id="gridHeaderY">Y (rows) ↓</td><td id="gridEmpty" style="color:#484f58;font-size:12px;padding:30px;text-align:center;background:#0d1117;border:none;">Adjust parameters and click "Recompute"</td></tr>
+    </table>
+  </div>
+
+  <div class="tile-info" id="tileInfo">
+    <div class="info-title">SELECTED TILE</div>
+    <div class="no-selection">Click a tile in the grid above to see its details.</div>
+  </div>
+
+  <div class="legend">
+    <div class="legend-item"><div class="legend-swatch" style="background:#21262d"></div> _SPLIT_NONE (single tile)</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:#3d2e5c"></div> _SPLIT_BY_Y (row tiles)</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:#583d25"></div> _SPLIT_BY_K (channel tiles)</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:#1d3d24"></div> _SPLIT_BY_YK (2D grid)</div>
+  </div>
+
+  <div class="internals-section">
+    <h3>CONV Internals <span id="internalsBadge" class="tile-count-badge"></span></h3>
+    <div class="internals-grid">
+      <div class="internal-panel" id="cbufPanel">
+        <div class="panel-title">CBUF Bank Allocation <span class="panel-subtitle" id="cbufSubtitle"></span></div>
+        <div class="cbuf-bar" id="cbufBar"></div>
+        <div class="cbuf-legend">
+          <span><span class="cbuf-swatch cbuf-data"></span> DATA_BANK</span>
+          <span><span class="cbuf-swatch cbuf-weight"></span> WEIGHT_BANK</span>
+        </div>
+      </div>
+      <div class="internal-panel" id="descFamilyPanel">
+        <div class="panel-title">RKNN Descriptor Pipeline</div>
+        <div id="descFamilyFlow" class="desc-flow"></div>
+      </div>
+      <div class="internal-panel" id="pipeFlowPanel">
+        <div class="panel-title">NPU Pipeline Data Flow</div>
+        <div class="pipe-flow">
+          <div class="pipe-stage"><div class="pipe-box pipe-cna">CNA<br><span class="pipe-sub">Conv/MMA</span></div><div class="pipe-arrow">→</div></div>
+          <div class="pipe-stage"><div class="pipe-box pipe-core">CORE<br><span class="pipe-sub">Accumulate</span></div><div class="pipe-arrow">→</div></div>
+          <div class="pipe-stage"><div class="pipe-box pipe-dpu">DPU<br><span class="pipe-sub">Post-Proc</span></div><div class="pipe-arrow">→</div></div>
+          <div class="pipe-stage"><div class="pipe-box pipe-ppu">PPU<br><span class="pipe-sub">Pool/Pad</span></div></div>
+        </div>
+      </div>
+      <div class="internal-panel" id="regDetailPanel">
+        <div class="panel-title">Tile Register Summary <span class="panel-subtitle" id="regSubtitle">click a tile</span></div>
+        <div id="regDetailContent"><div class="no-selection">Click a tile to see register details.</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="familySummaryDiv" style="margin-top:14px;padding-top:14px;border-top:1px solid #30363d;">
+    <h3>Test Suite: <span id="suiteCount">217</span> shapes by conv family</h3>
+    <div id="familySummary"></div>
+    <div style="margin-top:8px;">
+      <button class="btn-sm" onclick="expandAllFamilies()">Expand All</button>
+      <button class="btn-sm" onclick="collapseAllFamilies()" style="margin-left:4px;">Collapse All</button>
+      <span id="currentFamily" style="margin-left:8px;font-size:10px;color:#8b949e;"></span>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+// ─── CBUF constants (matches conv.py) ──────────────────────────────
+const CBUF_ENTRY_BYTES = 128;
+const CBUF_ENTRIES_PER_BANK = 256;
+const RK_CBUF_BANKS = 12;
+const CBUF_BANK_SIZE = CBUF_ENTRIES_PER_BANK * CBUF_ENTRY_BYTES;
+const FP16_BYTES = 2;
+const FP16_ATOM_ELEMENTS = 16;
+const RK_MAX_CONV_FLAT_STRIDE = 992;
+
+function ceilDiv(x, y) { return Math.floor((x + y - 1) / y); }
+function alignUp(x, a) { return ceilDiv(x, a) * a; }
+
+function isDepthwise(in_c, out_c, groups) { return groups === in_c && groups === out_c; }
+
+function convAlignC(in_c, groups, out_c) {
+  const dw = isDepthwise(in_c, out_c, groups);
+  if (!dw && (groups > 1 || in_c > 4)) return 16;
+  const minAlign = dw ? 16 : 8;
+  if (in_c <= 1) return Math.max(minAlign, 8);
+  const p2 = 1 << (Math.max(1, in_c) - 1).toString(2).length;
+  return Math.max(minAlign, Math.min(p2, dw ? 32 : 16));
+}
+
+function convParams(in_c, in_h, in_w, out_c, kh, kw, groups, stride) {
+  const dw = isDepthwise(in_c, out_c, groups);
+  const spatial = kh !== 1 || kw !== 1;
+  const out_h = Math.floor((in_h - kh) / stride) + 1;
+  const out_w = Math.floor((in_w - kw) / stride) + 1;
+  const alignC = convAlignC(in_c, groups, out_c);
+  const alignOutC = Math.max(16, alignUp(out_c, 16));
+  const widthStride = alignUp(in_w, Math.max(1, ceilDiv(16, alignC)));
+  const outWidthStride = spatial ? alignUp(out_h * out_w, 4) : out_h * out_w;
+  const inputPackC2 = (() => {
+    if (in_c === 1) return 2;
+    if (!dw && groups === 1 && in_c > 1 && in_c <= 4) return 8;
+    return 8;
+  })();
+  const useNhwc = !dw && !(groups > 1 && spatial) && in_c < inputPackC2;
+  return { in_c, in_h, in_w, out_c, kh, kw, groups, stride, is_depthwise: dw, is_spatial: spatial,
+           out_h, out_w, align_c: alignC, align_out_c: alignOutC, width_stride: widthStride,
+           out_width_stride: outWidthStride, input_pack_c2: inputPackC2, use_nhwc: useNhwc };
+}
+
+function needsPointwiseOcTileSchedule(in_c, out_c, in_h, in_w, kh, kw, groups) {
+  if (groups !== 1 || kh !== 1 || kw !== 1) return false;
+  const maxTile = Math.floor(CBUF_BANK_SIZE / (Math.max(1, in_c) * FP16_BYTES));
+  const ocTile = maxTile >= 32 ? 32 : maxTile >= 16 ? 16 : maxTile >= 8 ? 8 : 4;
+  return out_c > ocTile || (in_c >= 16 && out_c % ocTile !== 0);
+}
+
+function classifyShape(in_c, out_c, kh, kw, in_h, in_w, groups, stride) {
+  const dw = isDepthwise(in_c, out_c, groups);
+  const spatial = kh !== 1 || kw !== 1;
+  if (spatial && groups > 1 && !dw) return "grouped_serial";
+  if (spatial && groups === 1 && !dw && out_c > 16 && (in_c % 16 !== 0 || in_c >= 16)) return "spatial_oc_serial";
+  if (dw && spatial) return "depthwise_spatial_tiled";
+  if (!spatial && !dw && groups === 1 && needsPointwiseOcTileSchedule(in_c, out_c, in_h, in_w, kh, kw, groups)) return "pointwise_oc";
+  return "generic_yk";
+}
+
+const FAMILIES = [
+  { id: "direct_spatial_gated", label: "Direct Spatial (gated)", color: "#58a6ff" },
+
+  { id: "spatial_oc_serial", label: "Spatial OC Serial", color: "#ffa657" },
+  { id: "depthwise_spatial_tiled", label: "Depthwise Spatial Tiled", color: "#3fb950" },
+  { id: "pointwise_oc", label: "Pointwise OC Tile", color: "#79c0ff" },
+  { id: "grouped_serial", label: "Grouped Serial", color: "#d2a8ff" },
+  { id: "generic_yk", label: "Generic Y/K Tile", color: "#8b949e" },
+];
+
+// ─── Test shapes from conv.py `conv_shapes()` ──────────────────────
+function allTestShapes() {
+  // Each entry: [in_c, in_h, in_w, out_c, kh, kw, groups, stride, name]
+  const s = [];
+  const add = (ic, ih, iw, oc, kh, kw, g, st, name) => s.push({ ic, ih, iw, oc, kh, kw, g, st, name });
+  add(1, 4, 4, 6, 1, 1, 1, 1, "conv2d_1x6_1x1_4x4");
+  add(3, 4, 4, 3, 1, 1, 1, 1, "conv2d_3x3_1x1_4x4");
+  add(4, 4, 4, 2, 1, 1, 1, 1, "conv2d_4x2_1x1_4x4");
+  add(4, 9, 9, 4, 1, 1, 1, 1, "b1_c4_h9_w9_oc4_wic4_k1x1_g1");
+  add(3, 52, 52, 6, 1, 1, 1, 1, "b1_c3_h52_w52_oc6_wic3_k1x1_g1");
+  add(96, 56, 56, 24, 1, 1, 1, 1, "b1_c96_h56_w56_oc24_wic96_k1x1_g1");
+  add(144, 56, 56, 24, 1, 1, 1, 1, "b1_c144_h56_w56_oc24_wic144_k1x1_g1");
+  add(144, 28, 28, 32, 1, 1, 1, 1, "b1_c144_h28_w28_oc32_wic144_k1x1_g1");
+  add(192, 28, 28, 32, 1, 1, 1, 1, "b1_c192_h28_w28_oc32_wic192_k1x1_g1");
+  add(192, 28, 28, 16, 1, 1, 1, 1, "b1_c192_h28_w28_oc16_wic192_k1x1_g1");
+  add(256, 28, 28, 32, 1, 1, 1, 1, "b1_c256_h28_w28_oc32_wic256_k1x1_g1");
+  add(16, 8, 8, 16, 1, 1, 1, 1, "conv2d_16x16_1x1_8x8");
+  add(16, 32, 32, 16, 1, 1, 1, 1, "b1_c16_h32_w32_oc16_wic16_k1x1_g1");
+  add(4, 9, 9, 4, 3, 3, 1, 1, "b1_c4_h9_w9_oc4_wic4_k3x3_g1");
+  add(16, 18, 18, 16, 3, 3, 1, 1, "b1_c16_h18_w18_oc16_wic16_k3x3_g1");
+  add(1, 5, 7, 6, 3, 3, 1, 1, "b1_c1_h5_w7_oc6_wic1_k3x3_g1");
+  add(4, 9, 9, 4, 3, 3, 1, 1, "conv2d_b2_c4_h9_w9_oc4_wic4_k3x3_g1");
+  add(3, 11, 28, 3, 3, 3, 3, 1, "b1_c3_h11_w28_oc3_wic1_k3x3_g3");
+  add(3, 5, 5, 6, 1, 3, 1, 1, "conv2d_3x6_1x3_5x5");
+  add(3, 5, 7, 6, 3, 3, 3, 1, "b1_c3_h5_w7_oc6_wic1_k3x3_g3");
+  add(3, 5, 7, 6, 2, 1, 1, 1, "conv2d_b1_c3_h5_w7_oc6_wic3_k2x1_g1");
+  add(3, 5, 7, 6, 2, 3, 1, 1, "conv2d_b1_c3_h5_w7_oc6_wic3_k2x3_g1");
+  add(3, 5, 7, 6, 2, 5, 1, 1, "conv2d_b1_c3_h5_w7_oc6_wic3_k2x5_g1");
+  add(3, 5, 7, 6, 3, 1, 1, 1, "conv2d_b1_c3_h5_w7_oc6_wic3_k3x1_g1");
+  add(3, 5, 7, 6, 3, 3, 1, 1, "conv2d_b1_c3_h5_w7_oc6_wic3_k3x3_g1");
+  add(3, 5, 7, 6, 3, 5, 1, 1, "conv2d_b1_c3_h5_w7_oc6_wic3_k3x5_g1");
+  add(1, 5, 7, 6, 2, 1, 1, 1, "conv2d_1x6_2x1_5x7");
+  add(1, 5, 7, 6, 2, 3, 1, 1, "conv2d_1x6_2x3_5x7");
+  add(1, 5, 7, 6, 3, 1, 1, 1, "conv2d_1x6_3x1_5x7_b");
+  add(1, 5, 7, 6, 3, 5, 1, 1, "conv2d_1x6_3x5_5x7");
+  add(4, 1, 1, 2, 1, 1, 2, 1, "conv2d_b1_c4_h1_w1_oc2_wic2_k1x1_g2");
+  add(4, 1, 1, 4, 1, 1, 2, 1, "conv2d_4x4_1x1_1x1_g2");
+  add(32, 32, 32, 32, 1, 1, 32, 1, "b1_c32_h32_w32_oc32_wic1_k1x1_g32");
+  add(15, 5, 5, 35, 3, 3, 5, 1, "b1_c15_h5_w5_oc35_wic3_k3x3_g5");
+  add(3, 11, 28, 3, 3, 3, 3, 1, "conv2d_b2_c3_h11_w28_oc3_wic1_k3x3_g3");
+  add(15, 5, 5, 35, 3, 3, 5, 1, "conv2d_b4_c15_h5_w5_oc35_wic3_k3x3_g5");
+  add(4, 5, 5, 4, 3, 3, 2, 1, "b1_c4_h5_w5_oc4_wic2_k3x3_g2");
+  add(4, 5, 5, 8, 3, 3, 2, 1, "b1_c4_h5_w5_oc8_wic2_k3x3_g2");
+  add(4, 5, 5, 12, 3, 3, 2, 1, "b1_c4_h5_w5_oc12_wic2_k3x3_g2");
+  add(6, 5, 5, 6, 3, 3, 3, 1, "b1_c6_h5_w5_oc6_wic2_k3x3_g3");
+  add(6, 5, 5, 12, 3, 3, 3, 1, "b1_c6_h5_w5_oc12_wic2_k3x3_g3");
+  add(6, 5, 5, 18, 3, 3, 3, 1, "b1_c6_h5_w5_oc18_wic2_k3x3_g3");
+  add(15, 5, 5, 20, 3, 3, 5, 1, "b1_c15_h5_w5_oc20_wic3_k3x3_g5");
+  add(15, 5, 5, 25, 3, 3, 5, 1, "b1_c15_h5_w5_oc25_wic3_k3x3_g5");
+  add(15, 5, 5, 30, 3, 3, 5, 1, "b1_c15_h5_w5_oc30_wic3_k3x3_g5");
+  add(15, 5, 5, 40, 3, 3, 5, 1, "b1_c15_h5_w5_oc40_wic3_k3x3_g5");
+  add(2, 4, 4, 2, 1, 1, 1, 1, "conv2d_2x2_1x1_4x4");
+  add(8, 5, 5, 8, 1, 1, 1, 1, "conv2d_8x8_1x1_5x5");
+  add(10, 9, 9, 20, 3, 3, 1, 1, "conv2d_10x20_3x3_9x9");
+  add(16, 9, 9, 16, 3, 3, 1, 1, "conv2d_16x16_3x3_9x9");
+  add(2, 6, 6, 4, 3, 3, 1, 1, "conv2d_2x4_3x3_6x6");
+  add(2, 5, 5, 4, 2, 2, 1, 1, "conv2d_2x4_2x2_5x5");
+  add(1, 10, 10, 32, 5, 5, 1, 1, "conv2d_1x32_5x5_10x10");
+  add(8, 10, 10, 4, 4, 4, 1, 1, "conv2d_8x4_4x4_10x10");
+  add(3, 224, 224, 32, 3, 3, 1, 1, "conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1");
+  add(32, 112, 112, 32, 3, 3, 32, 1, "conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32");
+  add(32, 112, 112, 64, 1, 1, 1, 1, "conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1");
+  add(64, 112, 112, 64, 3, 3, 64, 1, "conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64");
+  add(64, 56, 56, 128, 1, 1, 1, 1, "conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1");
+  add(128, 56, 56, 128, 3, 3, 128, 1, "conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128");
+  add(128, 56, 56, 128, 1, 1, 1, 1, "conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1");
+  add(128, 28, 28, 256, 1, 1, 1, 1, "conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1");
+  add(256, 28, 28, 256, 3, 3, 256, 1, "conv2d_cc_b1_c256_h28_w28_oc256_wic1_k3x3_g256");
+  add(256, 28, 28, 256, 1, 1, 1, 1, "conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1");
+  add(256, 14, 14, 512, 1, 1, 1, 1, "conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1");
+  add(512, 14, 14, 512, 3, 3, 512, 1, "conv2d_cc_b1_c512_h14_w14_oc512_wic1_k3x3_g512");
+  add(512, 14, 14, 512, 1, 1, 1, 1, "conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1");
+  add(512, 7, 7, 1024, 1, 1, 1, 1, "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1");
+  add(1024, 7, 7, 1024, 3, 3, 1024, 1, "conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024");
+  add(1024, 7, 7, 1024, 1, 1, 1, 1, "conv2d_cc_b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1");
+  add(1024, 7, 7, 1024, 7, 7, 1024, 1, "conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024");
+  add(1024, 1, 1, 1001, 1, 1, 1, 1, "conv2d_cc_b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1");
+  add(256, 14, 14, 512, 1, 1, 1, 1, "b1_c256_h14_w14_oc512_wic256_k1x1_g1");
+  add(384, 14, 14, 96, 1, 1, 1, 1, "b1_c384_h14_w14_oc96_wic384_k1x1_g1");
+  add(480, 14, 14, 96, 1, 1, 1, 1, "b1_c480_h14_w14_oc96_wic480_k1x1_g1");
+  add(480, 14, 14, 16, 1, 1, 1, 1, "b1_c480_h14_w14_oc16_wic480_k1x1_g1");
+  add(512, 14, 14, 112, 1, 1, 1, 1, "b1_c512_h14_w14_oc112_wic512_k1x1_g1");
+  add(512, 14, 14, 24, 1, 1, 1, 1, "b1_c512_h14_w14_oc24_wic512_k1x1_g1");
+  add(512, 14, 14, 32, 1, 1, 1, 1, "b1_c512_h14_w14_oc32_wic512_k1x1_g1");
+  add(512, 14, 14, 512, 1, 1, 1, 1, "b1_c512_h14_w14_oc512_wic512_k1x1_g1");
+  add(512, 7, 7, 1024, 1, 1, 1, 1, "b1_c512_h7_w7_oc1024_wic512_k1x1_g1");
+  add(528, 14, 14, 256, 1, 1, 1, 1, "b1_c528_h14_w14_oc256_wic528_k1x1_g1");
+  add(528, 14, 14, 160, 1, 1, 1, 1, "b1_c528_h14_w14_oc160_wic528_k1x1_g1");
+  add(528, 14, 14, 32, 1, 1, 1, 1, "b1_c528_h14_w14_oc32_wic528_k1x1_g1");
+  add(528, 14, 14, 128, 1, 1, 1, 1, "b1_c528_h14_w14_oc128_wic528_k1x1_g1");
+  add(576, 14, 14, 96, 1, 1, 1, 1, "b1_c576_h14_w14_oc96_wic576_k1x1_g1");
+  add(832, 7, 7, 48, 1, 1, 1, 1, "b1_c832_h7_w7_oc48_wic832_k1x1_g1");
+  add(1024, 7, 7, 1024, 1, 1, 1, 1, "b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1");
+  add(1024, 1, 1, 1001, 1, 1, 1, 1, "b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1");
+  add(1280, 10, 10, 24, 1, 1, 1, 1, "b1_c1280_h10_w10_oc24_wic1280_k1x1_g1");
+  add(1280, 10, 10, 546, 1, 1, 1, 1, "b1_c1280_h10_w10_oc546_wic1280_k1x1_g1");
+  add(32, 112, 112, 32, 3, 3, 32, 1, "b1_c32_h112_w112_oc32_wic1_k3x3_g32");
+  add(64, 112, 112, 64, 3, 3, 64, 1, "b1_c64_h112_w112_oc64_wic1_k3x3_g64");
+  add(128, 56, 56, 128, 3, 3, 128, 1, "b1_c128_h56_w56_oc128_wic1_k3x3_g128");
+  add(256, 28, 28, 256, 3, 3, 256, 1, "b1_c256_h28_w28_oc256_wic1_k3x3_g256");
+  add(512, 14, 14, 512, 3, 3, 512, 1, "b1_c512_h14_w14_oc512_wic1_k3x3_g512");
+  add(1024, 7, 7, 1024, 3, 3, 1024, 1, "b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024");
+  add(1024, 7, 7, 1024, 7, 7, 1024, 1, "b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024");
+  add(32, 112, 112, 16, 1, 1, 1, 1, "b1_c32_h112_w112_oc16_wic32_k1x1_g1");
+  add(32, 112, 112, 64, 1, 1, 1, 1, "b1_c32_h112_w112_oc64_wic32_k1x1_g1");
+  add(64, 56, 56, 128, 1, 1, 1, 1, "b1_c64_h56_w56_oc128_wic64_k1x1_g1");
+  add(128, 56, 56, 128, 1, 1, 1, 1, "b1_c128_h56_w56_oc128_wic128_k1x1_g1");
+  add(128, 28, 28, 256, 1, 1, 1, 1, "b1_c128_h28_w28_oc256_wic128_k1x1_g1");
+  add(256, 28, 28, 256, 1, 1, 1, 1, "b1_c256_h28_w28_oc256_wic256_k1x1_g1");
+  add(3, 224, 224, 32, 3, 3, 1, 1, "b1_c3_h224_w224_oc32_wic3_k3x3_g1");
+  add(96, 112, 112, 96, 3, 3, 96, 1, "b1_c96_h112_w112_oc96_wic1_k3x3_g96_s1_pvalid");
+  add(144, 56, 56, 144, 3, 3, 144, 1, "b1_c144_h56_w56_oc144_wic1_k3x3_g144_s1_pvalid");
+  add(192, 28, 28, 96, 1, 1, 1, 1, "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid");
+  add(32, 14, 14, 64, 3, 3, 1, 1, "b1_c32_h14_w14_oc64_wic32_k3x3_g1_s1_pvalid");
+  add(528, 14, 14, 256, 1, 1, 1, 1, "b1_c528_h14_w14_oc256_wic528_k1x1_g1_s1_pvalid");
+  add(528, 14, 14, 160, 1, 1, 1, 1, "b1_c528_h14_w14_oc160_wic528_k1x1_g1_s1_pvalid");
+  add(160, 14, 14, 320, 3, 3, 1, 1, "b1_c160_h14_w14_oc320_wic160_k3x3_g1_s1_pvalid");
+  add(160, 40, 40, 320, 3, 3, 1, 1, "b1_c160_h40_w40_oc320_wic160_k3x3_g1_s1_pvalid");
+  add(528, 14, 14, 32, 1, 1, 1, 1, "b1_c528_h14_w14_oc32_wic528_k1x1_g1_s1_pvalid");
+  add(32, 14, 14, 128, 3, 3, 1, 1, "b1_c32_h14_w14_oc128_wic32_k3x3_g1_s1_pvalid");
+  add(528, 14, 14, 128, 1, 1, 1, 1, "b1_c528_h14_w14_oc128_wic528_k1x1_g1_s1_pvalid");
+  add(160, 7, 7, 320, 3, 3, 1, 1, "b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid");
+  add(32, 7, 7, 128, 3, 3, 1, 1, "b1_c32_h7_w7_oc128_wic32_k3x3_g1_s1_pvalid");
+  add(192, 7, 7, 384, 3, 3, 1, 1, "b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid");
+  add(832, 7, 7, 48, 1, 1, 1, 1, "b1_c832_h7_w7_oc48_wic832_k1x1_g1_s1_pvalid");
+  add(32, 150, 150, 32, 3, 3, 32, 1, "b1_c32_h150_w150_oc32_wic1_k3x3_g32_s1_pvalid");
+  add(32, 150, 150, 16, 1, 1, 1, 1, "b1_c32_h150_w150_oc16_wic32_k1x1_g1_s1_pvalid");
+  add(16, 150, 150, 96, 1, 1, 1, 1, "b1_c16_h150_w150_oc96_wic16_k1x1_g1_s1_pvalid");
+  add(96, 150, 150, 96, 3, 3, 96, 1, "b1_c96_h150_w150_oc96_wic1_k3x3_g96_s1_pvalid");
+  add(96, 75, 75, 24, 1, 1, 1, 1, "b1_c96_h75_w75_oc24_wic96_k1x1_g1_s1_pvalid");
+  add(144, 75, 75, 144, 3, 3, 144, 1, "b1_c144_h75_w75_oc144_wic1_k3x3_g144_s1_pvalid");
+  add(144, 75, 75, 24, 1, 1, 1, 1, "b1_c144_h75_w75_oc24_wic144_k1x1_g1_s1_pvalid");
+  add(144, 38, 38, 32, 1, 1, 1, 1, "b1_c144_h38_w38_oc32_wic144_k1x1_g1_s1_pvalid");
+  add(192, 38, 38, 192, 3, 3, 192, 1, "b1_c192_h38_w38_oc192_wic1_k3x3_g192_s1_pvalid");
+  add(192, 38, 38, 32, 1, 1, 1, 1, "b1_c192_h38_w38_oc32_wic192_k1x1_g1_s1_pvalid");
+  add(384, 19, 19, 384, 3, 3, 384, 1, "b1_c384_h19_w19_oc384_wic1_k3x3_g384_s1_pvalid");
+  add(384, 19, 19, 64, 1, 1, 1, 1, "b1_c384_h19_w19_oc64_wic384_k1x1_g1_s1_pvalid");
+  add(384, 19, 19, 96, 1, 1, 1, 1, "b1_c384_h19_w19_oc96_wic384_k1x1_g1_s1_pvalid");
+  add(576, 19, 19, 576, 3, 3, 576, 1, "b1_c576_h19_w19_oc576_wic1_k3x3_g576_s1_pvalid");
+  add(576, 19, 19, 96, 1, 1, 1, 1, "b1_c576_h19_w19_oc96_wic576_k1x1_g1_s1_pvalid");
+  add(576, 19, 19, 12, 1, 1, 1, 1, "b1_c576_h19_w19_oc12_wic576_k1x1_g1_s1_pvalid");
+  add(576, 19, 19, 273, 1, 1, 1, 1, "b1_c576_h19_w19_oc273_wic576_k1x1_g1_s1_pvalid");
+  add(960, 10, 10, 960, 3, 3, 960, 1, "b1_c960_h10_w10_oc960_wic1_k3x3_g960_s1_pvalid");
+  add(1280, 10, 10, 24, 1, 1, 1, 1, "b1_c1280_h10_w10_oc24_wic1280_k1x1_g1_s1_pvalid");
+  add(1280, 10, 10, 546, 1, 1, 1, 1, "b1_c1280_h10_w10_oc546_wic1280_k1x1_g1_s1_pvalid");
+  add(256, 10, 10, 512, 3, 3, 1, 1, "b1_c256_h10_w10_oc512_wic256_k3x3_g1_s1_pvalid");
+  add(128, 5, 5, 256, 3, 3, 1, 1, "b1_c128_h5_w5_oc256_wic128_k3x3_g1_s1_pvalid");
+  add(256, 3, 3, 24, 1, 1, 1, 1, "b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid");
+  add(256, 3, 3, 546, 1, 1, 1, 1, "b1_c256_h3_w3_oc546_wic256_k1x1_g1_s1_pvalid");
+  add(256, 3, 3, 128, 1, 1, 1, 1, "b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid");
+  add(128, 3, 3, 256, 3, 3, 1, 1, "b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid");
+  add(256, 2, 2, 24, 1, 1, 1, 1, "b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid");
+  add(256, 2, 2, 546, 1, 1, 1, 1, "b1_c256_h2_w2_oc546_wic256_k1x1_g1_s1_pvalid");
+  add(256, 2, 2, 64, 1, 1, 1, 1, "b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid");
+  add(128, 1, 1, 24, 1, 1, 1, 1, "b1_c128_h1_w1_oc24_wic128_k1x1_g1_s1_pvalid");
+  add(3, 320, 320, 32, 3, 3, 1, 1, "b1_c3_h320_w320_oc32_wic3_k3x3_g1_s1_pvalid");
+  add(32, 160, 160, 8, 1, 1, 1, 1, "b1_c32_h160_w160_oc8_wic32_k1x1_g1_s1_pvalid");
+  add(8, 160, 160, 16, 3, 3, 1, 1, "b1_c8_h160_w160_oc16_wic8_k3x3_g1_s1_pvalid");
+  add(16, 160, 160, 128, 3, 3, 1, 1, "b1_c16_h160_w160_oc128_wic16_k3x3_g1_s1_pvalid");
+  add(128, 80, 80, 16, 1, 1, 1, 1, "b1_c128_h80_w80_oc16_wic128_k1x1_g1_s1_pvalid");
+  add(16, 80, 80, 64, 3, 3, 1, 1, "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid");
+  add(64, 80, 80, 16, 1, 1, 1, 1, "b1_c64_h80_w80_oc16_wic64_k1x1_g1_s1_pvalid");
+  add(16, 80, 80, 128, 3, 3, 1, 1, "b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid");
+  add(16, 80, 80, 128, 5, 5, 1, 1, "b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid");
+  add(128, 40, 40, 40, 1, 1, 1, 1, "b1_c128_h40_w40_oc40_wic128_k1x1_g1_s1_pvalid");
+  add(40, 40, 40, 160, 3, 3, 1, 1, "b1_c40_h40_w40_oc160_wic40_k3x3_g1_s1_pvalid");
+  add(160, 40, 40, 40, 1, 1, 1, 1, "b1_c160_h40_w40_oc40_wic160_k1x1_g1_s1_pvalid");
+  add(40, 40, 40, 320, 1, 1, 1, 1, "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid");
+  add(320, 40, 40, 320, 3, 3, 320, 1, "b1_c320_h40_w40_oc320_wic1_k3x3_g320_s1_pvalid");
+  add(320, 20, 20, 72, 1, 1, 1, 1, "b1_c320_h20_w20_oc72_wic320_k1x1_g1_s1_pvalid");
+
+  // 1x3_* spatial 1x1
+  for (let hw = 54; hw <= 72; hw += 2) {
+    add(3, hw, hw, 6, 1, 1, 1, 1, "1x3_" + hw + "x" + hw + "_k1");
+  }
+
+  // conv1d as conv2d
+  add(1, 1, 11, 6, 1, 1, 1, 1, "conv1d_bs1_as_conv2d");
+  add(1, 1, 11, 6, 1, 2, 1, 1, "conv1d_bs1_612_as_conv2d");
+  add(1, 1, 11, 6, 1, 5, 1, 1, "conv1d_bs1_615_as_conv2d");
+  add(3, 1, 11, 6, 1, 1, 1, 1, "conv1d_bs1_1311_631_as_conv2d");
+  add(3, 1, 11, 6, 1, 2, 1, 1, "conv1d_bs1_1311_632_as_conv2d");
+  add(3, 1, 11, 6, 1, 5, 1, 1, "conv1d_bs1_1311_635_as_conv2d");
+  add(3, 1, 11, 6, 1, 5, 3, 1, "conv1d_bs1_1311_615_g3_as_conv2d");
+  add(3, 5, 7, 6, 3, 3, 1, 1, "b2 batch=2");
+  add(4, 5, 5, 4, 3, 3, 2, 1, "b2 batch=2");
+  add(6, 5, 5, 6, 3, 3, 3, 1, "b2 batch=2");
+  add(15, 5, 5, 20, 3, 3, 5, 1, "b2 batch=2");
+  add(3, 11, 28, 3, 3, 3, 3, 1, "b2 batch=2");
+  add(15, 5, 5, 35, 3, 3, 5, 1, "b2 batch=4");
+
+  return s;
+}
+
+// ─── Render family summary ─────────────────────────────────────────
+function renderFamilySummary() {
+  const shapes = allTestShapes();
+  const el = document.getElementById("familySummary");
+  document.getElementById("suiteCount").textContent = shapes.length;
+
+  const byFamily = {};
+  for (const sh of shapes) {
+    const fam = classifyShape(sh.ic, sh.oc, sh.kh, sh.kw, sh.ih, sh.iw, sh.g, sh.st);
+    if (!byFamily[fam]) byFamily[fam] = [];
+    byFamily[fam].push(sh);
+  }
+
+  let html = "";
+  for (const fam of FAMILIES) {
+    const grouped = byFamily[fam.id] || [];
+    html += `<div class="family-group" data-family="${fam.id}">`;
+    html += `<div class="fg-title">
+      <span class="family-badge fam-${fam.id}">${grouped.length}</span>
+      ${fam.label}
+      <span style="font-size:9px;color:#484f58;">(${fam.id})</span>
+    </div>`;
+    html += `<div class="family-shapes" style="display:none;">`;
+    for (const sh of grouped) {
+      const out_h = Math.floor((sh.ih - sh.kh) / sh.st) + 1;
+      const out_w = Math.floor((sh.iw - sh.kw) / sh.st) + 1;
+      html += `<a class="quick-shape-link" onclick="return loadShape(${sh.ic},${sh.ih},${sh.iw},${sh.oc},${sh.kh},${sh.kw},${sh.g},${sh.st})" title="${sh.oc}×${out_h}×${out_w}">${sh.name}</a> `;
+    }
+    html += `</div></div>`;
+  }
+  el.innerHTML = html;
+}
+
+function expandAllFamilies() {
+  document.querySelectorAll(".family-shapes").forEach(e => e.style.display = "");
+}
+function collapseAllFamilies() {
+  document.querySelectorAll(".family-shapes").forEach(e => e.style.display = "none");
+}
+
+// ─── Render quick shapes (organized by family) ─────────────────────
+function renderQuickShapes() {
+  const shapes = allTestShapes();
+  const byFamily = {};
+  for (const sh of shapes) {
+    const fam = classifyShape(sh.ic, sh.oc, sh.kh, sh.kw, sh.ih, sh.iw, sh.g, sh.st);
+    if (!byFamily[fam]) byFamily[fam] = [];
+    if (byFamily[fam].length < 6) byFamily[fam].push(sh);
+  }
+  let html = "";
+  for (const fam of FAMILIES) {
+    const list = byFamily[fam.id] || [];
+    if (!list.length) continue;
+    html += `<tr><td style="font-size:9px;color:#8b949e;" colspan="2"><span class="family-badge fam-${fam.id}">${fam.label}</span></td></tr>`;
+    for (const sh of list) {
+      const out_h = Math.floor((sh.ih - sh.kh) / sh.st) + 1;
+      const out_w = Math.floor((sh.iw - sh.kw) / sh.st) + 1;
+      const label = `${sh.ic}→${sh.oc} ${sh.ih}×${sh.iw} k${sh.kh}` + (sh.g > 1 ? ` g${sh.g}` : "");
+      html += `<tr><td><a class="quick-shape-link" href="#" onclick="return loadShape(${sh.ic},${sh.ih},${sh.iw},${sh.oc},${sh.kh},${sh.kw},${sh.g},${sh.st})">${label}</a></td><td style="text-align:right;font-size:9px;color:#484f58;">${sh.name.substring(0,20)}</td></tr>`;
+    }
+  }
+  document.getElementById("quickShapes").innerHTML = html;
+}
+
+// ─── Existing UI functions ─────────────────────────────────────────
+function featureGrains(rowBytes, floorGrains, useNhwcPack, isSpatial, isDw) {
+  if (useNhwcPack && isSpatial) return floorGrains;
+  if (isDw && isSpatial) return Math.min(13, floorGrains);
+  const evenRows = (ceilDiv(2 * CBUF_BANK_SIZE, rowBytes) + 1) & ~1;
+  return Math.min(floorGrains, evenRows);
+}
+
+function mesaEntriesPerSlice(inputWidth, inputChannels) {
+  const atomicsPerEntry = Math.floor(CBUF_ENTRY_BYTES / FP16_ATOM_ELEMENTS);
+  const totalCAtomics = ceilDiv(inputChannels * FP16_BYTES, FP16_ATOM_ELEMENTS);
+  const lastCAtomics = totalCAtomics % atomicsPerEntry;
+  const intCEntries = Math.floor(totalCAtomics / atomicsPerEntry) * inputWidth;
+  const fracCEntries = lastCAtomics === 3 ? inputWidth : ceilDiv(lastCAtomics * inputWidth, atomicsPerEntry);
+  return intCEntries + fracCEntries;
+}
+
+function computeKStep(in_c, out_c, kh, kw, groups, p) {
+  const dw = p.is_depthwise, spatial = p.is_spatial;
+  const dataAligned = alignUp(in_c, p.align_c);
+  const wkBytes = kh * kw * dataAligned * FP16_BYTES;
+  const tweight = wkBytes * (dw ? 1 : out_c);
+  const weightBanks = ceilDiv(tweight, CBUF_BANK_SIZE);
+
+  let kStep = out_c;
+  if (dw && spatial) {
+    kStep = Math.min(32, out_c);
+  } else if (spatial && groups === 1 && !dw && weightBanks > 3) {
+    kStep = out_c >= 32 ? 32 : out_c;
+  } else if (!spatial && groups === 1) {
+    const maxTile = Math.floor(CBUF_BANK_SIZE / (Math.max(1, in_c) * FP16_BYTES));
+    const pwOc = maxTile >= 32 ? 32 : maxTile >= 16 ? 16 : maxTile >= 8 ? 8 : 4;
+    if (weightBanks > 3) kStep = Math.max(pwOc, 32);
+    else if (out_c > pwOc) kStep = pwOc;
+  }
+  return Math.min(kStep, out_c);
+}
+
+function computeYStep(in_c, out_c, kh, kw, in_h, in_w, groups, stride, kStep, p) {
+  const spatial = p.is_spatial, dw = p.is_depthwise;
+  const out_h = p.out_h;
+  const dataAligned = alignUp(in_c, p.align_c);
+
+  if (dw && spatial) {
+    const ae = Math.floor(CBUF_ENTRY_BYTES / 16);
+    const tca = ceilDiv(in_c * FP16_BYTES, 16);
+    const lca = tca % ae;
+    const ice = Math.floor(tca / ae) * in_w;
+    const fce = lca === 3 ? in_w : ceilDiv(lca * in_w, ae);
+    const eps = Math.max(1, ice + fce);
+    const wkBytes = kh * kw * alignUp(in_c, p.align_c) * FP16_BYTES;
+    const wb = ceilDiv(ceilDiv(wkBytes, CBUF_ENTRY_BYTES), CBUF_ENTRIES_PER_BANK) + 1;
+    const ib = (wb + 1 < RK_CBUF_BANKS) ? RK_CBUF_BANKS - wb : 7;
+    const s = Math.max(1, Math.floor((CBUF_ENTRIES_PER_BANK * ib) / eps));
+    let tileH = Math.min(out_h, Math.max(1, Math.floor((s - kh) / stride) + 1));
+    if (in_c > 64) {
+      const rowBytes = in_w * convAlignC(in_c, in_c, in_c) * FP16_BYTES;
+      const maxRows = featureGrains(rowBytes, out_h + kh, true, true) + 1;
+      tileH = Math.min(tileH, maxRows);
+    }
+    tileH = tileH < out_h ? Math.max(10, tileH) : tileH;
+    const maxInputRows = Math.min(15, out_h + kh - 1);
+    tileH = Math.min(tileH, maxInputRows - kh + 1);
+    tileH = (tileH === out_h || tileH % 2 === 0) ? tileH : tileH - 1;
+    return tileH;
+  }
+
+  const tileWb = ceilDiv(kh * kw * dataAligned * FP16_BYTES * (dw ? 1 : kStep), CBUF_BANK_SIZE);
+  let remaining = Math.max(1, RK_CBUF_BANKS - tileWb);
+  const tileInC = dw ? kStep : in_c;
+  const tileDataAligned = alignUp(tileInC, p.align_c);
+  let rowBytes = p.width_stride * tileDataAligned * FP16_BYTES;
+  const fg = featureGrains(rowBytes, in_h + kh, false, spatial, dw);
+  const dataBanksNeeded = ceilDiv(rowBytes * fg, CBUF_BANK_SIZE);
+  let yStep = out_h;
+  if (dataBanksNeeded > remaining) {
+    yStep = Math.max(1, Math.floor(out_h * remaining / Math.max(1, dataBanksNeeded)));
+  }
+
+  if (!spatial) {
+    const outW = p.out_w;
+    if (in_c <= 4 && !dw && p.out_width_stride > RK_MAX_CONV_FLAT_STRIDE) {
+      yStep = Math.min(yStep, Math.max(1, Math.floor(RK_MAX_CONV_FLAT_STRIDE / outW)));
+    } else if (out_h > 50) {
+      if (in_c >= 128 && out_c >= 128) yStep = Math.min(yStep, 25);
+      else if (p.out_width_stride > RK_MAX_CONV_FLAT_STRIDE) yStep = Math.min(yStep, 32);
+      else yStep = Math.min(yStep, 50);
+    }
+  }
+
+  if (!dw) {
+    const eps = mesaEntriesPerSlice(p.width_stride, dataAligned);
+    const ib = (tileWb + 1 < RK_CBUF_BANKS) ? RK_CBUF_BANKS - tileWb : 7;
+    const maxInputH = Math.max(1, Math.floor((CBUF_ENTRIES_PER_BANK * ib) / eps));
+    const maxY = Math.max(1, Math.floor((maxInputH - kh) / stride) + 1);
+    yStep = Math.min(yStep, maxY);
+  }
+
+  if (spatial && p.use_nhwc) {
+    const nhwcDb = RK_CBUF_BANKS - 1;
+    const nhwcRb = p.width_stride * tileDataAligned * FP16_BYTES;
+    const maxGrains = Math.floor((nhwcDb * CBUF_BANK_SIZE) / nhwcRb);
+    const maxYForCbuf = Math.max(1, maxGrains - 2 * kh + 1);
+    yStep = Math.min(yStep, maxYForCbuf);
+  }
+
+  return yStep;
+}
+
+function planConvTiles(in_c, out_c, kh, kw, in_h, in_w, groups, stride) {
+  const p = convParams(in_c, in_h, in_w, out_c, kh, kw, groups, stride);
+  const kStep = computeKStep(in_c, out_c, kh, kw, groups, p);
+  const yStep = computeYStep(in_c, out_c, kh, kw, in_h, in_w, groups, stride, kStep, p);
+  const outH = p.out_h, outC = p.out_c;
+
+  let splitMethod = 0;
+  if (kStep < outC && yStep < outH) splitMethod = 3;
+  else if (kStep < outC) splitMethod = 2;
+  else if (yStep < outH) splitMethod = 1;
+
+  const yBoundary = [0];
+  while (yBoundary[yBoundary.length - 1] < outH)
+    yBoundary.push(Math.min(yBoundary[yBoundary.length - 1] + yStep, outH));
+  const kBoundary = [0];
+  while (kBoundary[kBoundary.length - 1] < outC)
+    kBoundary.push(Math.min(kBoundary[kBoundary.length - 1] + kStep, outC));
+
+  const tiles = [];
+  for (let yi = 0; yi < yBoundary.length - 1; yi++) {
+    const ys = yBoundary[yi];
+    const ySpan = yBoundary[yi + 1] - ys;
+    for (let ki = 0; ki < kBoundary.length - 1; ki++) {
+      const ks = kBoundary[ki];
+      const kSpan = kBoundary[ki + 1] - ks;
+      const inTileH = (ySpan - 1) * stride + p.kh;
+      tiles.push({ y_start: ys, y_step: ySpan, k_start: ks, k_step: kSpan, in_tile_h: inTileH });
+    }
+  }
+
+  return { p, splitMethod, tiles, yStep, kStep, yBoundary, kBoundary };
+}
+
+// ─── UI ────────────────────────────────────────────────────────────
+const SPLIT_NAMES = ['_SPLIT_NONE', '_SPLIT_BY_Y', '_SPLIT_BY_K', '_SPLIT_BY_YK'];
+const COLOR_CLASSES = ['color-none', 'color-by_y', 'color-by_k', 'color-by_yk'];
+
+let currentTiles = [];
+let currentSplitMethod = 0;
+let currentP = null;
+let selectedTile = null;
+
+function getV() {
+  return {
+    in_c: +document.getElementById('in_c').value,
+    out_c: +document.getElementById('out_c').value,
+    in_h: +document.getElementById('in_h').value,
+    in_w: +document.getElementById('in_w').value,
+    kh: +document.getElementById('kh').value,
+    kw: +document.getElementById('kw').value,
+    groups: +document.getElementById('groups').value,
+    stride: +document.getElementById('stride').value,
+  };
+}
+
+function loadShape(a,b,c,d,e,f,g,h) {
+  document.getElementById('in_c').value = a;
+  document.getElementById('out_c').value = b;
+  document.getElementById('in_h').value = c;
+  document.getElementById('in_w').value = d;
+  document.getElementById('kh').value = e;
+  document.getElementById('kw').value = f;
+  document.getElementById('groups').value = g;
+  document.getElementById('stride').value = h;
+  recompute();
+  return false;
+}
+
+// ─── CONV Internals rendering ────────────────────────────────────
+function computeCbuf(p) {
+  const dw = p.is_depthwise;
+  const dataAligned = alignUp(p.in_c, p.align_c);
+  const wkBytes = p.kh * p.kw * dataAligned * FP16_BYTES;
+  const weightBytes = wkBytes * (dw ? 1 : p.out_c);
+  const weightBanks = Math.min(11, Math.max(1, ceilDiv(weightBytes, CBUF_BANK_SIZE)));
+  const dataBanks = RK_CBUF_BANKS - weightBanks;
+  return { weightBytes, weightBanks, dataBanks };
+}
+
+function renderCbuf(p) {
+  const { weightBytes, weightBanks, dataBanks } = computeCbuf(p);
+  const el = document.getElementById('cbufBar');
+  document.getElementById('cbufSubtitle').textContent = `${dataBanks} data + ${weightBanks} weight = ${RK_CBUF_BANKS} banks`;
+  el.innerHTML = '';
+  for (let i = 0; i < RK_CBUF_BANKS; i++) {
+    const isData = i < dataBanks;
+    const div = document.createElement('div');
+    div.className = `cbuf-bank ${isData ? 'cbuf-data' : 'cbuf-weight'}`;
+    div.style.width = `${100 / RK_CBUF_BANKS}%`;
+    div.title = `Bank ${i}: ${isData ? 'DATA' : 'WEIGHT'} (${i < dataBanks ? `data slot ${i}` : `weight slot ${i - dataBanks}`})`;
+    div.textContent = i;
+    el.appendChild(div);
+  }
+}
+
+function renderDescFamilies(p, tiles) {
+  const el = document.getElementById('descFamilyFlow');
+  if (!tiles.length) { el.innerHTML = '<span style="color:#484f58;font-size:10px;">No tiles</span>'; return; }
+  const dw = p.is_depthwise;
+  const spatial = p.is_spatial;
+  const wb = computeCbuf(p).weightBanks;
+
+  let families = [];
+  if (dw && spatial) {
+    const yCount = Math.ceil(p.out_h / 50) || 1;
+    const mCount = Math.ceil(p.out_h / 25) - yCount;
+    families = [
+      { name: 'setup', count: Math.min(2, yCount), color: 'setup' },
+      { name: 'y_mid', count: Math.max(0, mCount), color: 'y_mid' },
+      { name: 'y_tile', count: Math.max(1, yCount), color: 'y_tile' },
+    ];
+  } else if (spatial && wb >= 4 && p.out_c >= 96) {
+    const ySplit = p.out_h > 28 ? 2 : 1;
+    families = [
+      { name: 'setup', count: ySplit, color: 'setup' },
+      { name: 'k_half', count: ySplit * 2, color: 'k_half' },
+      { name: 'k_tile', count: ySplit * 3, color: 'k_tile' },
+    ];
+  } else if (!spatial && !dw && (p.out_c > 128 || p.out_h > 50)) {
+    const ySplit = p.out_h > 28 ? 3 : 1;
+    families = [
+      { name: 'setup', count: Math.min(2, ySplit), color: 'setup' },
+      { name: 'k_half', count: 2, color: 'k_half' },
+      { name: 'y_tile', count: ySplit, color: 'y_tile' },
+    ];
+  } else {
+    families = [{ name: 'setup', count: 1, color: 'setup' }];
+    if (tiles.length > 1) families.push({ name: 'y_tile', count: tiles.length - 1, color: 'y_tile' });
+  }
+
+  let total = families.reduce((s, f) => s + f.count, 0);
+  let html = '';
+  for (const f of families) {
+    if (!f.count) continue;
+    html += `<div class="desc-node ${f.color}"><span class="dn-family">${f.name}</span><span class="dn-count">×${f.count}</span></div>`;
+    total -= f.count;
+    if (total > 0) html += '<span class="desc-arrow">→</span>';
+  }
+  document.getElementById('internalsBadge').textContent = `${tiles.length} tiles, ${families.reduce((s,f) => s + f.count, 0)} desc`;
+  el.innerHTML = html;
+}
+
+function renderRegDetails(p, tile) {
+  if (!tile) {
+    document.getElementById('regDetailContent').innerHTML = '<div class="no-selection">Click a tile to see register details.</div>';
+    return;
+  }
+  const wb = computeCbuf(p).weightBanks;
+  const db = RK_CBUF_BANKS - wb;
+  const dw = p.is_depthwise;
+  const spatial = p.is_spatial;
+  const ot = p.out_h * p.out_w * p.align_out_c;
+
+  const regs = {
+    'CNA_CBUF_CON0': `WEIGHT_REUSE(0) | WEIGHT_BANK(${wb}) | DATA_BANK(${db}) = 0x${(wb << 4 | db).toString(16)}`,
+    'CNA_CBUF_CON1': `DATA_ENTRIES = ${computeCbuf(p).weightBytes}`,
+    'CNA_CONV_CON2': `grain_bits = 0x${Math.min(0xff, Math.floor(computeCbuf(p).dataBanks * 2)).toString(16)} | family_bits`,
+    'CNA_DATA_SIZE0': `WIDTH(${p.out_w}) × HEIGHT(${tile.y_step})`,
+    'CNA_DATA_SIZE1': `CHANNEL(${Math.min(p.align_c, p.in_c)})`,
+    'CNA_FEATURE_DATA_ADDR': `input offset: ${tile.y_start * p.stride * p.width_stride * FP16_BYTES} bytes`,
+    'CNA_WEIGHT_SIZE0': `kernel: ${p.kh}×${p.kw}×${p.in_c}×${tile.k_step} FP16`,
+    'DPU_DST_BASE_ADDR': `output offset: ${tile.k_start * ot * FP16_BYTES} bytes`,
+    'DPU_DATA_CUBE_CHANNEL': `CHANNEL(${tile.k_step - 1})`,
+    'DPU_SURFACE_ADD': `0x${(p.out_w * tile.k_step * FP16_BYTES).toString(16)}`,
+    'DPU_WDMA_SIZE_1': `HEIGHT(${tile.y_step}) × WIDTH(${p.out_w})`,
+  };
+
+  let html = '<div class="reg-grid">';
+  for (const [name, val] of Object.entries(regs)) {
+    html += `<div class="reg-row"><span class="reg-key">${name}</span><span class="reg-val">${val}</span></div>`;
+  }
+  html += '</div>';
+  document.getElementById('regDetailContent').innerHTML = html;
+  document.getElementById('regSubtitle').textContent = `T${selectedTile} · y=${tile.y_start}..${tile.y_start+tile.y_step} k=${tile.k_start}..${tile.k_start+tile.k_step}`;
+}
+
+function renderConvInternals(p, tiles) {
+  renderCbuf(p);
+  renderDescFamilies(p, tiles);
+  if (selectedTile === null) renderRegDetails(p, null);
+}
+  const v = getV();
+  const { p, splitMethod, tiles, yStep, kStep, yBoundary, kBoundary } = planConvTiles(
+    v.in_c, v.out_c, v.kh, v.kw, v.in_h, v.in_w, v.groups, v.stride
+  );
+  currentTiles = tiles;
+  currentSplitMethod = splitMethod;
+  currentP = p;
+  selectedTile = null;
+
+  const fam = classifyShape(v.in_c, v.out_c, v.kh, v.kw, v.in_h, v.in_w, v.groups, v.stride);
+  document.getElementById('currentFamily').textContent = `Family: ${fam}`;
+
+  renderStats(p, splitMethod, kStep, yStep, fam);
+  renderMethodBadge(splitMethod, p.out_c, p.out_h, kStep, yStep);
+  renderGrid(p, splitMethod, tiles, yBoundary, kBoundary);
+  renderFlow(kStep, yStep, p.out_c, p.out_h);
+  renderConvInternals(p, tiles);
+  document.getElementById('tileBadge').textContent = tiles.length + ' tile' + (tiles.length !== 1 ? 's' : '');
+  document.getElementById('tileInfo').innerHTML = `
+    <div class="info-title">SELECTED TILE</div>
+    <div class="no-selection">Click a tile in the grid above to see its details.</div>`;
+}
+
+function renderMethodBadge(sm, outC, outH, kStep, yStep) {
+  const el = document.getElementById('methodBadge');
+  const cls = ['method-none', 'method-y', 'method-k', 'method-yk'];
+  const reasons = [
+    'k_step = out_c and y_step = out_h',
+    `y_step (${yStep}) < out_h (${outH})`,
+    `k_step (${kStep}) < out_c (${outC})`,
+    `k_step (${kStep}) < out_c (${outC}) and y_step (${yStep}) < out_h (${outH})`,
+  ];
+  el.innerHTML = `<span class="method-badge ${cls[sm]}">${SPLIT_NAMES[sm]} = ${sm}</span> <span style="font-size:10px;color:#8b949e;margin-left:6px">— ${reasons[sm]}</span>`;
+}
+
+function renderStats(p, sm, kStep, yStep, fam) {
+  const el = document.getElementById('stats');
+  el.innerHTML = `
+    <div class="stat"><div class="val">${p.out_h}×${p.out_w}</div><div class="lbl">Output (H×W)</div></div>
+    <div class="stat"><div class="val">${p.out_c}</div><div class="lbl">Output Channels</div></div>
+    <div class="stat"><div class="val">${yStep}</div><div class="lbl">Y Step</div></div>
+    <div class="stat"><div class="val">${kStep}</div><div class="lbl">K Step</div></div>
+    <div class="stat"><div class="val">${p.align_c}</div><div class="lbl">Align C</div></div>
+    <div class="stat"><div class="val">${p.width_stride}</div><div class="lbl">Width Stride</div></div>
+    <div class="stat"><div class="val">${p.is_spatial ? 'Yes' : 'No'}</div><div class="lbl">Spatial</div></div>
+    <div class="stat"><div class="val">${p.is_depthwise ? 'Yes' : 'No'}</div><div class="lbl">Depthwise</div></div>
+    <div class="stat"><div class="val">${p.use_nhwc ? 'NHWC' : 'NC1HWC2'}</div><div class="lbl">Format</div></div>
+    <div class="stat" style="grid-column:span 2"><div class="val"><span class="family-badge fam-${fam}">${fam}</span></div><div class="lbl">Conv Family</div></div>
+  `;
+}
+
+function renderGrid(p, sm, tiles, yBoundary, kBoundary) {
+  const headerK = document.getElementById('gridHeaderK');
+  const body = document.getElementById('gridBody');
+
+  const yn = yBoundary.length - 1;
+  const kn = kBoundary.length - 1;
+
+  headerK.colSpan = kn;
+  headerK.textContent = `K (output channels) →  [0 .. ${p.out_c})`;
+
+  let bodyHtml = '';
+
+  for (let yi = 0; yi < yn; yi++) {
+    bodyHtml += `<tr><td class="y-label">y=${yBoundary[yi]}..${yBoundary[yi+1]}</td>`;
+    for (let ki = 0; ki < kn; ki++) {
+      const idx = yi * kn + ki;
+      const tile = tiles[idx];
+      if (!tile) { bodyHtml += '<td></td>'; continue; }
+      bodyHtml += `<td class="${COLOR_CLASSES[sm]}" data-idx="${idx}"
+        onclick="selectTile(${idx})"
+        title="y=${tile.y_start}..${tile.y_start+tile.y_step}  k=${tile.k_start}..${tile.k_start+tile.k_step}">
+        <div class="tile-label">T${idx}</div>
+        <div class="tile-dims">${tile.y_step}×${tile.k_step}</div>
+      </td>`;
+    }
+    bodyHtml += '</tr>';
+  }
+
+  body.innerHTML = bodyHtml;
+}
+
+function selectTile(idx) {
+  const tile = currentTiles[idx];
+  if (!tile) return;
+
+  const prevSelected = document.querySelector('#tileGrid td.selected');
+  if (prevSelected) prevSelected.classList.remove('selected');
+  const cell = document.querySelector(`#tileGrid td[data-idx="${idx}"]`);
+  if (cell) cell.classList.add('selected');
+
+  selectedTile = idx;
+  const p = currentP;
+  const inStart = tile.y_start * p.stride;
+  const inH = tile.in_tile_h;
+  const dw = p.is_depthwise;
+
+  document.getElementById('tileInfo').innerHTML = `
+    <div class="info-title">TILE T${idx} — DETAILS</div>
+    <div class="info-row">
+      <span><span class="info-key">y:</span><span class="info-val">${tile.y_start}..${tile.y_start + tile.y_step}</span></span>
+      <span><span class="info-key">k:</span><span class="info-val">${tile.k_start}..${tile.k_start + tile.k_step}</span></span>
+      <span><span class="info-key">output shape:</span><span class="info-val">${tile.k_step}×${tile.y_step}×${p.out_w}</span></span>
+      <span><span class="info-key">input tile H:</span><span class="info-val">${inH}</span></span>
+    </div>
+    <div style="margin-top:6px;font-size:10px;color:#8b949e;">
+      → writes ${tile.y_step} output rows, reads ${inH} input rows
+    </div>
+  `;
+  renderRegDetails(p, tile);
+}
+
+function renderFlow(kStep, yStep, outC, outH) {
+  document.getElementById('flowKStep').textContent = `k_step = ${kStep}  (out_c = ${outC})`;
+  document.getElementById('flowYStep').textContent = `y_step = ${yStep}  (out_h = ${outH})`;
+}
+
+// ─── Init ──────────────────────────────────────────────────────────
+renderFamilySummary();
+renderQuickShapes();
+recompute();
+</script>
+</body>
+</html>
