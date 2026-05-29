@@ -1,4 +1,16 @@
-⚠️ Documentations still WIP. 
+⚠️ May 2026 CONV tiling progress
+- examples/kernel_6_18/conv_mesa.py is a clean conv implementation refernce to mesa, passed all test shape in conv_new.py but just for int8
+- same apprach not working for fp16
+- so wrote examples/kernel_6_18/conv_new.py
+- found it still a lot of lines because of tile handling to stop it from become 700 lines clean implementation like gemm.py
+- it had 6 strategey to tile conv to pass all test shapes, too complex
+- so done reverse engineering works to see if official rknn compile uses complex 6 stragety, result in experimental/rknn/librknnrt_conv_channel_tile_decomp.md
+- turns out rknn used clean stragey and we implement it in examples/kernel_6_18/conv.py
+- but mainline rocket kernel npu driver has limitation on submit and cannot implement according to the reverse enginering results
+- then ported to rknpu_driver and wrote examples/conv_tiles.py
+- now examples/conv_tiles.py implement rknn reverse result but 2k line of code and far from our < 1000 lines target, our 6 stragey conv_new.py is only 1.2k line of code
+- therefore, i am working on [nvdla vp](https://github.com/allbilly/nvdla) now to check ONNC and NVDLA KMD on their tiling strageries on "difficult shapes" that clean code like examples/conv.py could not pass
+- now i need to group each of the 217 test conv shapes in conv_new.py on which of the 6 strategey they used, and show me table for test shapes count by strategey and suggest which shapes are rare, e.g. 1/217 may occupied 1/6 strategey as diffcult shapes, ask deepwiki onnc/onnc nvdla/sw and comment is it possible to use simple strategey to achieve clean conv.py with < 1000 lines of code given now we have nvdla/vp to test onnc and nvdla kmd tiling on diffcult shapes 
 
 # RK3588 
 
