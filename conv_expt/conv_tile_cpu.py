@@ -6,15 +6,28 @@ No NPU hardware needed. Uses the same _plan_conv_tiles / _compute_k_step /
 _compute_y_step functions, then computes each tile on CPU with numpy and
 assembles the result.
 """
+import argparse
+from collections import Counter, defaultdict
+
 import numpy as np
 
 # ---- constants (same as conv.py) ----
 FP16_BYTES = 2
 CBUF_ENTRY_BYTES = 128
 CBUF_ENTRIES_PER_BANK = 256
+RK3588_CBUF_BANKS = 12
 RK_CBUF_BANKS = 12
 CBUF_BANK_SIZE = CBUF_ENTRIES_PER_BANK * CBUF_ENTRY_BYTES
 RK_MAX_CONV_FLAT_STRIDE = 992
+UNPACK_C2 = 8
+OUTPUT_MEM_BYTES = 4 * 1024 * 1024
+
+_CBUF_PROFILES = {
+    "rk3588": {"banks": 12, "entry_bytes": 128, "entries_per_bank": 256},
+    # nv_full has 16 CBUF banks. Keep the RK/NVDLA C-model entry geometry here
+    # because this harness compares planner pressure, not generated NVDLA RTL.
+    "nvdla_full": {"banks": 16, "entry_bytes": 128, "entries_per_bank": 256},
+}
 
 # ---- helpers (same as conv.py) ----
 
@@ -23,6 +36,23 @@ def _ceil_div(x, y):
 
 def _align_up(x, align):
     return _ceil_div(x, align) * align
+
+def _set_cbuf_profile(name):
+    global CBUF_ENTRY_BYTES, CBUF_ENTRIES_PER_BANK, RK_CBUF_BANKS, CBUF_BANK_SIZE
+    profile = _CBUF_PROFILES[name]
+    CBUF_ENTRY_BYTES = profile["entry_bytes"]
+    CBUF_ENTRIES_PER_BANK = profile["entries_per_bank"]
+    RK_CBUF_BANKS = profile["banks"]
+    CBUF_BANK_SIZE = CBUF_ENTRIES_PER_BANK * CBUF_ENTRY_BYTES
+
+def _with_cbuf_profile(name, fn, *args):
+    global CBUF_ENTRY_BYTES, CBUF_ENTRIES_PER_BANK, RK_CBUF_BANKS, CBUF_BANK_SIZE
+    old = (CBUF_ENTRY_BYTES, CBUF_ENTRIES_PER_BANK, RK_CBUF_BANKS, CBUF_BANK_SIZE)
+    _set_cbuf_profile(name)
+    try:
+        return fn(*args)
+    finally:
+        CBUF_ENTRY_BYTES, CBUF_ENTRIES_PER_BANK, RK_CBUF_BANKS, CBUF_BANK_SIZE = old
 
 def _mesa_entries_per_slice(input_width, input_channels):
     atomics_per_entry = CBUF_ENTRY_BYTES // 16
@@ -126,6 +156,25 @@ _SPLIT_NONE = 0
 _SPLIT_BY_Y = 1
 _SPLIT_BY_K = 2
 _SPLIT_BY_YK = 3
+
+_SPLIT_NAMES = {
+    _SPLIT_NONE: "NONE",
+    _SPLIT_BY_Y: "BY_Y",
+    _SPLIT_BY_K: "BY_K",
+    _SPLIT_BY_YK: "BY_YK",
+}
+
+_FAMILY_BITS = {
+    "setup": 0x00000000,
+    "y_tile": 0x20000000,
+    "k_half": 0x40000000,
+    "k_tile": 0x50000000,
+}
+
+_POINTWISE_Y_TILE_HARDCODED = {
+    "conv2d_b1_c144_h28_w28_oc32_wic144_k1x1_g1",
+    "conv2d_b1_c192_h28_w28_oc32_wic192_k1x1_g1",
+}
 
 def _compute_k_step(in_c, out_c, kh, kw, groups, p):
     is_depthwise, is_spatial = p["is_depthwise"], p["is_spatial"]
@@ -249,6 +298,406 @@ def _plan_conv_tiles(in_c, out_c, kh, kw, in_h, in_w, groups, stride):
             k_span = k_boundary[ki + 1] - ks
             tiles.append({"y_start": ys, "y_step": y_span, "k_start": ks, "k_step": k_span})
     return p, split_method, tiles, y_step, k_step
+
+
+def _split_name(split_method):
+    return _SPLIT_NAMES[split_method]
+
+
+def _conv_output_count(p):
+    return _ceil_div(p["align_out_c"], UNPACK_C2) * p["out_width_stride"] * UNPACK_C2
+
+
+def _conv_output_bytes(p):
+    return _conv_output_count(p) * FP16_BYTES
+
+
+def _tile_boundaries(tiles, key_start, key_step):
+    boundaries = {0}
+    for tile in tiles:
+        boundaries.add(tile[key_start])
+        boundaries.add(tile[key_start] + tile[key_step])
+    return sorted(boundaries)
+
+
+def _tile_windows(boundaries):
+    return [(boundaries[i], boundaries[i + 1] - boundaries[i]) for i in range(len(boundaries) - 1)]
+
+
+def _old_strategy_name(s):
+    stride = s.get("stride", 1)
+    p = _conv_params(s["in_c"], s["in_h"], s["in_w"], s["out_c"],
+                     s["kh"], s["kw"], s["groups"], stride)
+    if s["name"] in _POINTWISE_Y_TILE_HARDCODED:
+        return "pointwise_y_tile_hardcoded"
+
+    is_spatial = p["is_spatial"]
+    is_depthwise = p["is_depthwise"]
+    grouped_serial = is_spatial and s["groups"] > 1 and not is_depthwise
+    spatial_weight_banks = _mesa_weight_banks(s["kw"], s["kh"], s["in_c"], s["out_c"], False) if is_spatial else 0
+    spatial_im2col = (is_spatial and s["groups"] == 1 and not is_depthwise and
+                      (spatial_weight_banks > RK3588_CBUF_BANKS // 3 or _conv_output_bytes(p) > OUTPUT_MEM_BYTES))
+    spatial_oc_serial = (is_spatial and s["groups"] == 1 and not is_depthwise and
+                         s["out_c"] > UNPACK_C2 and (s["in_c"] % 16 != 0 or s["in_c"] >= 16))
+    depthwise_spatial_tiled = (is_depthwise and is_spatial and
+                               (p["out_h"] > _depthwise_tile_h(s["out_c"], p["out_h"], s["in_w"], s["kh"], s["kw"], stride) or
+                                s["out_c"] > p["align_c"]))
+    if grouped_serial:
+        return "grouped_serial"
+    if spatial_im2col:
+        return "spatial_im2col"
+    if spatial_oc_serial:
+        return "spatial_oc_serial"
+    if depthwise_spatial_tiled:
+        return "depthwise_spatial_tiled"
+    if (not is_spatial and not is_depthwise and s["groups"] == 1 and
+            _needs_pointwise_oc_tile_schedule(s["in_c"], s["out_c"], s["in_h"], s["in_w"], s["kh"], s["kw"], s["groups"])):
+        return "pointwise_oc_tile"
+    return "fallback/direct"
+
+
+def _descriptor_families(split_method):
+    if split_method == _SPLIT_NONE:
+        return ["setup"]
+    if split_method == _SPLIT_BY_Y:
+        return ["y_tile"]
+    if split_method == _SPLIT_BY_K:
+        return ["k_tile"]
+    return ["setup", "k_half", "k_tile"]
+
+
+def _descriptor_unresolved_fields(split_method, groups, is_depthwise):
+    fields = ["grain_bits", "cbuf0", "mc_treat_by_y_tile", "mc_treat_by_k_tile",
+              "mc_treat_by_1c_y_tile", "mc_treat_by_1c_k_tile"]
+    if split_method == _SPLIT_BY_YK:
+        fields.append("family_k_window_assignment")
+    if groups > 1 and not is_depthwise:
+        fields.append("group_lowering_descriptor_contract")
+    return fields
+
+
+def _estimate_bank_fields(p, kh, kw, input_h, input_w, oc_count):
+    tile_in_c = oc_count if p["is_depthwise"] else p["in_c"]
+    aligned_in_c = _align_up(tile_in_c, p["align_c"])
+    feature_bytes = input_h * input_w * aligned_in_c * FP16_BYTES
+    weight_oc = 1 if p["is_depthwise"] else oc_count
+    weight_bytes = kh * kw * _align_up(p["in_c"], p["align_c"]) * FP16_BYTES * weight_oc
+    input_bank_num = max(1, _ceil_div(feature_bytes, CBUF_BANK_SIZE))
+    weight_bank_num = max(1, _ceil_div(weight_bytes, CBUF_BANK_SIZE))
+    return input_bank_num, weight_bank_num
+
+
+def _descriptor_offsets(p, kh, kw, y_start, input_h, k_start, oc_count, stride):
+    feature_off = y_start * stride * p["width_stride"] * p["align_c"] * FP16_BYTES
+    if p["is_depthwise"]:
+        weight_off = k_start * kh * kw * FP16_BYTES
+    else:
+        weight_off = k_start * kh * kw * _align_up(p["in_c"], p["align_c"]) * FP16_BYTES
+    output_off = (k_start * p["out_h"] * p["out_w"] + y_start * p["out_w"]) * FP16_BYTES
+    return feature_off, weight_off, output_off
+
+
+def _descriptor_rows_for_shape(s):
+    stride = s.get("stride", 1)
+    p, split_method, tiles, _y_step, _k_step = _plan_conv_tiles(
+        s["in_c"], s["out_c"], s["kh"], s["kw"], s["in_h"], s["in_w"], s["groups"], stride)
+    y_boundaries = _tile_boundaries(tiles, "y_start", "y_step")
+    k_boundaries = _tile_boundaries(tiles, "k_start", "k_step")
+    y_windows = _tile_windows(y_boundaries)
+    k_windows = _tile_windows(k_boundaries)
+    families = _descriptor_families(split_method)
+    rows = []
+    for family in families:
+        for k_index, (k_start, oc_count) in enumerate(k_windows):
+            for y_index, (y_start, output_h) in enumerate(y_windows):
+                input_h = min((output_h - 1) * stride + s["kh"], s["in_h"] - y_start * stride)
+                feature_off, weight_off, output_off = _descriptor_offsets(
+                    p, s["kh"], s["kw"], y_start, input_h, k_start, oc_count, stride)
+                input_bank_num, weight_bank_num = _estimate_bank_fields(
+                    p, s["kh"], s["kw"], input_h, s["in_w"], oc_count)
+                rows.append({
+                    "name": s["name"],
+                    "old_strategy": _old_strategy_name(s),
+                    "split_method": _split_name(split_method),
+                    "family": family,
+                    "family_bits": f"0x{_FAMILY_BITS[family]:08x}",
+                    "grain_bits": None,
+                    "y_start": y_start,
+                    "input_h": input_h,
+                    "output_h": output_h,
+                    "output_w": p["out_w"],
+                    "k_start": k_start,
+                    "oc_count": oc_count,
+                    "feature_off": feature_off,
+                    "weight_off": weight_off,
+                    "output_off": output_off,
+                    "input_bank_num": input_bank_num,
+                    "weight_bank_num": weight_bank_num,
+                    "cbuf0": None,
+                    "data_reuse": k_index > 0,
+                    "weight_reuse": y_index > 0,
+                    "mc_treat_by_y_tile": None,
+                    "mc_treat_by_k_tile": None,
+                    "mc_treat_by_1c_y_tile": None,
+                    "mc_treat_by_1c_k_tile": None,
+                })
+    return p, split_method, y_boundaries, k_boundaries, rows
+
+
+def _planner_report_row(s):
+    p, split_method, y_boundaries, k_boundaries, desc_rows = _descriptor_rows_for_shape(s)
+    families = sorted({row["family"] for row in desc_rows}, key=_descriptor_families(split_method).index)
+    unresolved = _descriptor_unresolved_fields(split_method, s["groups"], p["is_depthwise"])
+    return {
+        "name": s["name"],
+        "old_strategy": _old_strategy_name(s),
+        "split_method": _split_name(split_method),
+        "y_boundaries": y_boundaries,
+        "k_boundaries": k_boundaries,
+        "descriptor_count": len(desc_rows),
+        "descriptor_families": families,
+        "unresolved_fields": unresolved,
+    }
+
+
+def _planner_report_rows():
+    rows = []
+    for s in SHAPES:
+        rows.append(_planner_report_row(s))
+    return rows
+
+
+def _format_cell(value):
+    if value is None:
+        return "unknown"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (list, tuple)):
+        return ";".join(str(v) for v in value)
+    return str(value)
+
+
+def _print_table(rows, columns):
+    widths = {col: len(col) for col in columns}
+    for row in rows:
+        for col in columns:
+            widths[col] = max(widths[col], len(_format_cell(row[col])))
+    print("  ".join(f"{col:<{widths[col]}}" for col in columns))
+    print("  ".join("-" * widths[col] for col in columns))
+    for row in rows:
+        print("  ".join(f"{_format_cell(row[col]):<{widths[col]}}" for col in columns))
+
+
+def print_planner_report():
+    columns = ["name", "old_strategy", "split_method", "y_boundaries", "k_boundaries",
+               "descriptor_count", "descriptor_families", "unresolved_fields"]
+    _print_table(_planner_report_rows(), columns)
+
+
+def print_descriptor_dump(shape_name=None):
+    shapes = [s for s in SHAPES if shape_name is None or s["name"] == shape_name]
+    if shape_name is not None and not shapes:
+        raise SystemExit(f"unknown shape: {shape_name}")
+    rows = []
+    for s in shapes:
+        rows.extend(_descriptor_rows_for_shape(s)[4])
+    columns = ["name", "family", "family_bits", "grain_bits", "y_start", "input_h",
+               "output_h", "output_w", "k_start", "oc_count", "feature_off", "weight_off",
+               "output_off", "input_bank_num", "weight_bank_num", "cbuf0", "data_reuse", "weight_reuse"]
+    _print_table(rows, columns)
+
+
+def print_cross_tab():
+    buckets = defaultdict(lambda: {"count": 0, "old": Counter()})
+    for row in _planner_report_rows():
+        key = (row["split_method"], tuple(row["descriptor_families"]))
+        buckets[key]["count"] += 1
+        buckets[key]["old"][row["old_strategy"]] += 1
+    rows = []
+    for (split_method, families), info in sorted(buckets.items()):
+        old = ", ".join(f"{name}:{count}" for name, count in sorted(info["old"].items()))
+        rows.append({
+            "split_method": split_method,
+            "descriptor_families": list(families),
+            "count": info["count"],
+            "old_branches_covered": old,
+        })
+    _print_table(rows, ["split_method", "descriptor_families", "count", "old_branches_covered"])
+
+
+def _cbuf_compare_rows():
+    rows = []
+    for s in SHAPES:
+        rk = _with_cbuf_profile("rk3588", _planner_report_row, s)
+        nv = _with_cbuf_profile("nvdla_full", _planner_report_row, s)
+        changed_fields = []
+        for field in ("split_method", "y_boundaries", "k_boundaries", "descriptor_count", "descriptor_families"):
+            if rk[field] != nv[field]:
+                changed_fields.append(field)
+        rows.append({
+            "name": s["name"],
+            "old_strategy": rk["old_strategy"],
+            "rk_split": rk["split_method"],
+            "nv_split": nv["split_method"],
+            "rk_y_boundaries": rk["y_boundaries"],
+            "nv_y_boundaries": nv["y_boundaries"],
+            "rk_k_boundaries": rk["k_boundaries"],
+            "nv_k_boundaries": nv["k_boundaries"],
+            "rk_descriptor_count": rk["descriptor_count"],
+            "nv_descriptor_count": nv["descriptor_count"],
+            "rk_descriptor_families": rk["descriptor_families"],
+            "nv_descriptor_families": nv["descriptor_families"],
+            "changed_fields": changed_fields,
+        })
+    return rows
+
+
+def print_cbuf_compare(all_rows=False):
+    rows = _cbuf_compare_rows()
+    changed = [row for row in rows if row["changed_fields"]]
+    same = len(rows) - len(changed)
+    print(f"profiles: rk3588=12x32KiB, nvdla_full=16x32KiB planner budget")
+    print(f"same={same} changed={len(changed)} total={len(rows)}")
+    print()
+    split_counts = Counter((row["rk_split"], row["nv_split"]) for row in rows)
+    summary_rows = []
+    for (rk_split, nv_split), count in sorted(split_counts.items()):
+        summary_rows.append({"rk_split": rk_split, "nv_split": nv_split, "count": count})
+    _print_table(summary_rows, ["rk_split", "nv_split", "count"])
+    print()
+    detail_rows = rows if all_rows else changed
+    columns = ["name", "old_strategy", "rk_split", "nv_split", "rk_y_boundaries", "nv_y_boundaries",
+               "rk_k_boundaries", "nv_k_boundaries", "rk_descriptor_count", "nv_descriptor_count",
+               "rk_descriptor_families", "nv_descriptor_families", "changed_fields"]
+    _print_table(detail_rows, columns)
+
+
+def _shape_by_name(name):
+    for s in SHAPES:
+        if s["name"] == name:
+            return s
+    raise KeyError(name)
+
+
+def _unique_in_order(values):
+    out = []
+    for value in values:
+        if value not in out:
+            out.append(value)
+    return out
+
+
+def _add_evidence_row(rows, target, check, ok, pass_detail, fail_detail, fail_status="FAIL"):
+    rows.append({
+        "target": target,
+        "check": check,
+        "status": "PASS" if ok else fail_status,
+        "detail": pass_detail if ok else fail_detail,
+    })
+
+
+def _offsets_are_additive(rows, p):
+    feature_by_y = {}
+    weight_by_k = {}
+    for row in rows:
+        y_start = row["y_start"]
+        k_start = row["k_start"]
+        expected_output = (k_start * p["out_h"] * p["out_w"] + y_start * p["out_w"]) * FP16_BYTES
+        if row["output_off"] != expected_output:
+            return False
+        if y_start in feature_by_y and feature_by_y[y_start] != row["feature_off"]:
+            return False
+        if k_start in weight_by_k and weight_by_k[k_start] != row["weight_off"]:
+            return False
+        feature_by_y[y_start] = row["feature_off"]
+        weight_by_k[k_start] = row["weight_off"]
+    return True
+
+
+def _family_oc_counts(rows, family):
+    counts = []
+    for row in rows:
+        if row["family"] == family and row["y_start"] == 0:
+            counts.append(row["oc_count"])
+    return counts
+
+
+def _evidence_check_rows():
+    rows = []
+
+    mixed = dict(name="evidence_mix_b1_c160_h40_w40_oc320_wic160_k3x3_g1",
+                 batch=1, in_c=160, in_h=40, in_w=40, out_c=320,
+                 weight_in_c=160, kh=3, kw=3, groups=1)
+    p, split_method, y_boundaries, k_boundaries, desc = _descriptor_rows_for_shape(mixed)
+    families = _unique_in_order([row["family"] for row in desc])
+    target = "mixed 160->320 3x3 h40"
+    _add_evidence_row(rows, target, "high-level split", _split_name(split_method) == "BY_YK",
+                      f"split=BY_YK y={y_boundaries} k={k_boundaries}",
+                      f"split={_split_name(split_method)} y={y_boundaries} k={k_boundaries}")
+    _add_evidence_row(rows, target, "independent Y/K windows", len(y_boundaries) > 2 and len(k_boundaries) > 2,
+                      f"y_windows={len(y_boundaries) - 1} k_windows={len(k_boundaries) - 1}",
+                      f"y_windows={len(y_boundaries) - 1} k_windows={len(k_boundaries) - 1}")
+    _add_evidence_row(rows, target, "family order", families == ["setup", "k_half", "k_tile"],
+                      f"families={families}", f"families={families}")
+    _add_evidence_row(rows, target, "additive offsets", _offsets_are_additive(desc, p),
+                      "feature_off by Y, weight_off by K, output_off additive",
+                      "offset dependency check failed")
+    _add_evidence_row(rows, target, "exact RKNN descriptor count", len(desc) == 12,
+                      "descriptor_count=12", f"descriptor_count={len(desc)} expected setup x2, k_half x4, k_tile x6", "GAP")
+    _add_evidence_row(rows, target, "exact RKNN k_tile OC windows", _family_oc_counts(desc, "k_tile") == [112, 112, 96],
+                      "k_tile OC windows match 112;112;96",
+                      f"k_tile OC windows={_family_oc_counts(desc, 'k_tile')} expected 112;112;96", "GAP")
+
+    h14 = _shape_by_name("b1_c160_h14_w14_oc320_wic160_k3x3_g1_s1_pvalid")
+    _p, _split_method, _y_boundaries, _k_boundaries, h14_desc = _descriptor_rows_for_shape(h14)
+    h14_target = "spatial 160->320 3x3 h14"
+    _add_evidence_row(rows, h14_target, "spatial k_tile rows present",
+                      any(row["family"] == "k_tile" for row in h14_desc),
+                      f"k_tile_rows={sum(1 for row in h14_desc if row['family'] == 'k_tile')}",
+                      "no k_tile rows")
+    _add_evidence_row(rows, h14_target, "cbuf0/grain kept explicit",
+                      all(row["grain_bits"] is None and row["cbuf0"] is None for row in h14_desc),
+                      "grain_bits=unknown and cbuf0=unknown", "grain_bits or cbuf0 hidden behind a default")
+    _add_evidence_row(rows, h14_target, "exact RKNN k_tile OC windows", _family_oc_counts(h14_desc, "k_tile") == [112, 112, 96],
+                      "k_tile OC windows match 112;112;96",
+                      f"k_tile OC windows={_family_oc_counts(h14_desc, 'k_tile')} expected 112;112;96", "GAP")
+
+    pointwise = _shape_by_name("conv2d_b1_c256_h28_w28_oc32_wic256_k1x1_g1")
+    _p, pointwise_split, pointwise_y, _pointwise_k, pointwise_desc = _descriptor_rows_for_shape(pointwise)
+    pointwise_target = "pointwise exported Y tile"
+    _add_evidence_row(rows, pointwise_target, "y_tile rows present", _split_name(pointwise_split) == "BY_Y" and pointwise_y == [0, 25, 28],
+                      f"split=BY_Y y={pointwise_y}", f"split={_split_name(pointwise_split)} y={pointwise_y}")
+    _add_evidence_row(rows, pointwise_target, "grain_bits explicit unknown",
+                      all(row["grain_bits"] is None for row in pointwise_desc),
+                      "all descriptor grain_bits=unknown", "grain_bits hidden behind a default")
+    _add_evidence_row(rows, pointwise_target, "cbuf0 separate from grain_bits",
+                      all(row["cbuf0"] is None for row in pointwise_desc),
+                      "all descriptor cbuf0=unknown", "cbuf0 hidden behind grain/default")
+
+    hardcoded = []
+    for name in sorted(_POINTWISE_Y_TILE_HARDCODED):
+        _p, hard_split, hard_y, hard_k, hard_desc = _descriptor_rows_for_shape(_shape_by_name(name))
+        hardcoded.append(f"{name}:{_split_name(hard_split)} y={hard_y} k={hard_k} desc={len(hard_desc)}")
+    _add_evidence_row(rows, "pointwise_y_tile_hardcoded", "rare branch not explained as Y/K yet",
+                      all(":NONE " not in item for item in hardcoded),
+                      "; ".join(hardcoded), "; ".join(hardcoded), "GAP")
+
+    all_desc = []
+    for s in SHAPES:
+        all_desc.extend(_descriptor_rows_for_shape(s)[4])
+    _add_evidence_row(rows, "all descriptor rows", "unresolved fields visible",
+                      all(row["grain_bits"] is None and row["cbuf0"] is None for row in all_desc),
+                      f"checked {len(all_desc)} descriptor rows", "some unresolved fields are hidden")
+    return rows
+
+
+def print_evidence_check():
+    rows = _evidence_check_rows()
+    _print_table(rows, ["target", "check", "status", "detail"])
+    counts = Counter(row["status"] for row in rows)
+    print()
+    _print_table([{"status": status, "count": count} for status, count in sorted(counts.items())],
+                 ["status", "count"])
 
 
 # ---- CPU convolution (numpy, fp16) ----
@@ -458,6 +907,65 @@ def run_conv_tiled(batch, in_c, out_c, kh, kw, input_hw, groups=1, stride=1):
                 result[n, ks:ks + k_span, ys:ys + y_span] = tile_result[:k_span, :y_span]
 
     return result, input_nchw, weight_nchw
+
+
+def _descriptor_input_tile(input_nchw, n, row, p, in_c, in_h, in_w, kh, stride):
+    y_start = row["y_start"]
+    input_y = y_start * stride
+    input_h = row["input_h"]
+    if p["is_depthwise"]:
+        k_start, oc_count = row["k_start"], row["oc_count"]
+        tile = np.zeros((oc_count, input_h, in_w), dtype=np.float16)
+        real_h = min(input_h, in_h - input_y)
+        tile[:, :real_h] = input_nchw[n, k_start:k_start + oc_count, input_y:input_y + real_h, :]
+        return tile
+
+    tile = np.zeros((in_c, input_h, in_w), dtype=np.float16)
+    real_h = min(input_h, in_h - input_y)
+    tile[:, :real_h] = input_nchw[n, :, input_y:input_y + real_h, :]
+    return tile
+
+
+def _descriptor_weight_tile(weight_nchw, row, p, in_c, kh, kw, groups):
+    k_start, oc_count = row["k_start"], row["oc_count"]
+    if p["is_depthwise"]:
+        tile = np.zeros((oc_count, oc_count, kh, kw), dtype=np.float16)
+        for local_c in range(oc_count):
+            tile[local_c, local_c] = weight_nchw[k_start + local_c, 0]
+        return tile, oc_count
+
+    return weight_nchw[k_start:k_start + oc_count].reshape(oc_count, in_c // groups, kh, kw), groups
+
+
+def run_conv_generic_only(s):
+    """Run CPU conv by consuming descriptor rows instead of old strategy branches."""
+    stride = s.get("stride", 1)
+    batch = s["batch"]
+    in_c, in_h, in_w = s["in_c"], s["in_h"], s["in_w"]
+    out_c, kh, kw, groups = s["out_c"], s["kh"], s["kw"], s["groups"]
+
+    np.random.seed(42)
+    input_nchw = np.random.uniform(-2, 2, (batch, in_c, in_h, in_w)).astype(np.float16)
+    weight_nchw = np.random.uniform(-2, 2, (out_c, in_c // groups, kh, kw)).astype(np.float16)
+
+    p, _split_method, _y_boundaries, _k_boundaries, rows = _descriptor_rows_for_shape(s)
+    result = np.zeros((batch, out_c, p["out_h"], p["out_w"]), dtype=np.float16)
+
+    for n in range(batch):
+        for row in rows:
+            input_tile = _descriptor_input_tile(input_nchw, n, row, p, in_c, in_h, in_w, kh, stride)
+            weight_tile, tile_groups = _descriptor_weight_tile(weight_nchw, row, p, in_c, kh, kw, groups)
+            tile_result = _conv2d_tile_fast(input_tile, weight_tile, kh, kw, stride,
+                                           tile_groups, p["is_depthwise"])
+            y_start = row["y_start"]
+            output_h = row["output_h"]
+            output_w = row["output_w"]
+            k_start = row["k_start"]
+            oc_count = row["oc_count"]
+            result[n, k_start:k_start + oc_count, y_start:y_start + output_h, :output_w] = \
+                tile_result[:oc_count, :output_h, :output_w]
+
+    return result, input_nchw, weight_nchw, rows
 
 
 def compute_reference(inp, wt, batch, in_c, in_h, in_w, out_c, kh, kw, groups=1, stride=1):
@@ -719,7 +1227,7 @@ SHAPES = [
 ]
 
 
-if __name__ == "__main__":
+def run_all_shape_tests():
     nw = max(len(s["name"]) for s in SHAPES)
     iw = max(len(f"{s['in_c']}x{s['in_h']}x{s['in_w']}") for s in SHAPES)
     n_pass = 0
@@ -744,3 +1252,94 @@ if __name__ == "__main__":
             n_fail += 1
         print(f"  {s['name']:<{nw}s} {in_str:<{iw}s} -> {out_str}  {status}  (max_diff={md:.4f})")
     print(f"\n  {n_pass} PASS, {n_fail} FAIL out of {n_pass + n_fail} shapes")
+
+
+def run_generic_only_tests():
+    nw = max(len(s["name"]) for s in SHAPES)
+    iw = max(len(f"{s['in_c']}x{s['in_h']}x{s['in_w']}") for s in SHAPES)
+    n_pass = 0
+    n_fail = 0
+    failures = []
+    for s in SHAPES:
+        stride = s.get("stride", 1)
+        oh = (s["in_h"] - s["kh"]) // stride + 1
+        ow = (s["in_w"] - s["kw"]) // stride + 1
+
+        r, inp, wt, rows = run_conv_generic_only(s)
+        e = compute_reference(inp, wt, s["batch"], s["in_c"], s["in_h"], s["in_w"],
+                              s["out_c"], s["kh"], s["kw"], groups=s["groups"], stride=stride)
+        md = float(np.max(np.abs(r.astype(np.float64) - e)))
+        ok = np.allclose(r, e, atol=0.2) and not np.any(np.isinf(r))
+        in_str = f"{s['in_c']}x{s['in_h']}x{s['in_w']}"
+        out_str = f"{s['out_c']}x{oh}x{ow}"
+        status = "PASS" if ok else "FAIL"
+        if ok:
+            n_pass += 1
+        else:
+            n_fail += 1
+            families = sorted({row["family"] for row in rows})
+            failures.append({
+                "name": s["name"],
+                "old_strategy": _old_strategy_name(s),
+                "split_method": rows[0]["split_method"] if rows else "unknown",
+                "descriptor_families": families,
+                "max_diff": f"{md:.4f}",
+            })
+        print(f"  {s['name']:<{nw}s} {in_str:<{iw}s} -> {out_str}  {status}  (max_diff={md:.4f})")
+
+    print(f"\n  {n_pass} PASS, {n_fail} FAIL out of {n_pass + n_fail} shapes")
+    if failures:
+        print("\nFailure groups:")
+        grouped = Counter((row["old_strategy"], row["split_method"], tuple(row["descriptor_families"]))
+                          for row in failures)
+        group_rows = []
+        for (old_strategy, split_method, families), count in sorted(grouped.items()):
+            group_rows.append({
+                "old_strategy": old_strategy,
+                "split_method": split_method,
+                "descriptor_families": list(families),
+                "count": count,
+            })
+        _print_table(group_rows, ["old_strategy", "split_method", "descriptor_families", "count"])
+        print("\nFailures:")
+        _print_table(failures, ["name", "old_strategy", "split_method", "descriptor_families", "max_diff"])
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Offline RK3588 CONV tiling proof harness")
+    parser.add_argument("--planner-report", action="store_true",
+                        help="print one planner summary row per shape")
+    parser.add_argument("--descriptor-dump", metavar="SHAPE", nargs="?", const="",
+                        help="dump descriptor rows for one shape, or all shapes if no shape is supplied")
+    parser.add_argument("--cross-tab", action="store_true",
+                        help="summarize old branches by new split method and descriptor families")
+    parser.add_argument("--cbuf-compare", action="store_true",
+                        help="compare RK3588 and NVDLA nv_full CBUF budgets over all shapes")
+    parser.add_argument("--cbuf-compare-all", action="store_true",
+                        help="include unchanged rows in --cbuf-compare details")
+    parser.add_argument("--generic-only", action="store_true",
+                        help="execute all shapes from descriptor rows without old strategy branches")
+    parser.add_argument("--evidence-check", action="store_true",
+                        help="compare descriptor rows against known RKNN export observations")
+    args = parser.parse_args()
+
+    if args.planner_report:
+        print_planner_report()
+    if args.descriptor_dump is not None:
+        print_descriptor_dump(args.descriptor_dump or None)
+    if args.cross_tab:
+        print_cross_tab()
+    if args.cbuf_compare or args.cbuf_compare_all:
+        print_cbuf_compare(all_rows=args.cbuf_compare_all)
+    if args.generic_only:
+        run_generic_only_tests()
+    if args.evidence_check:
+        print_evidence_check()
+    if (not args.planner_report and args.descriptor_dump is None and not args.cross_tab and
+            not args.cbuf_compare and not args.cbuf_compare_all and not args.generic_only and
+            not args.evidence_check):
+        run_all_shape_tests()
+
+
+if __name__ == "__main__":
+    main()
