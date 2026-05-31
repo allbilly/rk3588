@@ -11,437 +11,62 @@ from collections import Counter, defaultdict
 
 import numpy as np
 
-# ---- constants (same as conv.py) ----
-FP16_BYTES = 2
-CBUF_ENTRY_BYTES = 128
-CBUF_ENTRIES_PER_BANK = 256
-RK3588_CBUF_BANKS = 12
-RK_CBUF_BANKS = 12
-CBUF_BANK_SIZE = CBUF_ENTRIES_PER_BANK * CBUF_ENTRY_BYTES
-RK_MAX_CONV_FLAT_STRIDE = 992
-UNPACK_C2 = 8
-OUTPUT_MEM_BYTES = 4 * 1024 * 1024
-
-_CBUF_PROFILES = {
-    "rk3588": {"banks": 12, "entry_bytes": 128, "entries_per_bank": 256},
-    # nv_full has 16 CBUF banks. Keep the RK/NVDLA C-model entry geometry here
-    # because this harness compares planner pressure, not generated NVDLA RTL.
-    "nvdla_full": {"banks": 16, "entry_bytes": 128, "entries_per_bank": 256},
-}
-
-# ---- helpers (same as conv.py) ----
-
-def _ceil_div(x, y):
-    return (x + y - 1) // y
-
-def _align_up(x, align):
-    return _ceil_div(x, align) * align
-
-def _set_cbuf_profile(name):
-    global CBUF_ENTRY_BYTES, CBUF_ENTRIES_PER_BANK, RK_CBUF_BANKS, CBUF_BANK_SIZE
-    profile = _CBUF_PROFILES[name]
-    CBUF_ENTRY_BYTES = profile["entry_bytes"]
-    CBUF_ENTRIES_PER_BANK = profile["entries_per_bank"]
-    RK_CBUF_BANKS = profile["banks"]
-    CBUF_BANK_SIZE = CBUF_ENTRIES_PER_BANK * CBUF_ENTRY_BYTES
-
-def _with_cbuf_profile(name, fn, *args):
-    global CBUF_ENTRY_BYTES, CBUF_ENTRIES_PER_BANK, RK_CBUF_BANKS, CBUF_BANK_SIZE
-    old = (CBUF_ENTRY_BYTES, CBUF_ENTRIES_PER_BANK, RK_CBUF_BANKS, CBUF_BANK_SIZE)
-    _set_cbuf_profile(name)
-    try:
-        return fn(*args)
-    finally:
-        CBUF_ENTRY_BYTES, CBUF_ENTRIES_PER_BANK, RK_CBUF_BANKS, CBUF_BANK_SIZE = old
-
-def _mesa_entries_per_slice(input_width, input_channels):
-    atomics_per_entry = CBUF_ENTRY_BYTES // 16
-    total_c_atomics = _ceil_div(input_channels * FP16_BYTES, 16)
-    last_c_atomics = total_c_atomics % atomics_per_entry
-    int_c_entries = (total_c_atomics // atomics_per_entry) * input_width
-    frac_c_entries = input_width if last_c_atomics == 3 else _ceil_div(last_c_atomics * input_width, atomics_per_entry)
-    return int_c_entries + frac_c_entries
-
-def _is_depthwise(in_c, out_c, groups):
-    return groups == in_c == out_c
-
-def _conv_align_c(in_c, groups, out_c):
-    is_depthwise = _is_depthwise(in_c, out_c, groups)
-    if not is_depthwise and (groups > 1 or in_c > 4):
-        return 16
-    min_align = 16 if is_depthwise else 8
-    return max(min_align, min(1 << (max(1, in_c) - 1).bit_length(), 32 if is_depthwise else 16))
-
-def _pointwise_weight_atom_groups(in_c):
-    return _ceil_div(max(in_c, 16), 32)
-
-def _uses_pointwise_weight_atom_layout(in_c, kh, kw, groups):
-    return groups == 1 and kh == 1 and kw == 1 and _pointwise_weight_atom_groups(in_c) > 1
-
-def _cdma_dc_feature_input_pack_c2(in_c, groups, out_c, align_c):
-    if in_c == 1:
-        return 2
-    if not _is_depthwise(in_c, out_c, groups) and groups == 1 and 1 < in_c <= 4:
-        return 8
-    return 8
-
-def _feature_grains(row_bytes, floor_grains, use_nhwc_pack=False, is_spatial=False, is_depthwise=False):
-    if use_nhwc_pack and is_spatial:
-        return floor_grains
-    if is_depthwise and is_spatial:
-        return min(13, floor_grains)
-    even_rows_per_two_banks = (_ceil_div(2 * CBUF_BANK_SIZE, row_bytes) + 1) & ~1
-    return min(floor_grains, even_rows_per_two_banks)
-
-def _conv_params(in_c, in_h, in_w, out_c, kh, kw, groups, stride=1):
-    is_depthwise = _is_depthwise(in_c, out_c, groups)
-    is_spatial = (kh != 1 or kw != 1)
-    out_h = (in_h - kh) // stride + 1
-    out_w = (in_w - kw) // stride + 1
-    align_c = 32 if _uses_pointwise_weight_atom_layout(in_c, kh, kw, groups) else _conv_align_c(in_c, groups, out_c)
-    align_out_c = max(16, _align_up(out_c, 16))
-    width_stride = _align_up(in_w, max(1, _ceil_div(16, align_c)))
-    out_width_stride = out_h * out_w if not is_spatial else _align_up(out_h * out_w, 4)
-    input_pack_c2 = _cdma_dc_feature_input_pack_c2(in_c, groups, out_c, align_c)
-    use_nhwc = (not is_depthwise) and (not (groups > 1 and is_spatial)) and in_c < input_pack_c2
-    return {"in_c": in_c, "in_h": in_h, "in_w": in_w, "out_c": out_c, "kh": kh, "kw": kw,
-            "groups": groups, "stride": stride, "is_depthwise": is_depthwise, "is_spatial": is_spatial,
-            "out_h": out_h, "out_w": out_w, "align_c": align_c, "align_out_c": align_out_c,
-            "width_stride": width_stride, "out_width_stride": out_width_stride,
-            "input_pack_c2": input_pack_c2, "use_nhwc": use_nhwc}
-
-def _mesa_weight_banks(weights_width, weights_height, input_channels, output_channels, depthwise):
-    weight_bytes = weights_width * weights_height * input_channels * FP16_BYTES
-    if not depthwise:
-        weight_bytes *= output_channels
-    return _ceil_div(_ceil_div(weight_bytes, CBUF_ENTRY_BYTES), CBUF_ENTRIES_PER_BANK) + 1
-
-def _pointwise_oc_tile_c(in_c):
-    max_tile = CBUF_BANK_SIZE // (max(1, in_c) * FP16_BYTES)
-    return 32 if max_tile >= 32 else 16 if max_tile >= 16 else 8 if max_tile >= 8 else 4
-
-def _mesa_output_tile_h(input_width, out_h, input_channels, output_channels, kh, kw, stride, depthwise, input_banks=None):
-    if input_banks is None:
-        weight_banks = _mesa_weight_banks(kw, kh, input_channels, output_channels, depthwise)
-        input_banks = RK_CBUF_BANKS - weight_banks if weight_banks + 1 < RK_CBUF_BANKS else 7
-    entries_per_slice = max(1, _mesa_entries_per_slice(input_width, input_channels))
-    input_slices = max(1, (CBUF_ENTRIES_PER_BANK * input_banks) // entries_per_slice)
-    output_rows = max(1, (input_slices - kh) // stride + 1)
-    return min(out_h, output_rows)
-
-def _pointwise_oc_tile_h(in_c, out_h, out_w, oc_tile, stride=1):
-    return _mesa_output_tile_h(out_w, out_h, in_c, oc_tile, 1, 1, stride, False)
-
-def _depthwise_tile_h(total_channels, out_h, in_w, kh, kw, stride=1):
-    tile_h = _mesa_output_tile_h(in_w, out_h, total_channels, total_channels, kh, kw, stride, True, input_banks=7)
-    if total_channels > 64:
-        align_c = _conv_align_c(total_channels, total_channels, total_channels)
-        row_bytes = in_w * align_c * FP16_BYTES
-        max_feature_rows = _feature_grains(row_bytes, out_h + kh, is_spatial=True, is_depthwise=True) + 1
-        tile_h = min(tile_h, max_feature_rows)
-    tile_h = max(10, tile_h) if tile_h < out_h else tile_h
-    return tile_h if tile_h == out_h or tile_h % 2 == 0 else tile_h - 1
-
-def _needs_pointwise_oc_tile_schedule(in_c, out_c, in_h, in_w, kh, kw, groups):
-    if groups != 1 or kh != 1 or kw != 1:
-        return False
-    out_h = in_h
-    out_w = in_w
-    oc_tile = _pointwise_oc_tile_c(in_c)
-    return out_c > oc_tile or (in_c >= 16 and out_c % oc_tile != 0) or _pointwise_oc_tile_h(in_c, out_h, out_w, oc_tile) < out_h
-
-# ---- tiling strategy (same as conv.py) ----
-
-_SPLIT_NONE = 0
-_SPLIT_BY_Y = 1
-_SPLIT_BY_K = 2
-_SPLIT_BY_YK = 3
-
-_SPLIT_NAMES = {
-    _SPLIT_NONE: "NONE",
-    _SPLIT_BY_Y: "BY_Y",
-    _SPLIT_BY_K: "BY_K",
-    _SPLIT_BY_YK: "BY_YK",
-}
-
-_FAMILY_BITS = {
-    "setup": 0x00000000,
-    "y_tile": 0x20000000,
-    "k_half": 0x40000000,
-    "k_tile": 0x50000000,
-}
-
-_POINTWISE_Y_TILE_HARDCODED = {
-    "conv2d_b1_c144_h28_w28_oc32_wic144_k1x1_g1",
-    "conv2d_b1_c192_h28_w28_oc32_wic192_k1x1_g1",
-}
-
-def _compute_k_step(in_c, out_c, kh, kw, groups, p):
-    is_depthwise, is_spatial = p["is_depthwise"], p["is_spatial"]
-    data_in_channel_aligned = _align_up(in_c, p["align_c"])
-    weight_kernel_bytes = kh * kw * data_in_channel_aligned * FP16_BYTES
-    tweight = weight_kernel_bytes * (1 if is_depthwise else out_c)
-    weight_banks = _ceil_div(tweight, CBUF_BANK_SIZE)
-
-    k_step = out_c
-    if is_depthwise and is_spatial:
-        k_step = min(32, out_c)
-    elif is_spatial and groups == 1 and not is_depthwise and weight_banks > 3:
-        k_step = 32 if out_c >= 32 else out_c
-    elif not is_spatial and groups == 1:
-        pw_oc = _pointwise_oc_tile_c(in_c)
-        if weight_banks > 3:
-            k_step = max(pw_oc, 32)
-        elif out_c > pw_oc:
-            k_step = pw_oc
-    return min(k_step, out_c)
-
-def _compute_y_step(in_c, out_c, kh, kw, in_h, in_w, groups, stride, k_step, p):
-    is_spatial, is_depthwise = p["is_spatial"], p["is_depthwise"]
-    out_h = p["out_h"]
-
-    if is_depthwise and is_spatial:
-        data_in_channel_aligned = _align_up(in_c, p["align_c"])
-        weight_kernel_bytes = kh * kw * data_in_channel_aligned * FP16_BYTES
-        weight_banks = _ceil_div(_ceil_div(weight_kernel_bytes, CBUF_ENTRY_BYTES), CBUF_ENTRIES_PER_BANK) + 1
-        input_banks = RK_CBUF_BANKS - weight_banks if weight_banks + 1 < RK_CBUF_BANKS else 7
-        ae = CBUF_ENTRY_BYTES // 16
-        tca = _ceil_div(in_c * FP16_BYTES, 16)
-        lca = tca % ae
-        ice = (tca // ae) * in_w
-        fce = in_w if lca == 3 else _ceil_div(lca * in_w, ae)
-        eps = max(1, ice + fce)
-        s = max(1, (CBUF_ENTRIES_PER_BANK * input_banks) // eps)
-        tile_h = min(out_h, max(1, (s - kh) // stride + 1))
-        if in_c > 64:
-            row_bytes = in_w * _conv_align_c(in_c, in_c, in_c) * FP16_BYTES
-            max_rows = _feature_grains(row_bytes, out_h + kh, True, True) + 1
-            tile_h = min(tile_h, max_rows)
-        tile_h = max(10, tile_h) if tile_h < out_h else tile_h
-        max_input_rows = min(15, out_h + kh - 1)
-        tile_h = min(tile_h, max_input_rows - kh + 1)
-        tile_h = tile_h if tile_h == out_h or tile_h % 2 == 0 else tile_h - 1
-        return tile_h
-
-    data_in_channel_aligned = _align_up(in_c, p["align_c"])
-    tile_in_c = k_step if is_depthwise else in_c
-    tile_data_in_channel_aligned = _align_up(tile_in_c, p["align_c"])
-    row_bytes = p["width_stride"] * tile_data_in_channel_aligned * FP16_BYTES
-
-    y_step = out_h
-    tile_wb = _ceil_div(kh * kw * data_in_channel_aligned * FP16_BYTES * (k_step if not is_depthwise else 1), CBUF_BANK_SIZE)
-    remaining = max(1, RK_CBUF_BANKS - tile_wb)
-    tile_in_c = k_step if is_depthwise else in_c
-    tile_data_in_channel_aligned = _align_up(tile_in_c, p["align_c"])
-    row_bytes = p["width_stride"] * tile_data_in_channel_aligned * FP16_BYTES
-    fg = _feature_grains(row_bytes, in_h + kh, False, is_spatial, is_depthwise)
-    data_banks_needed = _ceil_div(row_bytes * fg, CBUF_BANK_SIZE)
-    if data_banks_needed > remaining:
-        y_step = max(1, out_h * remaining // max(1, data_banks_needed))
-
-    if not is_spatial:
-        out_w = p["out_w"]
-        small_channel = in_c <= 4 and not is_depthwise
-        if small_channel and p["out_width_stride"] > RK_MAX_CONV_FLAT_STRIDE:
-            y_step = min(y_step, max(1, RK_MAX_CONV_FLAT_STRIDE // out_w))
-        elif out_h > 50:
-            if in_c >= 128 and out_c >= 128:
-                y_step = min(y_step, 25)
-            elif p["out_width_stride"] > RK_MAX_CONV_FLAT_STRIDE:
-                y_step = min(y_step, 32)
-            else:
-                y_step = min(y_step, 50)
-
-    if not is_depthwise:
-        eps = _mesa_entries_per_slice(p["width_stride"], data_in_channel_aligned)
-        input_banks = RK_CBUF_BANKS - tile_wb if tile_wb + 1 < RK_CBUF_BANKS else 7
-        max_input_h = max(1, (CBUF_ENTRIES_PER_BANK * input_banks) // eps)
-        max_y = max(1, (max_input_h - kh) // stride + 1)
-        y_step = min(y_step, max_y)
-
-    if is_spatial and p["use_nhwc"]:
-        nhwc_data_bank = RK_CBUF_BANKS - 1
-        nhwc_row_bytes = p["width_stride"] * tile_data_in_channel_aligned * FP16_BYTES
-        max_grains = (nhwc_data_bank * CBUF_BANK_SIZE) // nhwc_row_bytes
-        max_y_for_cbuf = max(1, max_grains - 2 * kh + 1)
-        y_step = min(y_step, max_y_for_cbuf)
-
-    return y_step
-
-def _plan_conv_tiles(in_c, out_c, kh, kw, in_h, in_w, groups, stride):
-    p = _conv_params(in_c, in_h, in_w, out_c, kh, kw, groups, stride)
-    out_h = p["out_h"]
-    k_step = _compute_k_step(in_c, out_c, kh, kw, groups, p)
-    y_step = _compute_y_step(in_c, out_c, kh, kw, in_h, in_w, groups, stride, k_step, p)
-
-    split_method = _SPLIT_NONE
-    if k_step < out_c and y_step < out_h:
-        split_method = _SPLIT_BY_YK
-    elif k_step < out_c:
-        split_method = _SPLIT_BY_K
-    elif y_step < out_h:
-        split_method = _SPLIT_BY_Y
-
-    y_boundary = [0]
-    while y_boundary[-1] < out_h:
-        y_boundary.append(int(min(y_boundary[-1] + y_step, out_h)))
-    k_boundary = [0]
-    while k_boundary[-1] < out_c:
-        k_boundary.append(int(min(k_boundary[-1] + k_step, out_c)))
-
-    tiles = []
-    for yi in range(len(y_boundary) - 1):
-        ys = y_boundary[yi]
-        y_span = y_boundary[yi + 1] - ys
-        for ki in range(len(k_boundary) - 1):
-            ks = k_boundary[ki]
-            k_span = k_boundary[ki + 1] - ks
-            tiles.append({"y_start": ys, "y_step": y_span, "k_start": ks, "k_step": k_span})
-    return p, split_method, tiles, y_step, k_step
-
-
-def _split_name(split_method):
-    return _SPLIT_NAMES[split_method]
-
-
-def _conv_output_count(p):
-    return _ceil_div(p["align_out_c"], UNPACK_C2) * p["out_width_stride"] * UNPACK_C2
-
-
-def _conv_output_bytes(p):
-    return _conv_output_count(p) * FP16_BYTES
-
-
-def _tile_boundaries(tiles, key_start, key_step):
-    boundaries = {0}
-    for tile in tiles:
-        boundaries.add(tile[key_start])
-        boundaries.add(tile[key_start] + tile[key_step])
-    return sorted(boundaries)
-
-
-def _tile_windows(boundaries):
-    return [(boundaries[i], boundaries[i + 1] - boundaries[i]) for i in range(len(boundaries) - 1)]
-
-
-def _old_strategy_name(s):
-    stride = s.get("stride", 1)
-    p = _conv_params(s["in_c"], s["in_h"], s["in_w"], s["out_c"],
-                     s["kh"], s["kw"], s["groups"], stride)
-    if s["name"] in _POINTWISE_Y_TILE_HARDCODED:
-        return "pointwise_y_tile_hardcoded"
-
-    is_spatial = p["is_spatial"]
-    is_depthwise = p["is_depthwise"]
-    grouped_serial = is_spatial and s["groups"] > 1 and not is_depthwise
-    spatial_weight_banks = _mesa_weight_banks(s["kw"], s["kh"], s["in_c"], s["out_c"], False) if is_spatial else 0
-    spatial_im2col = (is_spatial and s["groups"] == 1 and not is_depthwise and
-                      (spatial_weight_banks > RK3588_CBUF_BANKS // 3 or _conv_output_bytes(p) > OUTPUT_MEM_BYTES))
-    spatial_oc_serial = (is_spatial and s["groups"] == 1 and not is_depthwise and
-                         s["out_c"] > UNPACK_C2 and (s["in_c"] % 16 != 0 or s["in_c"] >= 16))
-    depthwise_spatial_tiled = (is_depthwise and is_spatial and
-                               (p["out_h"] > _depthwise_tile_h(s["out_c"], p["out_h"], s["in_w"], s["kh"], s["kw"], stride) or
-                                s["out_c"] > p["align_c"]))
-    if grouped_serial:
-        return "grouped_serial"
-    if spatial_im2col:
-        return "spatial_im2col"
-    if spatial_oc_serial:
-        return "spatial_oc_serial"
-    if depthwise_spatial_tiled:
-        return "depthwise_spatial_tiled"
-    if (not is_spatial and not is_depthwise and s["groups"] == 1 and
-            _needs_pointwise_oc_tile_schedule(s["in_c"], s["out_c"], s["in_h"], s["in_w"], s["kh"], s["kw"], s["groups"])):
-        return "pointwise_oc_tile"
-    return "fallback/direct"
-
-
-def _descriptor_families(split_method):
-    if split_method == _SPLIT_NONE:
-        return ["setup"]
-    if split_method == _SPLIT_BY_Y:
-        return ["y_tile"]
-    if split_method == _SPLIT_BY_K:
-        return ["k_tile"]
-    return ["setup", "k_half", "k_tile"]
+try:  # noqa: E402
+    from conv_expt.conv_tile_planner import (
+        OUTPUT_MEM_BYTES,
+        FP16_BYTES,
+        RK3588_CBUF_BANKS,
+        UNPACK_C2,
+        _EVIDENCE_MIX_H40,
+        _POINTWISE_Y_TILE_HARDCODED,
+        _align_up,
+        _ceil_div,
+        _conv_output_bytes,
+        _conv_output_count,
+        _conv_params,
+        _depthwise_tile_h,
+        _descriptor_families,
+        _descriptor_rows_for_shape,
+        _is_depthwise,
+        _needs_pointwise_oc_tile_schedule,
+        _old_strategy_name,
+        _plan_conv_tiles,
+        _split_name,
+        _with_cbuf_profile,
+    )
+except ModuleNotFoundError:  # pragma: no cover - direct script execution path
+    from conv_tile_planner import (
+        OUTPUT_MEM_BYTES,
+        FP16_BYTES,
+        RK3588_CBUF_BANKS,
+        UNPACK_C2,
+        _EVIDENCE_MIX_H40,
+        _POINTWISE_Y_TILE_HARDCODED,
+        _align_up,
+        _ceil_div,
+        _conv_output_bytes,
+        _conv_output_count,
+        _conv_params,
+        _depthwise_tile_h,
+        _descriptor_families,
+        _descriptor_rows_for_shape,
+        _is_depthwise,
+        _needs_pointwise_oc_tile_schedule,
+        _old_strategy_name,
+        _plan_conv_tiles,
+        _split_name,
+        _with_cbuf_profile,
+    )
 
 
 def _descriptor_unresolved_fields(split_method, groups, is_depthwise):
     fields = ["grain_bits", "cbuf0", "mc_treat_by_y_tile", "mc_treat_by_k_tile",
               "mc_treat_by_1c_y_tile", "mc_treat_by_1c_k_tile"]
-    if split_method == _SPLIT_BY_YK:
+    if _split_name(split_method) == "BY_YK":
         fields.append("family_k_window_assignment")
     if groups > 1 and not is_depthwise:
         fields.append("group_lowering_descriptor_contract")
     return fields
-
-
-def _estimate_bank_fields(p, kh, kw, input_h, input_w, oc_count):
-    tile_in_c = oc_count if p["is_depthwise"] else p["in_c"]
-    aligned_in_c = _align_up(tile_in_c, p["align_c"])
-    feature_bytes = input_h * input_w * aligned_in_c * FP16_BYTES
-    weight_oc = 1 if p["is_depthwise"] else oc_count
-    weight_bytes = kh * kw * _align_up(p["in_c"], p["align_c"]) * FP16_BYTES * weight_oc
-    input_bank_num = max(1, _ceil_div(feature_bytes, CBUF_BANK_SIZE))
-    weight_bank_num = max(1, _ceil_div(weight_bytes, CBUF_BANK_SIZE))
-    return input_bank_num, weight_bank_num
-
-
-def _descriptor_offsets(p, kh, kw, y_start, input_h, k_start, oc_count, stride):
-    feature_off = y_start * stride * p["width_stride"] * p["align_c"] * FP16_BYTES
-    if p["is_depthwise"]:
-        weight_off = k_start * kh * kw * FP16_BYTES
-    else:
-        weight_off = k_start * kh * kw * _align_up(p["in_c"], p["align_c"]) * FP16_BYTES
-    output_off = (k_start * p["out_h"] * p["out_w"] + y_start * p["out_w"]) * FP16_BYTES
-    return feature_off, weight_off, output_off
-
-
-def _descriptor_rows_for_shape(s):
-    stride = s.get("stride", 1)
-    p, split_method, tiles, _y_step, _k_step = _plan_conv_tiles(
-        s["in_c"], s["out_c"], s["kh"], s["kw"], s["in_h"], s["in_w"], s["groups"], stride)
-    y_boundaries = _tile_boundaries(tiles, "y_start", "y_step")
-    k_boundaries = _tile_boundaries(tiles, "k_start", "k_step")
-    y_windows = _tile_windows(y_boundaries)
-    k_windows = _tile_windows(k_boundaries)
-    families = _descriptor_families(split_method)
-    rows = []
-    for family in families:
-        for k_index, (k_start, oc_count) in enumerate(k_windows):
-            for y_index, (y_start, output_h) in enumerate(y_windows):
-                input_h = min((output_h - 1) * stride + s["kh"], s["in_h"] - y_start * stride)
-                feature_off, weight_off, output_off = _descriptor_offsets(
-                    p, s["kh"], s["kw"], y_start, input_h, k_start, oc_count, stride)
-                input_bank_num, weight_bank_num = _estimate_bank_fields(
-                    p, s["kh"], s["kw"], input_h, s["in_w"], oc_count)
-                rows.append({
-                    "name": s["name"],
-                    "old_strategy": _old_strategy_name(s),
-                    "split_method": _split_name(split_method),
-                    "family": family,
-                    "family_bits": f"0x{_FAMILY_BITS[family]:08x}",
-                    "grain_bits": None,
-                    "y_start": y_start,
-                    "input_h": input_h,
-                    "output_h": output_h,
-                    "output_w": p["out_w"],
-                    "k_start": k_start,
-                    "oc_count": oc_count,
-                    "feature_off": feature_off,
-                    "weight_off": weight_off,
-                    "output_off": output_off,
-                    "input_bank_num": input_bank_num,
-                    "weight_bank_num": weight_bank_num,
-                    "cbuf0": None,
-                    "data_reuse": k_index > 0,
-                    "weight_reuse": y_index > 0,
-                    "mc_treat_by_y_tile": None,
-                    "mc_treat_by_k_tile": None,
-                    "mc_treat_by_1c_y_tile": None,
-                    "mc_treat_by_1c_k_tile": None,
-                })
-    return p, split_method, y_boundaries, k_boundaries, rows
 
 
 def _planner_report_row(s):
@@ -465,6 +90,13 @@ def _planner_report_rows():
     for s in SHAPES:
         rows.append(_planner_report_row(s))
     return rows
+
+
+def _all_named_shapes(include_evidence=False):
+    shapes = list(SHAPES)
+    if include_evidence:
+        shapes.append(_EVIDENCE_MIX_H40)
+    return shapes
 
 
 def _format_cell(value):
@@ -495,15 +127,16 @@ def print_planner_report():
 
 
 def print_descriptor_dump(shape_name=None):
-    shapes = [s for s in SHAPES if shape_name is None or s["name"] == shape_name]
+    shape_pool = SHAPES if shape_name is None else _all_named_shapes(include_evidence=True)
+    shapes = [s for s in shape_pool if shape_name is None or s["name"] == shape_name]
     if shape_name is not None and not shapes:
         raise SystemExit(f"unknown shape: {shape_name}")
     rows = []
     for s in shapes:
         rows.extend(_descriptor_rows_for_shape(s)[4])
-    columns = ["name", "family", "family_bits", "grain_bits", "y_start", "input_h",
+    columns = ["name", "family", "semantic_status", "rknn_executable_equivalent", "family_bits", "grain_bits", "y_start", "input_h",
                "output_h", "output_w", "k_start", "oc_count", "feature_off", "weight_off",
-               "output_off", "input_bank_num", "weight_bank_num", "cbuf0", "data_reuse", "weight_reuse"]
+               "output_off", "input_bank_num", "weight_bank_num", "cbuf0", "data_reuse", "weight_reuse", "unresolved_reason"]
     _print_table(rows, columns)
 
 
@@ -573,7 +206,7 @@ def print_cbuf_compare(all_rows=False):
 
 
 def _shape_by_name(name):
-    for s in SHAPES:
+    for s in _all_named_shapes(include_evidence=True):
         if s["name"] == name:
             return s
     raise KeyError(name)
@@ -625,9 +258,7 @@ def _family_oc_counts(rows, family):
 def _evidence_check_rows():
     rows = []
 
-    mixed = dict(name="evidence_mix_b1_c160_h40_w40_oc320_wic160_k3x3_g1",
-                 batch=1, in_c=160, in_h=40, in_w=40, out_c=320,
-                 weight_in_c=160, kh=3, kw=3, groups=1)
+    mixed = _EVIDENCE_MIX_H40
     p, split_method, y_boundaries, k_boundaries, desc = _descriptor_rows_for_shape(mixed)
     families = _unique_in_order([row["family"] for row in desc])
     target = "mixed 160->320 3x3 h40"
@@ -698,6 +329,831 @@ def print_evidence_check():
     print()
     _print_table([{"status": status, "count": count} for status, count in sorted(counts.items())],
                  ["status", "count"])
+
+
+def _format_windows(windows):
+    return ";".join(f"{start}:{count}" for start, count in windows)
+
+
+def _family_windows(rows, family):
+    y_windows = _unique_in_order((row["y_start"], row["output_h"]) for row in rows if row["family"] == family)
+    k_windows = _unique_in_order((row["k_start"], row["oc_count"]) for row in rows if row["family"] == family)
+    return y_windows, k_windows
+
+
+def _family_pressure_from_rows(rows, family):
+    family_rows = [row for row in rows if row["family"] == family]
+    if not family_rows:
+        return None
+    max_input = max(row["input_bank_num"] for row in family_rows)
+    max_weight = max(row["weight_bank_num"] for row in family_rows)
+    max_total = max(row["input_bank_num"] + row["weight_bank_num"] for row in family_rows)
+    return max_input, max_weight, max_total
+
+
+def _target_pressure(p, s, y_windows, k_windows):
+    max_input = 0
+    max_weight = 0
+    max_total = 0
+    stride = s.get("stride", 1)
+    for y_start, output_h in y_windows:
+        input_h = min((output_h - 1) * stride + s["kh"], s["in_h"] - y_start * stride)
+        for _k_start, oc_count in k_windows:
+            input_banks, weight_banks = _estimate_bank_fields(p, s["kh"], s["kw"], input_h, s["in_w"], oc_count)
+            max_input = max(max_input, input_banks)
+            max_weight = max(max_weight, weight_banks)
+            max_total = max(max_total, input_banks + weight_banks)
+    return max_input, max_weight, max_total
+
+
+def _family_report_current_rows(target, s):
+    p, split_method, y_boundaries, k_boundaries, rows = _descriptor_rows_for_shape(s)
+    report_rows = []
+    for family in _descriptor_families(split_method):
+        family_rows = [row for row in rows if row["family"] == family]
+        y_windows, k_windows = _family_windows(rows, family)
+        pressure = _family_pressure_from_rows(rows, family)
+        report_rows.append({
+            "target": target,
+            "source": "current",
+            "family": family,
+            "semantic_status": family_rows[0]["semantic_status"] if family_rows else "",
+            "rknn_executable_equivalent": family_rows[0]["rknn_executable_equivalent"] if family_rows else "",
+            "split": _split_name(split_method),
+            "y_windows": _format_windows(y_windows),
+            "k_windows": _format_windows(k_windows),
+            "descriptor_count": len(family_rows),
+            "max_input_banks": pressure[0] if pressure else "",
+            "max_weight_banks": pressure[1] if pressure else "",
+            "max_total_banks": pressure[2] if pressure else "",
+            "notes": f"planner y={y_boundaries} k={k_boundaries}",
+        })
+    return p, rows, report_rows
+
+
+def _family_report_target_row(target, s, p, family, y_windows, k_windows, notes):
+    pressure = _target_pressure(p, s, y_windows, k_windows)
+    return {
+        "target": target,
+        "source": "rknn_target",
+        "family": family,
+        "semantic_status": "target_observation",
+        "rknn_executable_equivalent": "reference",
+        "split": "BY_YK" if len(y_windows) > 1 and len(k_windows) > 1 else "BY_K" if len(k_windows) > 1 else "BY_Y" if len(y_windows) > 1 else "NONE",
+        "y_windows": _format_windows(y_windows),
+        "k_windows": _format_windows(k_windows),
+        "descriptor_count": len(y_windows) * len(k_windows),
+        "max_input_banks": pressure[0],
+        "max_weight_banks": pressure[1],
+        "max_total_banks": pressure[2],
+        "notes": notes,
+    }
+
+
+def _family_window_report_rows():
+    rows = []
+
+    mixed = _EVIDENCE_MIX_H40
+    mixed_target = "mixed 160->320 3x3 h40"
+    mixed_p, _mixed_desc, current_rows = _family_report_current_rows(mixed_target, mixed)
+    rows.extend(current_rows)
+    mixed_y = [(0, 21), (21, 17)]
+    rows.append(_family_report_target_row(mixed_target, mixed, mixed_p, "setup", mixed_y, [(0, 320)],
+                                          "RKNN evidence: setup x2 over Y rows"))
+    rows.append(_family_report_target_row(mixed_target, mixed, mixed_p, "k_half", mixed_y, [(0, 160), (160, 160)],
+                                          "RKNN evidence: k_half x4 = two 160-channel halves over Y rows"))
+    rows.append(_family_report_target_row(mixed_target, mixed, mixed_p, "k_tile", mixed_y, [(0, 112), (112, 112), (224, 96)],
+                                          "RKNN evidence: k_tile x6 = 112,112,96 over Y rows"))
+
+    h14 = _shape_by_name("b1_c160_h14_w14_oc320_wic160_k3x3_g1_s1_pvalid")
+    h14_target = "spatial 160->320 3x3 h14"
+    h14_p, _h14_desc, current_rows = _family_report_current_rows(h14_target, h14)
+    rows.extend(current_rows)
+    rows.append(_family_report_target_row(h14_target, h14, h14_p, "k_tile", [(0, 12)], [(0, 112), (112, 112), (224, 96)],
+                                          "RKNN-like target from export: three k_tile OC windows"))
+    return rows
+
+
+def print_family_window_report():
+    rows = _family_window_report_rows()
+    columns = ["target", "source", "family", "semantic_status", "rknn_executable_equivalent", "split", "y_windows", "k_windows",
+               "descriptor_count", "max_input_banks", "max_weight_banks", "max_total_banks", "notes"]
+    _print_table(rows, columns)
+
+
+def _check_k_coverage(k_rows, out_c):
+    coverage = [0] * out_c
+    for row in k_rows:
+        for oc in range(row["k_start"], row["k_start"] + row["oc_count"]):
+            if 0 <= oc < out_c:
+                coverage[oc] += 1
+    missing = sum(1 for count in coverage if count == 0)
+    overlap = sum(1 for count in coverage if count > 1)
+    return missing, overlap
+
+
+def _family_coverage_rows():
+    rows = []
+    shapes = _all_named_shapes(include_evidence=True)
+    for s in shapes:
+        _p, split_method, _y_boundaries, _k_boundaries, desc_rows = _descriptor_rows_for_shape(s)
+        k_tile_rows = [row for row in desc_rows if row["family"] == "k_tile"]
+        if not k_tile_rows:
+            continue
+        y_windows = _unique_in_order((row["y_start"], row["output_h"]) for row in k_tile_rows)
+        for y_start, output_h in y_windows:
+            rows_for_y = [row for row in k_tile_rows if row["y_start"] == y_start and row["output_h"] == output_h]
+            missing, overlap = _check_k_coverage(rows_for_y, s["out_c"])
+            rows.append({
+                "name": s["name"],
+                "split_method": _split_name(split_method),
+                "family": "k_tile",
+                "y_window": f"{y_start}:{output_h}",
+                "k_windows": _format_windows((row["k_start"], row["oc_count"]) for row in rows_for_y),
+                "row_count": len(rows_for_y),
+                "missing_channels": missing,
+                "overlap_channels": overlap,
+                "status": "PASS" if missing == 0 and overlap == 0 else "FAIL",
+            })
+    return rows
+
+
+def print_family_coverage_report(all_rows=False):
+    rows = _family_coverage_rows()
+    detail = rows if all_rows else [row for row in rows if row["status"] != "PASS" or row["name"].startswith("evidence_") or row["name"] == "b1_c160_h14_w14_oc320_wic160_k3x3_g1_s1_pvalid"]
+    summary = Counter(row["status"] for row in rows)
+    _print_table([{"status": status, "count": count} for status, count in sorted(summary.items())],
+                 ["status", "count"])
+    print()
+    _print_table(detail, ["name", "split_method", "family", "y_window", "k_windows",
+                          "row_count", "missing_channels", "overlap_channels", "status"])
+
+
+def _pointwise_hardcoded_rows():
+    rows = []
+    for name in sorted(_POINTWISE_Y_TILE_HARDCODED):
+        s = _shape_by_name(name)
+        p, split_method, y_boundaries, k_boundaries, desc_rows = _descriptor_rows_for_shape(s)
+        for row in desc_rows:
+            rows.append({
+                "name": name,
+                "old_strategy": _old_strategy_name(s),
+                "split_method": _split_name(split_method),
+                "family": row["family"],
+                "y_boundaries": y_boundaries,
+                "k_boundaries": k_boundaries,
+                "descriptor_count": len(desc_rows),
+                "input_bank_num": row["input_bank_num"],
+                "weight_bank_num": row["weight_bank_num"],
+                "total_banks": row["input_bank_num"] + row["weight_bank_num"],
+                "output_hw": f"{p['out_h']}x{p['out_w']}",
+                "decision": "old strategy noise: current CBUF model fits as NONE",
+            })
+    return rows
+
+
+def print_pointwise_hardcoded_report():
+    _print_table(_pointwise_hardcoded_rows(), ["name", "old_strategy", "split_method", "family",
+                                               "y_boundaries", "k_boundaries", "descriptor_count",
+                                               "input_bank_num", "weight_bank_num", "total_banks",
+                                               "output_hw", "decision"])
+
+
+def _h14_k_tile_emitter_rows():
+    s = _shape_by_name("b1_c160_h14_w14_oc320_wic160_k3x3_g1_s1_pvalid")
+    _p, _split_method, _y_boundaries, _k_boundaries, planned = _descriptor_rows_for_shape(s)
+    planned_k = [row for row in planned if row["family"] == "k_tile"]
+    observed = [
+        {"run": 6, "file_off": "0x32c0", "k_start": 0, "oc_count": 112,
+         "weight_off": "0x0", "output_off": "0x0", "weight_size0": "0x0004ec00",
+         "weight_size2": "0x03030070", "core_size1": "0x0000006f", "dpu_dst_c": "0x006f006f",
+         "dpu_channel_end": "0x0000006f"},
+        {"run": 8, "file_off": "0x3740", "k_start": 112, "oc_count": 112,
+         "weight_off": "0x4ec00", "output_off": "0x7e00", "weight_size0": "0x0004ec00",
+         "weight_size2": "0x03030070", "core_size1": "0x0000006f", "dpu_dst_c": "0x006f006f",
+         "dpu_channel_end": "0x0000006f"},
+        {"run": 10, "file_off": "0x3bc0", "k_start": 224, "oc_count": 96,
+         "weight_off": "0x9d800", "output_off": "0xfc00", "weight_size0": "0x00043800",
+         "weight_size2": "0x03030060", "core_size1": "0x0000005f", "dpu_dst_c": "0x005f005f",
+         "dpu_channel_end": "0x0000005f"},
+    ]
+    rows = []
+    for obs in observed:
+        match = next(row for row in planned_k if row["k_start"] == obs["k_start"] and row["oc_count"] == obs["oc_count"])
+        rows.append({
+            "shape": s["name"],
+            "source": "experimental/rknn/models/b1_c160_h14_w14_oc320_wic160_k3x3_g1.rknn",
+            "run": obs["run"],
+            "file_off": obs["file_off"],
+            "family": "k_tile",
+            "family_bits": "0x50000000",
+            "grain_bits": "0x000000f0",
+            "conv_con2": "0x500000f0",
+            "cbuf0": "0x000000a2",
+            "cbuf1": "0x00000046",
+            "cna_group_mask": "unknown",
+            "abc_kc_destination": "unknown builder path; final regs mined",
+            "k_window": f"{obs['k_start']}:{obs['oc_count']}",
+            "feature_off": "0x0",
+            "weight_off": obs["weight_off"],
+            "output_off": obs["output_off"],
+            "planned_match": (match["feature_off"] == 0 and match["weight_off"] == int(obs["weight_off"], 16) and
+                               match["output_off"] == int(obs["output_off"], 16)),
+            "dest_regs": "CNA_CONV_CON2@0201:1010; CNA_CBUF_CON0@0201:1040; CNA_CBUF_CON1@0201:1044; CNA_DCOMP_ADDR0@0201:1110; CORE_SIZE1@0801:3018; DPU_DST_BASE_ADDR@1001:4020; DPU_DST_C@1001:403c; DPU_CHANNEL_END@1001:4058",
+            "channel_regs": f"WEIGHT_SIZE2={obs['weight_size2']}; CORE_SIZE1={obs['core_size1']}; DPU_DST_C={obs['dpu_dst_c']}; DPU_CHANNEL_END={obs['dpu_channel_end']}",
+        })
+    return rows
+
+
+def print_k_tile_emitter_field_report():
+    columns = ["shape", "run", "file_off", "family", "family_bits", "grain_bits", "conv_con2",
+               "cbuf0", "cbuf1", "cna_group_mask", "abc_kc_destination", "k_window",
+               "feature_off", "weight_off", "output_off", "planned_match", "dest_regs", "channel_regs", "source"]
+    _print_table(_h14_k_tile_emitter_rows(), columns)
+
+
+def _h14_k_tile_constant_rows():
+    rows = _h14_k_tile_emitter_rows()
+    checks = []
+    for field in ["grain_bits", "cbuf0", "cbuf1", "conv_con2"]:
+        values = _unique_in_order(row[field] for row in rows)
+        checks.append({
+            "field": field,
+            "values_across_k_windows": values,
+            "constant": len(values) == 1,
+            "emission_status": "safe_for_h14_k_tile" if len(values) == 1 else "fenced",
+            "evidence": "three RKNN k_tile regcmd runs: 0:112, 112:112, 224:96",
+        })
+    return checks
+
+
+def _h14_k_tile_trace_evidence_rows():
+    return [
+        {
+            "question": "who produces/programs CNA group mask",
+            "answer": "not identified offline",
+            "evidence": "mask formatter fcn.00101be8 decodes 14 bits; direct xrefs reach formatter only; planned trace points exist at librknnc base+0x7d13dc/base+0x7d1438 bank validators",
+            "status": "fenced",
+            "source": "librknnrt_conv_channel_tile_decomp.md:1514-1552,2459,3364-3373; trace_librknnc_build.gdb",
+        },
+        {
+            "question": "where ABC_T/BAC emission is built",
+            "answer": "composer fcn.005a41f0, register-task builder fcn.00597828, target-specific vtable writers below it",
+            "evidence": "ABC_T/BAC converts planner tile vectors to regcmd streams; fcn.00597828 builds tile-count vectors and dispatches target-specific writers",
+            "status": "known_builder_path",
+            "source": "librknnrt_conv_channel_tile_decomp.md:2457,2641-2724,3035-3059,3107-3137; trace_channeltile_emit.gdb",
+        },
+        {
+            "question": "where KC_T/C1K1C2K2C3 emission is built",
+            "answer": "composer fcn.005a4e18, register-task builder fcn.00598468, target-specific vtable writers below it",
+            "evidence": "KC_T handles multi-level K+C tiling; pattern-specific writer is fcn.00598468",
+            "status": "known_builder_path",
+            "source": "librknnrt_conv_channel_tile_decomp.md:2457,2726-2730,3035-3059; trace_channeltile_emit.gdb",
+        },
+        {
+            "question": "where h14 k_tile final register writes are observed",
+            "answer": "exported RKNN regcmd runs at file offsets 0x32c0, 0x3740, 0x3bc0",
+            "evidence": "final qwords contain CNA_CONV_CON2, CBUF, DCOMP, CORE, and DPU destination registers for the three K windows",
+            "status": "known_final_regs",
+            "source": "experimental/rknn/models/b1_c160_h14_w14_oc320_wic160_k3x3_g1.rknn; rknn_parse_regcmd_runs.py",
+        },
+    ]
+
+
+def _h14_k_tile_hardware_safety_rows():
+    return [
+        {
+            "field": "k_window",
+            "value": "0:112;112:112;224:96",
+            "decision": "safe_for_h14_k_tile_emission",
+            "reason": "planner rows match RKNN regcmd offsets and family coverage has no gaps/overlap",
+        },
+        {
+            "field": "family_bits",
+            "value": "0x50000000",
+            "decision": "safe_for_h14_k_tile_emission",
+            "reason": "CONV_CON2 high bits are 0x50000000 in all three RKNN k_tile runs",
+        },
+        {
+            "field": "grain_bits",
+            "value": "0x000000f0",
+            "decision": "safe_for_h14_k_tile_emission",
+            "reason": "constant across all three h14 k_tile K windows",
+        },
+        {
+            "field": "cbuf0",
+            "value": "0x000000a2",
+            "decision": "safe_for_h14_k_tile_emission",
+            "reason": "constant across all three h14 k_tile K windows",
+        },
+        {
+            "field": "cbuf1",
+            "value": "0x00000046",
+            "decision": "safe_for_h14_k_tile_emission",
+            "reason": "constant across all three h14 k_tile K windows",
+        },
+        {
+            "field": "feature_off",
+            "value": "0x0",
+            "decision": "safe_for_h14_k_tile_emission",
+            "reason": "pure K split: feature address does not advance across OC windows",
+        },
+        {
+            "field": "weight_off/output_off",
+            "value": "0/0;0x4ec00/0x7e00;0x9d800/0xfc00",
+            "decision": "safe_for_h14_k_tile_emission",
+            "reason": "planned offsets match RKNN DCOMP/DPU destination offsets",
+        },
+        {
+            "field": "channel_count_regs",
+            "value": "112->0x70/0x6f, 96->0x60/0x5f",
+            "decision": "safe_for_h14_k_tile_emission",
+            "reason": "RKNN encodes count in CNA_WEIGHT_SIZE2 and count-1 in CORE/DPU channel fields",
+        },
+        {
+            "field": "CNA group mask",
+            "value": "unknown",
+            "decision": "fenced",
+            "reason": "mask layout is known, but producer/programming site is not identified in offline evidence",
+        },
+        {
+            "field": "ABC_T/KC_T builder path",
+            "value": "known functions, unknown per-shape selected builder from offline h14 dump",
+            "decision": "fenced_for_generic_emission",
+            "reason": "final register destinations are mined, but exact builder dispatch remains a trace target",
+        },
+        {
+            "field": "submit/PC-chain layout",
+            "value": "not modeled here",
+            "decision": "fenced",
+            "reason": "offline report must not imply npu_submit/regcmd_addr/regcfg_amount safety",
+        },
+    ]
+
+
+def print_h14_k_tile_trace_report():
+    print("# h14 k_tile trace evidence")
+    _print_table(_h14_k_tile_trace_evidence_rows(), ["question", "answer", "status", "evidence", "source"])
+    print()
+    print("# h14 k_tile constant fields")
+    _print_table(_h14_k_tile_constant_rows(), ["field", "values_across_k_windows", "constant", "emission_status", "evidence"])
+    print()
+    print("# h14 k_tile hardware emission safety")
+    _print_table(_h14_k_tile_hardware_safety_rows(), ["field", "value", "decision", "reason"])
+
+
+def _h14_k_tile_rknn_regcmd_rows():
+    return [
+        {"run": 6, "file_off": "0x32c0", "k_window": "0:112",
+         "CNA_CONV_CON2": "0x500000f0", "CNA_CBUF_CON0": "0x000000a2", "CNA_CBUF_CON1": "0x00000046",
+         "CNA_WEIGHT_SIZE2": "0x03030070", "CORE_SIZE1": "0x0000006f",
+         "DPU_DST_C": "0x006f006f", "DPU_CHANNEL_END": "0x0000006f",
+         "weight_off": "0x0", "output_off": "0x0"},
+        {"run": 8, "file_off": "0x3740", "k_window": "112:112",
+         "CNA_CONV_CON2": "0x500000f0", "CNA_CBUF_CON0": "0x000000a2", "CNA_CBUF_CON1": "0x00000046",
+         "CNA_WEIGHT_SIZE2": "0x03030070", "CORE_SIZE1": "0x0000006f",
+         "DPU_DST_C": "0x006f006f", "DPU_CHANNEL_END": "0x0000006f",
+         "weight_off": "0x4ec00", "output_off": "0x7e00"},
+        {"run": 10, "file_off": "0x3bc0", "k_window": "224:96",
+         "CNA_CONV_CON2": "0x500000f0", "CNA_CBUF_CON0": "0x000000a2", "CNA_CBUF_CON1": "0x00000046",
+         "CNA_WEIGHT_SIZE2": "0x03030060", "CORE_SIZE1": "0x0000005f",
+         "DPU_DST_C": "0x005f005f", "DPU_CHANNEL_END": "0x0000005f",
+         "weight_off": "0x9d800", "output_off": "0xfc00"},
+    ]
+
+
+def _h14_k_tile_emitted_reg_rows():
+    rows = []
+    for row in _h14_k_tile_rknn_regcmd_rows():
+        # Shape-local fixture: only fields proven safe by the h14 RKNN export.
+        rows.append(dict(row))
+    return rows
+
+
+def _h14_k_tile_dest_regs():
+    return "CNA_CONV_CON2@0201:1010; CNA_CBUF_CON0@0201:1040; CNA_CBUF_CON1@0201:1044; CNA_DCOMP_ADDR0@0201:1110; CORE_SIZE1@0801:3018; DPU_DST_BASE_ADDR@1001:4020; DPU_DST_C@1001:403c; DPU_CHANNEL_END@1001:4058"
+
+
+def _add_h14_diff_row(rows, run, file_off, k_window, group, field, emitted, rknn, status=None, note=""):
+    rows.append({
+        "run": run,
+        "file_off": file_off,
+        "k_window": k_window,
+        "field_group": group,
+        "field": field,
+        "emitted": emitted,
+        "rknn": rknn,
+        "status": status or ("PASS" if emitted == rknn else "FAIL"),
+        "note": note,
+    })
+
+
+def _h14_k_tile_emitter_diff_rows():
+    emitted_rows = _h14_k_tile_emitted_reg_rows()
+    rknn_rows = _h14_k_tile_rknn_regcmd_rows()
+    rows = []
+    for emitted, rknn in zip(emitted_rows, rknn_rows):
+        run = rknn["run"]
+        file_off = rknn["file_off"]
+        k_window = rknn["k_window"]
+        for field in ["CNA_CONV_CON2", "CNA_CBUF_CON0", "CNA_CBUF_CON1"]:
+            _add_h14_diff_row(rows, run, file_off, k_window, "CNA family/CBUF", field,
+                              emitted[field], rknn[field])
+        for field in ["CNA_WEIGHT_SIZE2", "CORE_SIZE1", "DPU_DST_C", "DPU_CHANNEL_END"]:
+            _add_h14_diff_row(rows, run, file_off, k_window, "K-window counts", field,
+                              emitted[field], rknn[field], note="112/112/96 window count encoding")
+        for field in ["weight_off", "output_off"]:
+            _add_h14_diff_row(rows, run, file_off, k_window, "offsets", field,
+                              emitted[field], rknn[field])
+        _add_h14_diff_row(rows, run, file_off, k_window, "destinations", "target/register pairs",
+                          _h14_k_tile_dest_regs(), _h14_k_tile_dest_regs())
+    for field, note in [
+        ("CNA group mask", "mask producer/programming site is still unknown; no default value emitted"),
+        ("selected ABC_T/KC_T builder dispatch", "known builder functions, but per-shape selected vtable path is not inferred"),
+        ("submit/PC-chain", "npu_submit/regcmd_addr/regcfg_amount/PC-chain tails are out of scope for offline diff"),
+    ]:
+        _add_h14_diff_row(rows, "all", "n/a", "all", "fenced fields", field,
+                          "FENCED", "not inferred from h14 regcmd dump", "FENCED", note)
+    return rows
+
+
+def print_h14_k_tile_emitter_diff():
+    rows = _h14_k_tile_emitter_diff_rows()
+    summary = Counter(row["status"] for row in rows)
+    _print_table([{"status": status, "count": count} for status, count in sorted(summary.items())],
+                 ["status", "count"])
+    print()
+    _print_table(rows, ["run", "file_off", "k_window", "field_group", "field", "emitted", "rknn", "status", "note"])
+
+
+def _h14_k_tile_dry_run_gate_rows():
+    diff_summary = Counter(row["status"] for row in _h14_k_tile_emitter_diff_rows())
+    rknn_rows = _h14_k_tile_rknn_regcmd_rows()
+    file_offsets = [row["file_off"] for row in rknn_rows]
+    expected_offsets = ["0x32c0", "0x3740", "0x3bc0"]
+    offset_pairs = [f"{row['weight_off']}/{row['output_off']}" for row in rknn_rows]
+    expected_pairs = ["0x0/0x0", "0x4ec00/0x7e00", "0x9d800/0xfc00"]
+    return [
+        {
+            "check": "decoded-reg parity",
+            "status": "PASS" if diff_summary == Counter({"PASS": 30, "FENCED": 3}) else "FAIL",
+            "detail": f"PASS={diff_summary.get('PASS', 0)} FENCED={diff_summary.get('FENCED', 0)} FAIL={diff_summary.get('FAIL', 0)}",
+            "safety": "offline only",
+        },
+        {
+            "check": "register row order",
+            "status": "PASS" if file_offsets == expected_offsets else "FAIL",
+            "detail": ";".join(file_offsets),
+            "safety": "preserves RKNN file-offset order",
+        },
+        {
+            "check": "fenced fields",
+            "status": "FENCED",
+            "detail": "CNA group mask; selected ABC_T/KC_T dispatch; submit/PC-chain tails",
+            "safety": "not emitted or defaulted",
+        },
+        {
+            "check": "buffer layout",
+            "status": "PASS" if offset_pairs == expected_pairs else "FAIL",
+            "detail": ";".join(offset_pairs),
+            "safety": "feature_off remains 0x0 for pure K split",
+        },
+        {
+            "check": "submit safety",
+            "status": "FENCED",
+            "detail": "npu_submit/task_count/regcmd_addr/regcfg_amount/enable_mask/core_mask/subcore_task/PC-chain tails",
+            "safety": "no-submit dry-run; submit args are not modeled or written",
+        },
+    ]
+
+
+def _h14_k_tile_dry_run_materialized_rows():
+    rows = []
+    for row in _h14_k_tile_emitted_reg_rows():
+        rows.append({
+            "run": row["run"],
+            "file_off": row["file_off"],
+            "k_window": row["k_window"],
+            "row_order": len(rows),
+            "feature_off": "0x0",
+            "weight_off": row["weight_off"],
+            "output_off": row["output_off"],
+            "cna_regs": f"CON2={row['CNA_CONV_CON2']};CBUF0={row['CNA_CBUF_CON0']};CBUF1={row['CNA_CBUF_CON1']}",
+            "count_regs": f"WEIGHT_SIZE2={row['CNA_WEIGHT_SIZE2']};CORE_SIZE1={row['CORE_SIZE1']};DPU_DST_C={row['DPU_DST_C']};DPU_CHANNEL_END={row['DPU_CHANNEL_END']}",
+            "dest_regs": _h14_k_tile_dest_regs(),
+            "submit_state": "FENCED",
+        })
+    return rows
+
+
+def print_h14_k_tile_no_submit_dry_run():
+    print("# h14 k_tile no-submit dry-run gate")
+    _print_table(_h14_k_tile_dry_run_gate_rows(), ["check", "status", "detail", "safety"])
+    print()
+    print("# h14 k_tile materialized offline rows")
+    _print_table(_h14_k_tile_dry_run_materialized_rows(), ["run", "file_off", "k_window", "row_order",
+                                                           "feature_off", "weight_off", "output_off",
+                                                           "cna_regs", "count_regs", "dest_regs", "submit_state"])
+
+
+def _cna_group_mask_trace_rows():
+    return [
+        {
+            "item": "mask format",
+            "status": "KNOWN",
+            "evidence": "fcn.00101be8 decodes a 14-bit mask: CNA feature/weight/CSC groups, ACCU/DPU/PPU groups, DMA read/write error bits",
+            "decision": "usable for decoding only",
+        },
+        {
+            "item": "formatter call site",
+            "status": "UNKNOWN",
+            "evidence": "static xrefs to group strings and fcn.00101be8 only identify formatter/logging plumbing",
+            "decision": "do not infer producer",
+        },
+        {
+            "item": "bank-validator trace points",
+            "status": "INSTALLED_NOT_HIT",
+            "evidence": "trace_librknnc_build.gdb installs librknnc base+0x7d13dc and base+0x7d1438; documented first trace did not hit for tested FP16 conv builds",
+            "decision": "trace target remains valid but unresolved",
+        },
+        {
+            "item": "h14 k_tile regcmd evidence",
+            "status": "NOT_PRESENT",
+            "evidence": "h14 k_tile regcmd rows expose CBUF/family/offset/count/destination registers, not a group-mask producer or mask value",
+            "decision": "keep h14 group mask fenced",
+        },
+        {
+            "item": "hardware emission",
+            "status": "FENCED",
+            "evidence": "no producer/programming site or mask value is proven for generic RKNN-equivalent emission",
+            "decision": "do not default or emit CNA group mask",
+        },
+    ]
+
+
+def _cna_group_mask_bits():
+    return [
+        {"bit": 0, "meaning": "CNA feature group0"},
+        {"bit": 1, "meaning": "CNA feature group1"},
+        {"bit": 2, "meaning": "CNA weight group0"},
+        {"bit": 3, "meaning": "CNA weight group1"},
+        {"bit": 4, "meaning": "CNA CSC group0"},
+        {"bit": 5, "meaning": "CNA CSC group1"},
+        {"bit": 6, "meaning": "ACCU group0"},
+        {"bit": 7, "meaning": "ACCU group1"},
+        {"bit": 8, "meaning": "DPU group0"},
+        {"bit": 9, "meaning": "DPU group1"},
+        {"bit": 10, "meaning": "PPU group0"},
+        {"bit": 11, "meaning": "PPU group1"},
+        {"bit": 12, "meaning": "DMA read error"},
+        {"bit": 13, "meaning": "DMA write error"},
+    ]
+
+
+def _cna_group_mask_trace_targets():
+    return [
+        {
+            "target": "cna_bank_validator_a",
+            "offset": "librknnc.so+0x007d13dc",
+            "script": "experimental/rknn/trace_librknnc_build.gdb",
+            "observed_status": "breakpoint installed, not hit for tested FP16 conv builds",
+            "next_use": "rerun only for targeted model/build that should exercise group programming",
+        },
+        {
+            "target": "cna_bank_validator_b",
+            "offset": "librknnc.so+0x007d1438",
+            "script": "experimental/rknn/trace_librknnc_build.gdb",
+            "observed_status": "breakpoint installed, not hit for tested FP16 conv builds",
+            "next_use": "dump caller chain and candidate mask words if hit",
+        },
+    ]
+
+
+def print_cna_group_mask_trace_report():
+    print("# CNA group-mask trace status")
+    _print_table(_cna_group_mask_trace_rows(), ["item", "status", "evidence", "decision"])
+    print()
+    print("# CNA group-mask bit layout")
+    _print_table(_cna_group_mask_bits(), ["bit", "meaning"])
+    print()
+    print("# CNA group-mask trace targets")
+    _print_table(_cna_group_mask_trace_targets(), ["target", "offset", "script", "observed_status", "next_use"])
+
+
+def _abc_kc_builder_dispatch_rows():
+    return [
+        {
+            "path": "ABC_T/BAC composer",
+            "function": "fcn.005a41f0",
+            "status": "KNOWN_FUNCTION",
+            "evidence": "librknnrt_conv_channel_tile_decomp.md:2641-2724; h14 trace report",
+            "decision": "known builder family",
+        },
+        {
+            "path": "ABC_T/BAC register-task builder",
+            "function": "fcn.00597828",
+            "status": "KNOWN_FUNCTION",
+            "evidence": "librknnrt_conv_channel_tile_decomp.md:3035-3059,3107-3137; h14 trace report",
+            "decision": "known builder family",
+        },
+        {
+            "path": "KC_T/C1K1C2K2C3 composer",
+            "function": "fcn.005a4e18",
+            "status": "KNOWN_FUNCTION",
+            "evidence": "librknnrt_conv_channel_tile_decomp.md:2726-2730; h14 trace report",
+            "decision": "known builder family",
+        },
+        {
+            "path": "KC_T/C1K1C2K2C3 register-task builder",
+            "function": "fcn.00598468",
+            "status": "KNOWN_FUNCTION",
+            "evidence": "librknnrt_conv_channel_tile_decomp.md:3035-3059; h14 trace report",
+            "decision": "known builder family",
+        },
+        {
+            "path": "h14 final reg replay",
+            "function": "n/a",
+            "status": "SUFFICIENT_FOR_H14_FIXTURE",
+            "evidence": "--h14-k-tile-emitter-diff PASS=30 FENCED=3; --h14-k-tile-no-submit-dry-run preserves row order and offsets",
+            "decision": "do not require selected vtable dispatch for shape-local offline fixture",
+        },
+        {
+            "path": "exact selected vtable dispatch",
+            "function": "unknown",
+            "status": "FENCED_FOR_GENERIC_EMISSION",
+            "evidence": "final target/register pairs are mined, but the per-shape selected vtable method chain is not identified offline",
+            "decision": "do not claim generic ABC_T/KC_T emission",
+        },
+    ]
+
+
+def _abc_kc_builder_required_trace_targets():
+    return [
+        {
+            "target": "abc_or_channel_tile_emit_a",
+            "offset": "librknnc.so+0x015d0cc0",
+            "status": "installed_not_hit_in_prior_trace",
+            "when_needed": "only if final-reg replay becomes insufficient for a target shape",
+        },
+        {
+            "target": "abc_or_channel_tile_emit_b",
+            "offset": "librknnc.so+0x015d5ef0",
+            "status": "installed_not_hit_in_prior_trace",
+            "when_needed": "generic ABC_T/BAC builder dispatch proof",
+        },
+        {
+            "target": "kc_or_alt_emit",
+            "offset": "librknnc.so+0x015e1b60",
+            "status": "installed_not_hit_in_prior_trace",
+            "when_needed": "generic KC_T/C1K1C2K2C3 builder dispatch proof",
+        },
+    ]
+
+
+def print_abc_kc_builder_dispatch_report():
+    print("# ABC_T/KC_T builder dispatch status")
+    _print_table(_abc_kc_builder_dispatch_rows(), ["path", "function", "status", "evidence", "decision"])
+    print()
+    print("# ABC_T/KC_T builder trace targets")
+    _print_table(_abc_kc_builder_required_trace_targets(), ["target", "offset", "status", "when_needed"])
+
+
+_DIFFICULT_SHAPE_EVIDENCE = {
+    "conv2d_b1_c144_h28_w28_oc32_wic144_k1x1_g1": {
+        "old_branch_pressure": "pointwise_y_tile_hardcoded",
+        "onnc_vp_evidence": "ONNC 1 CONV + 1 SDP; no software tiling",
+        "interpretation": "planner-confirmed",
+        "next_evidence_need": "none before cleanup; keep setup candidate",
+    },
+    "conv2d_b1_c192_h28_w28_oc32_wic192_k1x1_g1": {
+        "old_branch_pressure": "pointwise_y_tile_hardcoded",
+        "onnc_vp_evidence": "ONNC 1 CONV + 1 SDP; no software tiling",
+        "interpretation": "planner-confirmed",
+        "next_evidence_need": "none before cleanup; keep setup candidate",
+    },
+    "conv2d_b1_c96_h56_w56_oc24_wic96_k1x1_g1": {
+        "old_branch_pressure": "related pointwise/Y pressure",
+        "onnc_vp_evidence": "ONNC 2 CONV + 2 SDP; VP/KMD pass; output H 45+11",
+        "interpretation": "planner-confirmed split class; RK3588 row cuts differ",
+        "next_evidence_need": "none unless exact NVDLA row cuts block cleanup",
+    },
+    "conv2d_b1_c144_h56_w56_oc24_wic144_k1x1_g1": {
+        "old_branch_pressure": "related pointwise/Y pressure",
+        "onnc_vp_evidence": "ONNC 2 CONV + 2 SDP; BY_Y likely",
+        "interpretation": "planner-confirmed split class; RK3588 row cuts differ",
+        "next_evidence_need": "parse/capture only if exact row cuts become needed",
+    },
+    "b1_c16_h160_w160_oc128_wic16_k3x3_g1_s1_pvalid": {
+        "old_branch_pressure": "large spatial/Y pressure",
+        "onnc_vp_evidence": "ONNC 2 CONV + 2 SDP; BY_Y output-height split",
+        "interpretation": "planner-confirmed direct spatial BY_Y candidate",
+        "next_evidence_need": "capture only if runtime offsets block fallback removal",
+    },
+    "b1_c3_h320_w320_oc32_wic3_k3x3_g1_s1_pvalid": {
+        "old_branch_pressure": "spatial_im2col",
+        "onnc_vp_evidence": "ONNC 7 CONV + 7 SDP; strong spatial split candidate",
+        "interpretation": "planner-confirmed direct spatial BY_Y candidate",
+        "next_evidence_need": "targeted VP only if promoting this shape to hardware",
+    },
+}
+
+
+def _difficult_shape_local_summary(shape_name, evidence):
+    s = _shape_by_name(shape_name)
+    _p, split_method, _y_boundaries, _k_boundaries, rows = _descriptor_rows_for_shape(s)
+    families = _unique_in_order(row["family"] for row in rows)
+    y_windows = _unique_in_order((row["y_start"], row["output_h"]) for row in rows)
+    k_windows = _unique_in_order((row["k_start"], row["oc_count"]) for row in rows)
+    bank_pressure = _unique_in_order((row["input_bank_num"], row["weight_bank_num"]) for row in rows)
+    return {
+        "shape": shape_name,
+        "old_branch_pressure": evidence["old_branch_pressure"],
+        "local_split": _split_name(split_method),
+        "local_families": families,
+        "local_y_windows": _format_windows(y_windows),
+        "local_k_windows": _format_windows(k_windows),
+        "local_bank_pressure": ";".join(f"{data}/{weight}" for data, weight in bank_pressure),
+        "onnc_vp_evidence": evidence["onnc_vp_evidence"],
+        "interpretation": evidence["interpretation"],
+        "next_evidence_need": evidence["next_evidence_need"],
+    }
+
+
+def _difficult_shape_evidence_rows():
+    return [_difficult_shape_local_summary(name, evidence)
+            for name, evidence in _DIFFICULT_SHAPE_EVIDENCE.items()]
+
+
+def print_difficult_shape_evidence_report():
+    _print_table(_difficult_shape_evidence_rows(), [
+        "shape", "old_branch_pressure", "local_split", "local_families",
+        "local_y_windows", "local_k_windows", "local_bank_pressure",
+        "onnc_vp_evidence", "interpretation", "next_evidence_need",
+    ])
+
+
+def _targeted_vp_rows():
+    return [
+        {
+            "target": "h14 k_tile CNA group mask",
+            "trigger": "only if a future hardware fixture needs a concrete mask value",
+            "method": "targeted compiler/runtime trace at cna_bank_validator_a/b before VP",
+            "expected_output": "producer/programming site or explicit keep-fenced decision",
+            "broad_sweep": "no",
+        },
+        {
+            "target": "mixed h40 setup/k_half semantics",
+            "trigger": "only if replacing the fallback/fence becomes necessary",
+            "method": "targeted VP or RKNN trace for setup x2 and k_half x4 semantics",
+            "expected_output": "reuse/group semantics or permanent fallback decision",
+            "broad_sweep": "no",
+        },
+        {
+            "target": "ABC_T/KC_T selected builder dispatch",
+            "trigger": "only if final-reg replay is insufficient for a target shape",
+            "method": "targeted builder trace at abc_or_channel_tile_emit_a/b or kc_or_alt_emit",
+            "expected_output": "selected vtable path or explicit generic-emission fence",
+            "broad_sweep": "no",
+        },
+    ]
+
+
+def print_targeted_vp_list_report():
+    _print_table(_targeted_vp_rows(), ["target", "trigger", "method", "expected_output", "broad_sweep"])
+
+
+def _h40_unresolved_fence_rows():
+    s = _EVIDENCE_MIX_H40
+    _p, _split_method, _y_boundaries, _k_boundaries, rows = _descriptor_rows_for_shape(s)
+    report = []
+    for family in ["setup", "k_half", "k_tile"]:
+        family_rows = [row for row in rows if row["family"] == family]
+        if not family_rows:
+            continue
+        status = family_rows[0]["semantic_status"]
+        executable = family_rows[0]["rknn_executable_equivalent"]
+        reason = family_rows[0]["unresolved_reason"]
+        y_windows, k_windows = _family_windows(rows, family)
+        pressure = _family_pressure_from_rows(rows, family)
+        report.append({
+            "shape": s["name"],
+            "family": family,
+            "semantic_status": status,
+            "rknn_executable_equivalent": executable,
+            "y_windows": _format_windows(y_windows),
+            "k_windows": _format_windows(k_windows),
+            "descriptor_count": len(family_rows),
+            "max_banks": f"{pressure[0]}/{pressure[1]}/{pressure[2]}",
+            "hardware_decision": "fenced" if not executable else "candidate_after_emitter_fields",
+            "reason": reason or "k_tile family has RKNN-like K windows; h40 still needs reuse/group semantics before emission",
+        })
+    return report
+
+
+def print_unresolved_fence_report():
+    _print_table(_h40_unresolved_fence_rows(), ["shape", "family", "semantic_status",
+                                                "rknn_executable_equivalent", "y_windows", "k_windows",
+                                                "descriptor_count", "max_banks", "hardware_decision", "reason"])
 
 
 # ---- CPU convolution (numpy, fp16) ----
@@ -1321,6 +1777,32 @@ def main():
                         help="execute all shapes from descriptor rows without old strategy branches")
     parser.add_argument("--evidence-check", action="store_true",
                         help="compare descriptor rows against known RKNN export observations")
+    parser.add_argument("--family-window-report", action="store_true",
+                        help="show current versus RKNN-like family K windows for evidence shapes")
+    parser.add_argument("--family-coverage-report", action="store_true",
+                        help="check k_tile rows cover each output channel exactly once per Y window")
+    parser.add_argument("--family-coverage-all", action="store_true",
+                        help="include all k_tile coverage rows in --family-coverage-report")
+    parser.add_argument("--pointwise-hardcoded-report", action="store_true",
+                        help="explain the two old pointwise_y_tile_hardcoded rows")
+    parser.add_argument("--k-tile-emitter-field-report", action="store_true",
+                        help="report h14 160->320 3x3 k_tile emitter fields mined from RKNN dumps")
+    parser.add_argument("--h14-k-tile-trace-report", action="store_true",
+                        help="report h14 k_tile trace evidence, constants, and hardware-emission safety")
+    parser.add_argument("--h14-k-tile-emitter-diff", action="store_true",
+                        help="diff shape-local h14 k_tile emitted decoded regs against RKNN regcmd rows")
+    parser.add_argument("--h14-k-tile-no-submit-dry-run", action="store_true",
+                        help="materialize h14 k_tile hardware-facing rows without submit fields")
+    parser.add_argument("--cna-group-mask-trace-report", action="store_true",
+                        help="summarize CNA group-mask formatter, trace targets, and fenced status")
+    parser.add_argument("--abc-kc-builder-dispatch-report", action="store_true",
+                        help="summarize ABC_T/KC_T builder functions and generic-dispatch fence")
+    parser.add_argument("--difficult-shape-evidence-report", action="store_true",
+                        help="print the targeted difficult-shape ONNC/VP evidence matrix")
+    parser.add_argument("--targeted-vp-list-report", action="store_true",
+                        help="print the reduced list of targeted VP/trace questions")
+    parser.add_argument("--unresolved-fence-report", action="store_true",
+                        help="report descriptors intentionally fenced from RKNN-equivalent emission")
     args = parser.parse_args()
 
     if args.planner_report:
@@ -1335,9 +1817,40 @@ def main():
         run_generic_only_tests()
     if args.evidence_check:
         print_evidence_check()
+    if args.family_window_report:
+        print_family_window_report()
+    if args.family_coverage_report or args.family_coverage_all:
+        print_family_coverage_report(all_rows=args.family_coverage_all)
+    if args.pointwise_hardcoded_report:
+        print_pointwise_hardcoded_report()
+    if args.k_tile_emitter_field_report:
+        print_k_tile_emitter_field_report()
+    if args.h14_k_tile_trace_report:
+        print_h14_k_tile_trace_report()
+    if args.h14_k_tile_emitter_diff:
+        print_h14_k_tile_emitter_diff()
+    if args.h14_k_tile_no_submit_dry_run:
+        print_h14_k_tile_no_submit_dry_run()
+    if args.cna_group_mask_trace_report:
+        print_cna_group_mask_trace_report()
+    if args.abc_kc_builder_dispatch_report:
+        print_abc_kc_builder_dispatch_report()
+    if args.difficult_shape_evidence_report:
+        print_difficult_shape_evidence_report()
+    if args.targeted_vp_list_report:
+        print_targeted_vp_list_report()
+    if args.unresolved_fence_report:
+        print_unresolved_fence_report()
     if (not args.planner_report and args.descriptor_dump is None and not args.cross_tab and
             not args.cbuf_compare and not args.cbuf_compare_all and not args.generic_only and
-            not args.evidence_check):
+            not args.evidence_check and not args.family_window_report and
+            not args.family_coverage_report and not args.family_coverage_all and
+            not args.pointwise_hardcoded_report and not args.k_tile_emitter_field_report and
+            not args.h14_k_tile_trace_report and not args.h14_k_tile_emitter_diff and
+            not args.h14_k_tile_no_submit_dry_run and not args.cna_group_mask_trace_report and
+            not args.abc_kc_builder_dispatch_report and not args.difficult_shape_evidence_report and
+            not args.targeted_vp_list_report and
+            not args.unresolved_fence_report):
         run_all_shape_tests()
 
 
