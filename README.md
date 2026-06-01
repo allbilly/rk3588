@@ -10,7 +10,9 @@
 - then ported to rknpu_driver and wrote examples/conv_tiles.py
 - now examples/conv_tiles.py implement rknn reverse result but 2k line of code and far from our < 1000 lines target, our 6 stragey conv_new.py is only 1.2k line of code
 - therefore, i am working on [nvdla vp](https://github.com/allbilly/nvdla) now to check ONNC and NVDLA KMD on their tiling strageries on "difficult shapes" that clean code like examples/conv.py could not pass
-- now i need to group each of the 217 test conv shapes in conv_new.py on which of the 6 strategey they used, and show me table for test shapes count by strategey and suggest which shapes are rare, e.g. 1/217 may occupied 1/6 strategey as diffcult shapes, ask deepwiki onnc/onnc nvdla/sw and comment is it possible to use simple strategey to achieve clean conv.py with < 1000 lines of code given now we have nvdla/vp to test onnc and nvdla kmd tiling on diffcult shapes 
+- shape_stratgery.md: grouped each of the 217 test conv shapes in conv_new.py on which strategey they used
+- WIP conv_expt/conv_tile_cpu.py conv_plan.md conv_tile_result.md
+- are we on good progress use simple strategey to achieve clean conv.py with < 1000 lines? review and update conv_expt/conv_plan.md 
 
 # RK3588 
 
@@ -639,3 +641,5 @@ int submitTask(int fd, uint64_t tasks_obj, size_t task_count){
 - https://clehaxze.tw/gemlog/2023/09-02-benchmarking-rk3588-npu-matrix-multiplcation-performance-ep2.gmi
 - https://clehaxze.tw/gemlog/2024/02-14-benchmarking-rk3588-npu-matrix-multiplcation-performance-ep2.gmi
 - https://clehaxze.tw/gemlog/2023/12-24-accelerating-piper-text-to-speech-on-the-rk3588-npu.gmi
+- https://amohan.dev/blog/2025/shard-optimizing-vision-transformers-edge-npu/
+- https://github.com/rockchip-linux/rknpu2/blob/master/doc/RK3588_NPU_SRAM_usage.md

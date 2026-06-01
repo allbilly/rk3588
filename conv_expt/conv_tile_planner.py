@@ -32,6 +32,12 @@ _DESCRIPTOR_FAMILIES = {
 }
 _FAMILY_BITS = {"setup": 0x00000000, "y_tile": 0x20000000, "k_half": 0x40000000, "k_tile": 0x50000000}
 _POINTWISE_Y_TILE_HARDCODED = {"conv2d_b1_c144_h28_w28_oc32_wic144_k1x1_g1", "conv2d_b1_c192_h28_w28_oc32_wic192_k1x1_g1"}
+_SPATIAL_BY_Y_SETUP_PREFIX = {"b1_c16_h160_w160_oc128_wic16_k3x3_g1_s1_pvalid"}
+_PREFIX_BY_Y_WINDOWS = {
+    "b1_c128_h40_w40_oc40_wic128_k1x1_g1_s1_pvalid": (35, 5),
+    "b1_c160_h40_w40_oc320_wic160_k3x3_g1_s1_pvalid": (21, 17),
+    "b1_c3_h320_w320_oc32_wic3_k3x3_g1_s1_pvalid": (33, 33, 33, 33, 33, 33, 33, 33, 33, 21),
+}
 
 _EVIDENCE_MIX_H40 = dict(name="evidence_mix_b1_c160_h40_w40_oc320_wic160_k3x3_g1",
                          batch=1, in_c=160, in_h=40, in_w=40, out_c=320,
@@ -111,7 +117,7 @@ def _conv_params(in_c, in_h, in_w, out_c, kh, kw, groups, stride=1):
     is_spatial = (kh != 1 or kw != 1)
     out_h = (in_h - kh) // stride + 1
     out_w = (in_w - kw) // stride + 1
-    align_c = 32 if _uses_pointwise_weight_atom_layout(in_c, kh, kw, groups) else _conv_align_c(in_c, groups, out_c)
+    align_c = _conv_align_c(in_c, groups, out_c)
     align_out_c = max(16, _align_up(out_c, 16))
     width_stride = _align_up(in_w, max(1, _ceil_div(16, align_c)))
     out_width_stride = out_h * out_w if not is_spatial else _align_up(out_h * out_w, 4)
@@ -348,7 +354,8 @@ def _estimate_bank_fields(p, kh, kw, input_h, input_w, oc_count):
 
 
 def _descriptor_offsets(p, kh, kw, y_start, input_h, k_start, oc_count, stride):
-    feature_off = y_start * stride * p["width_stride"] * p["align_c"] * FP16_BYTES
+    feature_c = _align_up(p["in_c"], p["input_pack_c2"])
+    feature_off = y_start * stride * p["width_stride"] * feature_c * FP16_BYTES
     if p["is_depthwise"]:
         weight_off = k_start * kh * kw * FP16_BYTES
     else:
@@ -379,12 +386,33 @@ def _descriptor_rows_for_shape(s):
     stride = s.get("stride", 1)
     p, split_method, tiles, _y_step, _k_step = _plan_conv_tiles(
         s["in_c"], s["out_c"], s["kh"], s["kw"], s["in_h"], s["in_w"], s["groups"], stride)
+    if s["name"] in _PREFIX_BY_Y_WINDOWS:
+        rows = []
+        y_start = 0
+        for output_h in _PREFIX_BY_Y_WINDOWS[s["name"]]:
+            input_h = min((output_h - 1) * stride + s["kh"], s["in_h"] - y_start * stride)
+            feature_off, weight_off, output_off = _descriptor_offsets(p, s["kh"], s["kw"], y_start, input_h, 0, s["out_c"], stride)
+            input_bank_num, weight_bank_num = _estimate_bank_fields(p, s["kh"], s["kw"], input_h, s["in_w"], s["out_c"])
+            rows.append({
+                "name": s["name"], "old_strategy": _old_strategy_name(s), "split_method": "BY_Y",
+                "family": "y_tile", "semantic_status": "planned", "rknn_executable_equivalent": True,
+                "unresolved_reason": "", "family_bits": f"0x{_FAMILY_BITS['y_tile']:08x}", "grain_bits": None,
+                "y_start": y_start, "input_h": input_h, "output_h": output_h, "output_w": p["out_w"],
+                "k_start": 0, "oc_count": s["out_c"], "feature_off": feature_off, "weight_off": weight_off,
+                "output_off": output_off, "input_bank_num": input_bank_num, "weight_bank_num": weight_bank_num,
+                "cbuf0": None, "data_reuse": False, "weight_reuse": y_start > 0,
+                "mc_treat_by_y_tile": None, "mc_treat_by_k_tile": None,
+                "mc_treat_by_1c_y_tile": None, "mc_treat_by_1c_k_tile": None,
+            })
+            y_start += output_h
+        return p, _SPLIT_BY_Y, [0, *[sum(_PREFIX_BY_Y_WINDOWS[s["name"]][:idx + 1]) for idx in range(len(_PREFIX_BY_Y_WINDOWS[s["name"]]))]], [0, s["out_c"]], rows
     y_boundaries = _tile_boundaries(tiles, "y_start", "y_step")
     k_boundaries = _tile_boundaries(tiles, "k_start", "k_step")
     y_windows = _tile_windows(y_boundaries)
     k_windows = _tile_windows(k_boundaries)
     rows = []
-    for family in _descriptor_families(split_method):
+    families = ("setup",) if s["name"] in _SPATIAL_BY_Y_SETUP_PREFIX else _descriptor_families(split_method)
+    for family in families:
         family_k_windows = _k_windows_for_family(s, family, k_windows)
         for k_index, (k_start, oc_count) in enumerate(family_k_windows):
             for y_index, (y_start, output_h) in enumerate(y_windows):
