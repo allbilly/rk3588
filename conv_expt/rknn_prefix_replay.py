@@ -220,6 +220,12 @@ TARGETS = {
         "case": "conv2d_b1_c3_h5_w7_oc6_wic1_k3x3_g3 1 3 5 7 6 3 3 3 g3_c3_h5_spatial_serial",
         "emit": None,
     },
+    "g3_c3_h11_w28_spatial_serial": {
+        "shape": "conv2d_b1_c3_h11_w28_oc3_wic1_k3x3_g3",
+        "case": "conv2d_b1_c3_h11_w28_oc3_wic1_k3x3_g3 1 3 11 28 3 3 3 3 g3_c3_h11_w28_spatial_serial",
+        "emit": None,
+        "note": "promoted after one-off local grouped_serial replay passed (1-row depthwise setup dispatch): 3 one-task submits, max_diff=0.0038, post simple_add PASS; sibling shape conv2d_b2_c3_h11_w28_oc3_wic1_k3x3_g3 also passes via the same dispatch with 6 one-task submits",
+    },
     "g2_c4_h5_oc4_spatial_serial": {
         "shape": "conv2d_b1_c4_h5_w5_oc4_wic2_k3x3_g2",
         "case": "conv2d_b1_c4_h5_w5_oc4_wic2_k3x3_g2 1 4 5 5 4 3 3 2 g2_c4_h5_oc4_spatial_serial",
@@ -313,6 +319,29 @@ TARGETS = {
         "shape": "conv2d_b1_c32_h32_w32_oc32_wic1_k1x1_g32",
         "case": "conv2d_b1_c32_h32_w32_oc32_wic1_k1x1_g32 1 32 32 32 32 1 1 32 dw32_h32_pw_serial",
         "emit": None,
+        "note": "promoted after one-off local grouped_serial replay passed: 32 one-task submits, max_diff=0.0010, post simple_add PASS; path is depthwise+1x1+setup/NONE, gated by run_grouped_serial_shape (no RKNN 108-row closure needed); sibling shapes conv2d_b1_c3_h11_w28_oc3_wic1_k3x3_g3 and conv2d_b2_c3_h11_w28_oc3_wic1_k3x3_g3 also pass via the same 1-row depthwise dispatch with grouped_serial submits=3 and 6 respectively; depthwise BY_K path (4 k_tile submits) on b1_c128_h3_w3_oc128_wic1_k3x3_g128_s1_pvalid confirmed as timing out (6s NPU submit timeout), so multi-row depthwise remains fenced pending RKNN 108/104/26-row closure derivation; conv2d_multi cross-check of fenced shapes (c32_h14_oc64, c32_h7_oc128, c16_h80_oc64, c16_h80_oc128, c128_h1_oc24, c256_h3_oc24, c256_h2_oc24, c40_h40_oc320, c8_h160, c256_h28_oc256, c576_h19_oc12, c96_h20_oc96) is VALID when the .rknn models are built with /tmp/build_matched.py which constructs weights from the same MT19937(seed=0) sequence that conv2d_multi consumes for its CPU reference (replacing the input RNG portion and then producing the weight RNG in the exact same order). All 12 representative fenced shapes PASS in rknn_runtime with max error 0.0070-0.0447. This proves the NPU works for all 12; the conv.py fences reflect missing register setup, not NPU bugs.",
+    },
+    "c32_h14_oc64_promoted_via_generic_fix": {
+        "shape": "b1_c32_h14_w14_oc64_wic32_k3x3_g1_s1_pvalid",
+        "case": "b1_c32_h14_w14_oc64_wic32_k3x3_g1_s1_pvalid 1 32 14 14 64 3 3 1 c32_h14_oc64",
+        "emit": None,
+        "note": "promoted via 3 generic make_regs fixes (cvt_con5=0, CORE_MISC_CFG=0x200, SURFACE_ADD=*2 instead of *max(2,align_out_c/16)). Un-fenced from KNOWN_BAD_SPATIAL_SETUP_SHAPES. Live regcmd from rknn_runtime shows generic produces correct values for oc=64. max_diff=0.0304 PASS. Sibling c32_h7_oc128 also passes via same generic fix. The 2 c16_h80_oc* shapes remain fenced because they are 11-task BY_K, not 1-task setup.",
+    },
+    "c32_h7_oc128_promoted_via_generic_fix": {
+        "shape": "b1_c32_h7_w7_oc128_wic32_k3x3_g1_s1_pvalid",
+        "case": "b1_c32_h7_w7_oc128_wic32_k3x3_g1_s1_pvalid 1 32 7 7 128 3 3 1 c32_h7_oc128",
+        "emit": None,
+        "note": "promoted via 3 generic make_regs fixes (cvt_con5=0, CORE_MISC_CFG=0x200, SURFACE_ADD=*2 instead of *max(2,align_out_c/16)). Live regcmd from rknn_runtime shows generic produces correct values for oc=128. max_diff=0.0265 PASS.",
+    },
+    "c8_h160_oc16_promoted_via_local_tile_replay": {
+        "shape": "b1_c8_h160_w160_oc16_wic8_k3x3_g1_s1_pvalid",
+        "case": "b1_c8_h160_w160_oc16_wic8_k3x3_g1_s1_pvalid 1 8 160 160 16 3 3 1 c8_h160_oc16",
+        "note": "promoted via local_tile_replay: 3 planner y_tile rows (in_h=70/70/24, y_start=0/68/136, oc=16). The 70-2 stride is the standard 3x3 y_tile overlap pattern. Sibling c16_h160_oc128 uses the same y_tile pattern with 3 rows. Note that the live RKNN shows 138/20 output windows; the local replay uses 70/70/24 input which doesn't match the live, but the smaller-input passes the NPU's CBUF and produces numerically correct output. max_diff=0.0156 PASS.",
+    },
+    "c16_h80_oc64_promoted_via_exact11_byk": {
+        "shape": "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid",
+        "case": "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid 1 16 80 80 64 3 3 1 c16_h80_oc64",
+        "note": "promoted via 11-task EXACT11 BY_K closure with per-shape overrides CBUF0=0x57, DATA_SIZE1=0x000F0010, CONV2_LOW=0x1a0. Un-fenced from KNOWN_BAD_SPATIAL_SETUP_SHAPES. Live regcmd captured at GEM 2 offset 0x5000 (98 qwords of setup body) confirms body field matches when overrides are applied. max_diff=0.0293 PASS. Sibling c16_h80_oc128 still FENCED because the hardcoded k_tile OC splits ((0,112),(112,112),(224,96)) are for oc=320, not oc=128; need parameterization of _exact11_task_regs k_tile splits. Sibling c16_h80_oc128_k5x5 still FENCED (also needs k5x5 body overrides).",
     },
     "cc_c128_h28_pw_by_k_dump": {
         "shape": "conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1",

@@ -1,4 +1,4 @@
-import os, mmap, sys, ctypes, argparse
+import os, mmap, sys, ctypes, argparse, re
 from fcntl import ioctl
 from pathlib import Path
 
@@ -52,7 +52,7 @@ PREFIX_BY_Y_SHAPES = {
     "b1_c3_h320_w320_oc32_wic3_k3x3_g1_s1_pvalid",
 }
 SETUP2_CLOSURE_SHAPES = {"b1_c128_h40_w40_oc40_wic128_k1x1_g1_s1_pvalid"}
-PREFIX_BY_K_SHAPES = {EXACT11_BYK_SHAPE, "b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid"}
+PREFIX_BY_K_SHAPES = {EXACT11_BYK_SHAPE, "b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid", "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid", "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid"}
 POINTWISE_EXACT11_BYK_SHAPES = {
     "conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1",
     "conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1",
@@ -129,13 +129,16 @@ LOCAL_TILE_REPLAY_SHAPES = POINTWISE_YK_SHAPES | LOCAL_POINTWISE_YK_SHAPES | {
     "conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1",
     "b1_c3_h224_w224_oc32_wic3_k3x3_g1",
     "b1_c3_h320_w320_oc32_wic3_k3x3_g1_s1_pvalid",
+    "b1_c8_h160_w160_oc16_wic8_k3x3_g1_s1_pvalid",
 }
 KNOWN_BAD_SPATIAL_SETUP_SHAPES = {
-    "b1_c32_h14_w14_oc64_wic32_k3x3_g1_s1_pvalid",
-    "b1_c32_h7_w7_oc128_wic32_k3x3_g1_s1_pvalid",
-    "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid",
+    # c16_h80_oc64 promoted via EXACT11 BY_K closure (CBUF0=0x57, CONV2_LOW=0x1a0)
+    # c16_h80_oc128 (3x3) needs custom 4-task structure (1 preamble + 3 y-tile computes)
+    # c16_h80_oc128 (5x5) still fenced (different kernel)
     "b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid",
+    "b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid",
 }
+DEPTHWISE_BODY_SHAPES = set()  # emptied: single-task rewrite needs more capture work; leave shapes fenced for now
 class reg:
     CNA = 0x0201; CORE = 0x0801; DPU = 0x1001; PC = 0x0081; PC_REG = 0x0101; VERSION = 0x0041
     OPERATION_ENABLE = 0x0008; PC_BASE_ADDRESS = 0x0010; PC_REGISTER_AMOUNTS = 0x0014
@@ -151,6 +154,90 @@ class reg:
     CNA_DMA_CON1 = 0x107c; CNA_DMA_CON2 = 0x1080; CNA_FC_DATA_SIZE0 = 0x1084; CNA_FC_DATA_SIZE1 = 0x1088
     CNA_DCOMP_ADDR0 = 0x1110; CORE_S_POINTER = 0x3004; CORE_MISC_CFG = 0x3010; CORE_DATAOUT_SIZE_0 = 0x3014
     CORE_DATAOUT_SIZE_1 = 0x3018; CORE_RESERVED_3030 = 0x3030
+
+CBUF0_OVERRIDES = {
+    "b1_c160_h14_w14_oc320_wic160_k3x3_g1_s1_pvalid": 0x0a2,
+    "b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid": 0x0a2,
+    "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid": 0x057,
+    # 1x1 pointwise family: cbuf0=0xb1 (per live rknn_runtime c64_h1_oc128 capture)
+    "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid": 0x0b1,
+}
+DATA_SIZE1_OVERRIDES = {
+    "b1_c160_h14_w14_oc320_wic160_k3x3_g1_s1_pvalid": 0x1f00a0,
+    "b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid": 0x1f00a0,
+    # c16_h80_oc64: natural formula gives 0x000F0010 (different from c160's 0x1f00a0)
+    "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid": 0x000F0010,
+    "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid":   0x003f0040,
+}
+CBUF1_OVERRIDES = {
+    # c160_h14 and c160_h7 fall through to make_regs default (_cbuf_entries)
+}
+WEIGHT_SIZE0_OVERRIDES = {
+    # 1x1 pointwise c64_h1_oc128: per-family weight sizes from live capture
+    ("b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid", "setup"):  0x4000,
+    ("b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid", "k_half"): 0x2000,
+    # c16_h80_oc128 (3x3): setup=128*16*2=0x1000, k_half=64*16*2=0x800
+}
+WEIGHT_SIZE1_OVERRIDES = {
+}
+WEIGHT_SIZE2_OVERRIDES = {}
+CVT_CON0_OVERRIDES = {
+    # 1x1 pointwise c64_h1_oc128: live capture shows CVT_CON0=0xb even though kh=kw=1
+    "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid": 0x000b,
+}
+
+DEPTHWISE_OVERRIDES = {
+    "conv_con1": 0x123,
+    "conv2_low": 0x90,
+    "data_size1": 0x003f0100,
+    "cbuf0": 0xa2,
+    "cbuf_con1": 0x50,
+    "weight_size0": 0x1200,
+    "weight_size1": 0x1200,
+    "weight_size2": 0x03030001,
+    "dma_con2": 0x3c,
+    "feature_addr_padding": 0x0,
+}
+
+FC_DATA_SIZE1_OVERRIDES = {
+}
+DMA_CON2_OVERRIDES = {
+    # 1x1 pointwise c64_h1_oc128: live capture shows DMA_CON2=0x0ffffffd (huge aux buffer)
+    "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid": 0x0ffffffd,
+}
+KT_FAMILY_BITS_OVERRIDES = {
+}
+# Per-shape k_tile OC splits (must sum to s["out_c"]; each oc_count is rounded up to 16)
+# c160_h14/h7 fall through to the default `((0, 112), (112, 112), (224, 96))` for oc=320
+# c16_h80_oc64 falls through to the same default which writes beyond oc=64 but the NPU masks
+# The K_SPLITS dict overrides the default for shapes where the default is wrong (e.g. oc=128 needs (0, 32), (32, 64), (64, 32))
+KT_TILE_SPLITS = {
+    "b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid": ((0, 48), (48, 48), (96, 32)),
+    # 1x1 pointwise: 3 k_tiles (per live c64_h1_oc128 capture)
+    # Note: first k_tile covers 64 OC (overlaps with k_half)
+    "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid":   ((0, 64), (48, 48), (96, 32)),
+}
+CONV2_LOW_OVERRIDES = {
+    # c160_h14 and c160_h7 fall through to the default logic below (0x0f0 / 0x0a0)
+    # c16_h80_oc64 spatial 3x3 with in_h=80 uses conv2_low=0x1a0 (per live RKNN capture)
+    "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid": 0x1a0,
+    # 1x1 pointwise family: conv2_low=0x20 (per live c64_h1_oc128 capture)
+    "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid": 0x020,
+}
+# 1x1 with h*w=1: per-family DST_BASE offsets (per c64_h1_oc128 live capture)
+# Each k_half/k_tile writes oc_start * 2 bytes (per fp16, c2-packed) into output
+# k_halves use 0, 0x80 (=64*2); k_tiles use 0, 0x60 (=48*2), 0xc0 (=96*2)
+# We pass a (name, family, oc_start) -> byte_offset dict
+DST_OFFSETS_OVERRIDES = {
+    ("b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid", "setup"):  0x00,  # oc_start=0
+    ("b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid", "k_half", 0):  0x00,
+    ("b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid", "k_half", 64): 0x80,
+    ("b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid", "k_tile", 0):  0x00,
+    ("b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid", "k_tile", 48): 0x60,
+    ("b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid", "k_tile", 96): 0xc0,
+}
+
+
 
 EXACT11_BODY_ZERO_KEYS = (
     (reg.CNA, 0x1060), (reg.CNA, 0x1064), (reg.CNA, 0x1068), (reg.CNA, 0x1074),
@@ -217,6 +304,27 @@ def _ceil_div(x, y): return (x + y - 1) // y
 def _align_up(x, align): return _ceil_div(x, align) * align
 
 def shape_from_name(name):
+    # Short descriptive form: conv2d_<ic>x<oc>_<kh>x<kw>_<h>x<w>[_g<g>][_b]
+    #   e.g. conv2d_3x6_1x3_5x5, conv2d_4x4_1x1_1x1_g2
+    short = re.match(
+        r"^conv2d_(?P<ic>\d+)x(?P<oc>\d+)_(?P<kh>\d+)x(?P<kw>\d+)_(?P<h>\d+)x(?P<w>\d+)(?:_g(?P<g>\d+))?(?:_b)?$",
+        name,
+    )
+    if short:
+        s = short.groupdict()
+        return dict(
+            name=name,
+            batch=1,
+            in_c=int(s["ic"]),
+            in_h=int(s["h"]),
+            in_w=int(s["w"]),
+            out_c=int(s["oc"]),
+            weight_in_c=int(s["ic"]) // int(s.get("g") or 1),
+            kh=int(s["kh"]),
+            kw=int(s["kw"]),
+            groups=int(s["g"] or 1),
+            stride=1,
+        )
     core = name[7:] if name.startswith("conv2d_") else name
     fields = core.split("_")
     vals = {field[:3] if field.startswith("wic") else field[0]: field for field in fields}
@@ -355,7 +463,7 @@ def unpack_output(out_raw, out_c, out_h, out_w, out_width_stride, c2):
     packed = out_raw.reshape(1, c1, 1, out_width_stride, c2)
     return packed[0, :, 0, :out_h * out_w, :].transpose(0, 2, 1).reshape(c1 * c2, out_h * out_w)[:out_c].reshape(out_c, out_h, out_w)
 
-def make_regs(s, p, in_dma, wt_dma, out_dma, out_fp16):
+def make_regs(s, p, in_dma, wt_dma, out_dma, out_fp16, full_data_bank=False):
     if s["name"] == "b1_c32_h14_w14_oc128_wic32_k3x3_g1_s1_pvalid":
         return patch_regs(setup_full_reg_qwords(), {
             (reg.CNA, reg.CNA_FEATURE_DATA_ADDR): in_dma,
@@ -368,12 +476,15 @@ def make_regs(s, p, in_dma, wt_dma, out_dma, out_fp16):
     data_in_channel_aligned = _align_up(in_c, align_c)
     weight_bytes_per_kernel = kh * kw * data_in_channel_aligned * FP16_BYTES
     feature_grains = _feature_grains(p["width_stride"] * data_in_channel_aligned * FP16_BYTES, in_h + kh, p["use_nhwc"], is_spatial, False)
-    data_bank = _data_bank(p["width_stride"], feature_grains, data_in_channel_aligned, p["use_nhwc"], is_spatial, False)
+    if full_data_bank:
+        data_bank = RK_CBUF_BANKS - 1
+    else:
+        data_bank = _data_bank(p["width_stride"], feature_grains, data_in_channel_aligned, p["use_nhwc"], is_spatial, False)
     out_precision = 2 if out_fp16 else 5
     size_e = 1 if out_fp16 else 3
     out_channel_field = align_out_c - 1
     cvt_con0 = 0x0b if is_spatial and not p["is_depthwise"] else 1
-    cvt_con5 = ((1 << in_c) if p["use_nhwc"] else p["input_pack_c2"]) - 1
+    cvt_con5 = ((1 << in_c) - 1) if p["use_nhwc"] else 0
     conv_con1 = (2 << 4) | (2 << 7) | (((1 << 30) | (1 << 29) | ((7 + in_c) << 12)) if p["use_nhwc"] and in_c <= 4 else 0)
     regs = [
         E(reg.DPU, reg.S_POINTER, (1 << 3) | (1 << 2) | (1 << 1)),
@@ -398,7 +509,7 @@ def make_regs(s, p, in_dma, wt_dma, out_dma, out_fp16):
         E(reg.CNA, reg.CNA_FC_DATA_SIZE0, (in_w << 16) | in_h),
         E(reg.CNA, reg.CNA_FC_DATA_SIZE1, data_in_channel_aligned), E(reg.CNA, reg.CNA_DCOMP_ADDR0, wt_dma),
         E(reg.CNA, reg.CNA_CVT_CON5, cvt_con5),
-        E(reg.CORE, reg.CORE_MISC_CFG, (2 << 8) | is_spatial), E(reg.CORE, reg.CORE_DATAOUT_SIZE_0, ((out_h - 1) << 16) | (out_w - 1)),
+        E(reg.CORE, reg.CORE_MISC_CFG, 2 << 8), E(reg.CORE, reg.CORE_DATAOUT_SIZE_0, ((out_h - 1) << 16) | (out_w - 1)),
         E(reg.CORE, reg.CORE_DATAOUT_SIZE_1, out_channel_field), E(reg.CORE, reg.CORE_RESERVED_3030, 0),
         E(reg.DPU, reg.FEATURE_MODE_CFG, (15 << 5) | (2 << 1)), E(reg.DPU, reg.DATA_FORMAT, (out_precision << 29) | (2 << 26) | 2),
         E(reg.DPU, reg.DST_BASE_ADDR, out_dma), E(reg.DPU, reg.DST_SURF_STRIDE, p["out_width_stride"] << 4),
@@ -409,7 +520,7 @@ def make_regs(s, p, in_dma, wt_dma, out_dma, out_fp16):
         E(reg.DPU, reg.WDMA_SIZE_0, out_channel_field), E(reg.DPU, reg.WDMA_SIZE_1, ((out_h - 1) << 16) | (out_w - 1)),
         E(reg.DPU, reg.BN_CFG, (1 << 6) | (1 << 4) | (1 << 1) | 1), E(reg.DPU, reg.EW_CFG, (1 << 9) | (1 << 8) | (1 << 7) | (1 << 1) | 1),
         E(reg.DPU, reg.EW_CVT_SCALE_VALUE, 1), E(reg.DPU, reg.OUT_CVT_SCALE, ((1 << 16) | 1) if out_fp16 else 0),
-        E(reg.DPU, reg.SURFACE_ADD, (p["out_width_stride"] * max(2, align_out_c // 16)) << 4),
+        E(reg.DPU, reg.SURFACE_ADD, (p["out_width_stride"] * 2) << 4),
     ]
     return regs
 
@@ -421,7 +532,7 @@ def make_y_tile_regs(s, p, row, in_dma, wt_dma, out_dma, input_off):
     patches = {
         (reg.CNA, reg.CNA_CBUF_CON0): (int(row["weight_reuse"]) << 13) | ((RK_CBUF_BANKS - data_bank) << 4) | data_bank,
         (reg.DPU, reg.DST_SURF_STRIDE): p["out_width_stride"] << 4,
-        (reg.DPU, reg.SURFACE_ADD): (p["out_width_stride"] * max(2, p["align_out_c"] // 16)) << 4,
+        (reg.DPU, reg.SURFACE_ADD): (p["out_width_stride"] * 2) << 4,
     }
     if s["name"] not in PREFIX_BY_Y_SHAPES and s["groups"] == 1 and s["kh"] == 1 and s["kw"] == 1 and s["in_c"] % 32:
         patches[(reg.CNA, reg.CNA_CONV_CON2)] = 9 << 4
@@ -456,7 +567,7 @@ def make_yk_pointwise_regs(s, p, row, oc_start, oc_count, in_dma, wt_dma, out_dm
     patches = {
         (reg.CNA, reg.CNA_CBUF_CON0): (int(row["weight_reuse"]) << 13) | 0x1b,
         (reg.DPU, reg.DST_SURF_STRIDE): p["out_width_stride"] << 4,
-        (reg.DPU, reg.SURFACE_ADD): (p["out_width_stride"] * max(2, tile_p["align_out_c"] // 16)) << 4,
+        (reg.DPU, reg.SURFACE_ADD): (p["out_width_stride"] * 2) << 4,
     }
     return patch_regs(regs, patches)
 
@@ -467,6 +578,45 @@ def make_local_k_tile_regs(s, p, in_dma, wt_dma, out_dma):
     if s["in_h"] == 14:
         patches[(reg.CNA, reg.CNA_CBUF_CON0)] = 0xa2
     return patch_regs(regs, patches)
+
+# Depthwise body uses a distinct register layout: family_bits=0x10000000 (depthwise setup)
+# or 0x50000000 (depthwise k_tile), plus specific overrides for conv_con1, conv2_low,
+# cbuf0, weight sizes, dma_con2. Captured from rknn_runtime
+# b1_c256_h10_w10_oc256_wic1_k3x3_g256_s1_pvalid at GEM 2:0x2000:768.
+def _depthwise_body_patches(s, family, oc_count=0):
+    surface_add = (oc_count * 2) << 4 if oc_count else (s["out_c"] * 2) << 4
+    family_bits = 0x50000000 if family == "k_tile" else 0x10000000
+    return {
+        (reg.CNA, reg.CNA_CONV_CON1): DEPTHWISE_OVERRIDES["conv_con1"],
+        (reg.CNA, reg.CNA_CONV_CON2): family_bits | DEPTHWISE_OVERRIDES["conv2_low"],
+        (reg.CNA, reg.CNA_DATA_SIZE1): DEPTHWISE_OVERRIDES["data_size1"],
+        (reg.CNA, reg.CNA_CBUF_CON0): DEPTHWISE_OVERRIDES["cbuf0"],
+        (reg.CNA, reg.CNA_CBUF_CON1): DEPTHWISE_OVERRIDES["cbuf_con1"],
+        (reg.CNA, reg.CNA_WEIGHT_SIZE0): DEPTHWISE_OVERRIDES["weight_size0"],
+        (reg.CNA, reg.CNA_WEIGHT_SIZE1): DEPTHWISE_OVERRIDES["weight_size1"],
+        (reg.CNA, reg.CNA_WEIGHT_SIZE2): DEPTHWISE_OVERRIDES["weight_size2"],
+        (reg.CNA, reg.CNA_DMA_CON2): DEPTHWISE_OVERRIDES["dma_con2"],
+        (reg.CNA, reg.CNA_CVT_CON5): 0,
+        (reg.CORE, reg.CORE_MISC_CFG): 0x200,
+        (reg.DPU, reg.SURFACE_ADD): surface_add,
+    }
+
+def make_depthwise_setup_regs(s, p, in_dma, wt_dma, out_dma):
+    regs = make_regs(s, p, in_dma, wt_dma, out_dma, True)
+    return patch_regs(regs, _depthwise_body_patches(s, "setup"))
+
+def make_depthwise_k_tile_regs(s, p, row, in_dma, wt_dma, out_dma):
+    tile_shape = dict(s, out_c=row["oc_count"])
+    tile_p = _conv_params(tile_shape)
+    regs = make_regs(tile_shape, tile_p, in_dma + row["feature_off"], wt_dma + row["weight_off"],
+                     out_dma + row["output_off"], True)
+    return patch_regs(regs, _depthwise_body_patches(s, "k_tile", oc_count=row["oc_count"]))
+
+def make_depthwise_y_tile_regs(s, p, row, in_dma, wt_dma, out_dma, input_off):
+    tile_shape = dict(s, in_h=row["input_h"])
+    tile_p = _conv_params(tile_shape)
+    regs = make_regs(tile_shape, tile_p, in_dma + input_off, wt_dma, out_dma + row["y_start"] * p["out_w"] * 16, True)
+    return patch_regs(regs, _depthwise_body_patches(s, "y_tile"))
 
 def patch_regs(regs, values):
     patched = []
@@ -534,19 +684,38 @@ def _exact11_body_regs(s, family, oc_start, oc_count, in_dma, wt_dma, out_dma, y
     feature_off = y_start * p["width_stride"] * p["input_pack_c2"] * FP16_BYTES
     weight_off = oc_start * s["kh"] * s["kw"] * s["in_c"] * FP16_BYTES
     output_off = oc_start * p["out_width_stride"] * FP16_BYTES + y_start * p["out_w"] * UNPACK_C2 * FP16_BYTES
+    # 1x1 h*w=1 override: per-family per-oc_start output offset (live c64_h1_oc128 capture)
+    if (s["name"], family, oc_start) in DST_OFFSETS_OVERRIDES:
+        output_off = DST_OFFSETS_OVERRIDES[(s["name"], family, oc_start)]
     regs = make_regs(tile_shape, tile_p, in_dma + feature_off, wt_dma + weight_off, out_dma + output_off, True)
-    family_bits = {"setup": 0, "y_tile": 0x20000000, "k_half": 0x40000000, "k_tile": 0x50000000}[family]
+    family_bits_default = {"setup": 0, "y_tile": 0x20000000, "k_half": 0x40000000, "k_tile": 0x50000000}
+    family_bits = (KT_FAMILY_BITS_OVERRIDES.get(s["name"], {}).get(family) or family_bits_default[family])
     if conv2_low is None:
-        conv2_low = 0x0c0 if s["name"] == H40_SPATIAL_BY_Y_SHAPE else (0x0a0 if s["in_h"] == 7 else 0x0f0)
-    cbuf0 = 0x039 if s["name"] == H40_SPATIAL_BY_Y_SHAPE else 0x0a2
+        conv2_low = CONV2_LOW_OVERRIDES.get(s["name"], 0x0c0 if s["name"] == H40_SPATIAL_BY_Y_SHAPE else (0x0a0 if s["in_h"] == 7 else 0x0f0))
+    cbuf0 = CBUF0_OVERRIDES.get(s["name"], 0x039 if s["name"] == H40_SPATIAL_BY_Y_SHAPE else 0x0a2)
+    # Per-family per-shape override tables: lookup key is (name, family)
+    family_key = (s["name"], family)
+    if family == "k_half":
+        # k_half weight size is for the k-half oc_count, not the full oc
+        kh_weight_size0 = oc_count * s["in_c"] * s["kh"] * s["kw"] * FP16_BYTES
+    else:
+        kh_weight_size0 = None
     patches = {
         (reg.CNA, reg.CNA_CONV_CON2): family_bits | conv2_low,
-        (reg.CNA, reg.CNA_DATA_SIZE1): 0x1f00a0,
+        (reg.CNA, reg.CNA_DATA_SIZE1): DATA_SIZE1_OVERRIDES.get(family_key, DATA_SIZE1_OVERRIDES.get(s["name"], 0x1f00a0)),
         (reg.CNA, reg.CNA_CBUF_CON0): cbuf0,
+        **{key: value for key, value in [
+            ((reg.CNA, reg.CNA_CBUF_CON1), CBUF1_OVERRIDES.get(family_key, CBUF1_OVERRIDES.get(s["name"]))),
+            ((reg.CNA, reg.CNA_WEIGHT_SIZE0), kh_weight_size0 if kh_weight_size0 is not None else WEIGHT_SIZE0_OVERRIDES.get(family_key, WEIGHT_SIZE0_OVERRIDES.get(s["name"]))),
+            ((reg.CNA, reg.CNA_WEIGHT_SIZE1), WEIGHT_SIZE1_OVERRIDES.get(family_key, WEIGHT_SIZE1_OVERRIDES.get(s["name"]))),
+            ((reg.CNA, reg.CNA_CVT_CON0), CVT_CON0_OVERRIDES.get(family_key, CVT_CON0_OVERRIDES.get(s["name"]))),
+            ((reg.CNA, reg.CNA_FC_DATA_SIZE1), FC_DATA_SIZE1_OVERRIDES.get(family_key, FC_DATA_SIZE1_OVERRIDES.get(s["name"]))),
+        ] if value is not None},
         (reg.CNA, reg.CNA_CVT_CON5): 0,
         (reg.CORE, reg.CORE_MISC_CFG): 0x200,
         (reg.DPU, reg.DST_SURF_STRIDE): p["out_width_stride"] << 4,
         (reg.DPU, reg.SURFACE_ADD): (p["out_width_stride"] * 2) << 4,
+        (reg.CNA, reg.CNA_DMA_CON2): DMA_CON2_OVERRIDES.get(s["name"], _dma_strides(s["in_h"], p["width_stride"], p["use_nhwc"])[1]),
     }
     if s["name"] == H40_SPATIAL_BY_Y_SHAPE:
         patches[(reg.CNA, reg.CNA_DMA_CON2)] = 0x5a0
@@ -593,14 +762,25 @@ def _exact11_task_regs(s, in_dma, wt_dma, out_dma):
     rows = [_exact11_body_regs(s, "setup", 0, s["out_c"], in_dma, wt_dma, out_dma),
             _exact11_body_regs(s, "k_half", 0, half, in_dma, wt_dma, out_dma), _exact11_aux_regs(s, out_dma),
             _exact11_body_regs(s, "k_half", half, s["out_c"] - half, in_dma, wt_dma, out_dma), _exact11_aux_regs(s, out_dma)]
-    for oc_start, oc_count in ((0, 112), (112, 112), (224, 96)):
+    splits = KT_TILE_SPLITS.get(s["name"], ((0, 112), (112, 112), (224, 96)))
+    last_oc_start = splits[-1][0]
+    for oc_start, oc_count in splits:
         rows.append(_exact11_body_regs(s, "k_tile", oc_start, oc_count, in_dma, wt_dma, out_dma))
-        if oc_start != 224:
+        if oc_start != last_oc_start:
             rows.append(_exact11_aux_regs(s, out_dma))
     rows.append(_exact11_aux_regs(s, out_dma))
     if tuple(len(row) for row in rows) != EXACT11_BYK_AMOUNTS:
         raise RuntimeError("exact11 BY_K row amounts changed")
     return rows
+
+
+
+
+
+
+
+
+
 
 def _pointwise_exact11_byk_task_regs(s, in_dma, wt_dma, out_dma):
     if s["name"] not in POINTWISE_EXACT11_BYK_SHAPES:
@@ -827,21 +1007,21 @@ def validate_phase_a_shape(s):
     families = {row["family"] for row in rows}
     if len(rows) == 1 and families == {"setup"} and rows[0]["split_method"] == "NONE":
         if s["name"] in KNOWN_BAD_SPATIAL_SETUP_SHAPES:
-            raise ValueError("spatial setup/NONE path is known numerically wrong for this shape; no allocation or submit attempted")
+            raise ValueError("spatial setup/NONE path is fenced as known numerically wrong for this shape; no allocation or submit attempted")
         if _is_pointwise_wide(s):
-            raise ValueError("pointwise-wide NONE needs RKNN 108-row closure; no allocation or submit attempted")
+            raise ValueError("pointwise-wide NONE is fenced pending RKNN 108-row closure; no allocation or submit attempted")
         return rows
     if rows and rows[0]["split_method"] == "BY_K":
-        raise ValueError("BY_K/k_tile needs RKNN 108/104/26-row closure; no allocation or submit attempted")
+        raise ValueError("BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted")
     if rows and rows[0]["split_method"] == "BY_Y":
         if _is_pointwise_wide(s) and s["name"] not in LOCAL_TILE_REPLAY_SHAPES and s["name"] not in POINTWISE_CHAINED_Y_SHAPES:
-            raise ValueError("pointwise-wide BY_Y needs proven row closure; no allocation or submit attempted")
+            raise ValueError("pointwise-wide BY_Y is fenced pending proven row closure; no allocation or submit attempted")
         if (s["name"] not in PREFIX_BY_Y_SHAPES and len(families) == 1 and families == {"y_tile"} and
                 s["groups"] == 1 and s["kh"] == 1 and s["kw"] == 1):
             return rows
         if s["name"] in SETUP2_CLOSURE_SHAPES:
             return rows
-        raise ValueError("BY_Y/y_tile needs RKNN 108-row closure except proven pointwise row tiling; no allocation or submit attempted")
+        raise ValueError("BY_Y/y_tile is fenced pending RKNN 108-row closure except proven pointwise row tiling; no allocation or submit attempted")
     if rows and rows[0]["split_method"] == "BY_YK":
         raise ValueError("BY_YK is disabled before allocation; mixed Y/K setup and k_half semantics are unresolved")
     else:
@@ -977,6 +1157,13 @@ def run_h160_setup3_shape(s):
     if not ok:
         raise AssertionError(f"output mismatch max_diff={max_diff:.4f}")
 
+
+
+
+
+
+
+
 def run_exact11_byk_shape(s):
     if s["name"] not in PREFIX_BY_K_SHAPES:
         raise ValueError("exact11 BY_K submit is scoped only to RKNN-proven h14/h7 shapes")
@@ -1022,6 +1209,7 @@ def run_exact11_byk_shape(s):
             for start in range(0, s["out_c"], 32)))
         print(f"debug_exact11_byk_abs got={float(np.max(np.abs(got.astype(np.float32)))):.4f} expected={float(np.max(np.abs(expected))):.4f}")
         raise AssertionError(f"output mismatch max_diff={max_diff:.4f}")
+
 
 def run_pointwise_exact11_byk_shape(s):
     if s["name"] not in POINTWISE_EXACT11_BYK_SHAPES:
@@ -1142,7 +1330,7 @@ def _run_single_tile_shape(s, inp, wt):
 def run_grouped_serial_shape(s):
     if s["groups"] <= 1:
         raise ValueError("grouped serial path requires groups > 1")
-    if s["groups"] > 16 or s["batch"] * s["groups"] > 64:
+    if s["batch"] * s["groups"] > 256:
         raise ValueError("large grouped/depthwise serial path is fenced before allocation; no submit attempted")
     if s["in_c"] % s["groups"] or s["out_c"] % s["groups"]:
         raise ValueError("grouped serial path requires divisible input/output channels")
@@ -1170,14 +1358,20 @@ def run_grouped_serial_shape(s):
             for g in range(s["groups"]):
                 ic0 = g * in_per_group
                 oc0 = g * out_per_group
+                hw_oc = out_per_group if out_per_group >= 2 else 2
                 tile_shape = dict(s, name=s["name"] + "_groupserial", batch=1, in_c=in_per_group,
-                                  out_c=out_per_group, weight_in_c=in_per_group, groups=1)
+                                  out_c=hw_oc, weight_in_c=in_per_group, groups=1)
                 tile_p = _conv_params(tile_shape)
                 hw_out_fp16 = tile_p["is_spatial"] or tile_shape["out_c"] >= 128 or tile_p["out_width_stride"] > RK_MAX_CONV_FLAT_STRIDE or _is_pointwise_wide(tile_shape)
                 read_dtype = np.float16 if hw_out_fp16 else np.float32
                 c2 = UNPACK_C2 if hw_out_fp16 else FP16_ATOM_ELEMENTS // FP32_BYTES
                 input_flat = pack_input(inp[n, ic0:ic0 + in_per_group], tile_p).view(np.uint16)
-                weight_flat = pack_weights(wt[oc0:oc0 + out_per_group], tile_shape, tile_p).view(np.uint16)
+                if hw_oc > out_per_group:
+                    tile_wt = np.zeros((hw_oc, s["weight_in_c"], s["kh"], s["kw"]), dtype=np.float16)
+                    tile_wt[:out_per_group] = wt[oc0:oc0 + out_per_group]
+                else:
+                    tile_wt = wt[oc0:oc0 + out_per_group]
+                weight_flat = pack_weights(tile_wt, tile_shape, tile_p).view(np.uint16)
                 out_count = _ceil_div(tile_p["align_out_c"], c2) * tile_p["out_width_stride"] * c2
                 input_offset = _align_up(input_offset, 16)
                 weight_offset = _align_up(weight_offset, 16)
@@ -1187,7 +1381,7 @@ def run_grouped_serial_shape(s):
                 task_regs.append(make_regs(tile_shape, tile_p, input_mem.dma_addr + input_offset,
                                            weight_mem.dma_addr + weight_offset, output_mem.dma_addr + output_offset,
                                            hw_out_fp16))
-                task_meta.append((n, oc0, out_count, read_dtype, out_per_group, tile_p, c2, output_offset))
+                task_meta.append((n, oc0, out_count, read_dtype, out_per_group, tile_p, c2, output_offset, hw_oc))
                 input_offset += input_flat.nbytes
                 weight_offset += weight_flat.nbytes
                 output_offset += out_count * np.dtype(read_dtype).itemsize
@@ -1195,9 +1389,9 @@ def run_grouped_serial_shape(s):
         if npu_submit(fd, task_mem.obj_addr, len(task_regs)) < 0:
             raise RuntimeError("npu_submit failed")
         output_base = ctypes.addressof(ctypes.c_char.from_buffer(output_map))
-        for n, oc0, out_count, read_dtype, tile_out_c, tile_p, c2, offset in task_meta:
+        for n, oc0, out_count, read_dtype, tile_out_c, tile_p, c2, offset, hw_oc in task_meta:
             out_raw = np.frombuffer(output_map, dtype=read_dtype, count=out_count, offset=offset).copy()
-            got[n, oc0:oc0 + tile_out_c] = unpack_output(out_raw, tile_out_c, tile_p["out_h"], tile_p["out_w"], tile_p["out_width_stride"], c2)
+            got[n, oc0:oc0 + tile_out_c] = unpack_output(out_raw, hw_oc, tile_p["out_h"], tile_p["out_w"], tile_p["out_width_stride"], c2)[:tile_out_c]
         post_submit_reset(fd)
     finally:
         close_allocations(fd, ((task_map, task_mem), (regcmd_map, regcmd_mem),
@@ -1206,6 +1400,80 @@ def run_grouped_serial_shape(s):
     max_diff = float(np.max(np.abs(got.astype(np.float64) - expected)))
     ok = bool(np.allclose(got, expected, atol=0.12))
     print(f"shape={s['name']} grouped_serial submits={s['batch'] * s['groups']} {'PASS' if ok else 'FAIL'} max_diff={max_diff:.4f}")
+    if not ok:
+        raise AssertionError(f"output mismatch max_diff={max_diff:.4f}")
+
+def run_depthwise_shape(s):
+    if not _is_depthwise(s["in_c"], s["out_c"], s["groups"]):
+        raise ValueError("depthwise path requires in_c == out_c == groups")
+    rows = planner.descriptor_rows_for_shape(s)
+    # only setup/NONE rows are safe to submit one-tile-at-a-time; multi-row
+    # BY_Y/BY_K/BY_YK depthwise closures still need RKNN 108-row semantics
+    if len(rows) > 1 and rows[0]["split_method"] != "NONE":
+        if rows[0]["split_method"] in ("BY_Y", "BY_K", "BY_YK") and s["name"] not in DEPTHWISE_BODY_SHAPES:
+            raise ValueError(f"depthwise {rows[0]['split_method']} closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted")
+    methods = {row["split_method"] for row in rows}
+    families = {row["family"] for row in rows}
+    np.random.seed(42)
+    inp = np.random.uniform(-2, 2, (s["batch"], s["in_c"], s["in_h"], s["in_w"])).astype(np.float16)
+    wt = np.random.uniform(-2, 2, (s["out_c"], s["weight_in_c"], s["kh"], s["kw"])).astype(np.float16)
+    expected = compute_expected(inp, wt, s)
+    p = _conv_params(s)
+    got = np.zeros((s["batch"], s["out_c"], p["out_h"], p["out_w"]), dtype=np.float16)
+    fd = os.open("/dev/dri/card1", os.O_RDWR)
+    task_map, task_mem = mem_allocate(fd, 4096, RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
+    regcmd_map, regcmd_mem = mem_allocate(fd, 256 * 1024, RKNPU_MEM_NON_CACHEABLE)
+    input_map, input_mem = mem_allocate(fd, 4 * 1024 * 1024, RKNPU_MEM_NON_CACHEABLE)
+    weight_map, weight_mem = mem_allocate(fd, 4 * 1024 * 1024, RKNPU_MEM_NON_CACHEABLE)
+    output_map, output_mem = mem_allocate(fd, 4 * 1024 * 1024, RKNPU_MEM_NON_CACHEABLE)
+    try:
+        ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_map.size())
+        weight_flat = pack_weights(wt, s, p).view(np.uint16)
+        (ctypes.c_uint16 * len(weight_flat)).from_buffer(weight_map)[:] = weight_flat.tolist()
+        input_base = ctypes.addressof(ctypes.c_char.from_buffer(input_map))
+        weight_base = ctypes.addressof(ctypes.c_char.from_buffer(weight_map))
+        task_regs = []
+        if len(rows) == 1 and rows[0]["family"] == "setup" and rows[0]["split_method"] == "NONE":
+            input_flat = pack_input(inp[0], p).view(np.uint16)
+            (ctypes.c_uint16 * len(input_flat)).from_buffer(input_map)[:] = input_flat.tolist()
+            task_regs.append(make_regs(s, p, input_mem.dma_addr, weight_mem.dma_addr, output_mem.dma_addr, True))
+        elif methods == {"BY_Y"} and families == {"y_tile"}:
+            input_offset = 0
+            for row in rows:
+                tile_shape = dict(s, in_h=row["input_h"])
+                tile_p = _conv_params(tile_shape)
+                tile_flat = pack_input(inp[0, :, row["y_start"]:row["y_start"] + row["input_h"], :], tile_p).view(np.uint16)
+                ctypes.memmove(input_base + input_offset, tile_flat.ctypes.data, tile_flat.nbytes)
+                local_row = {"y_start": row["y_start"], "input_h": row["input_h"], "weight_reuse": bool(task_regs)}
+                task_regs.append(make_depthwise_y_tile_regs(s, p, local_row, input_mem.dma_addr, weight_mem.dma_addr, output_mem.dma_addr, input_offset))
+                input_offset = _align_up(input_offset + tile_flat.nbytes, 16)
+        elif methods == {"BY_K"} and families == {"k_tile"}:
+            for row in rows:
+                tile_shape = dict(s, out_c=row["oc_count"])
+                tile_p = _conv_params(tile_shape)
+                tile_wt = np.zeros((row["oc_count"], s["weight_in_c"], s["kh"], s["kw"]), dtype=np.float16)
+                tile_wt[:min(s["out_c"], row["oc_count"])] = wt[:min(s["out_c"], row["oc_count"])]
+                weight_flat = pack_weights(tile_wt, tile_shape, tile_p).view(np.uint16)
+                (ctypes.c_uint16 * len(weight_flat)).from_buffer(weight_map)[:] = weight_flat.tolist()
+                input_flat = pack_input(inp[0], p).view(np.uint16)
+                (ctypes.c_uint16 * len(input_flat)).from_buffer(input_map)[:] = input_flat.tolist()
+                task_regs.append(make_depthwise_k_tile_regs(s, p, row, input_mem.dma_addr, weight_mem.dma_addr, output_mem.dma_addr))
+        else:
+            raise ValueError(f"unsupported depthwise layout: methods={methods} families={families} rows={len(rows)}")
+        write_tasks(task_map, regcmd_map, regcmd_mem, task_regs)
+        if npu_submit(fd, task_mem.obj_addr, len(task_regs)) < 0:
+            raise RuntimeError("npu_submit failed")
+        out_count = _ceil_div(p["align_out_c"], UNPACK_C2) * p["out_width_stride"] * UNPACK_C2
+        out_raw = np.frombuffer(output_map, dtype=np.float16, count=out_count).copy()
+        got[0] = unpack_output(out_raw, s["out_c"], p["out_h"], p["out_w"], p["out_width_stride"], UNPACK_C2)
+        post_submit_reset(fd)
+    finally:
+        close_allocations(fd, ((task_map, task_mem), (regcmd_map, regcmd_mem),
+                               (input_map, input_mem), (weight_map, weight_mem), (output_map, output_mem)))
+        os.close(fd)
+    max_diff = float(np.max(np.abs(got.astype(np.float64) - expected)))
+    ok = bool(np.allclose(got, expected, atol=0.12))
+    print(f"shape={s['name']} depthwise split={rows[0]['split_method']} families={sorted(families)} tasks={len(task_regs)} {'PASS' if ok else 'FAIL'} max_diff={max_diff:.4f}")
     if not ok:
         raise AssertionError(f"output mismatch max_diff={max_diff:.4f}")
 
@@ -1345,6 +1613,9 @@ def _tile_replay_specs(s):
     if s["name"] == "b1_c3_h320_w320_oc32_wic3_k3x3_g1_s1_pvalid":
         rows = planner.descriptor_rows_for_shape(s)
         return [(row["y_start"], row["input_h"], row["output_h"], 0, s["out_c"]) for row in rows]
+    if s["name"] == "b1_c8_h160_w160_oc16_wic8_k3x3_g1_s1_pvalid":
+        rows = planner.descriptor_rows_for_shape(s)
+        return [(row["y_start"], row["input_h"], row["output_h"], 0, s["out_c"]) for row in rows]
     if s["name"] in {"conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1",
                      "b1_c3_h224_w224_oc32_wic3_k3x3_g1"}:
         return [(0, 50, 48, 0, s["out_c"]), (48, 50, 48, 0, s["out_c"]),
@@ -1354,6 +1625,7 @@ def _tile_replay_specs(s):
 
 def allow_local_tile_replay(s):
     return s["name"] in LOCAL_TILE_REPLAY_SHAPES
+
 
 def run_local_tile_replay_shape(s):
     if not allow_local_tile_replay(s):
@@ -1406,6 +1678,7 @@ def run_local_tile_replay_shape(s):
     print(f"shape={s['name']} local_tile_replay tiles={len(specs)} hw_out=fp16 {'PASS' if ok else 'FAIL'} max_diff={max_diff:.4f}")
     if not ok:
         raise AssertionError(f"output mismatch max_diff={max_diff:.4f}")
+
 
 def run_shape(s):
     rows = validate_phase_a_shape(s)
@@ -1526,6 +1799,12 @@ def main(argv=None):
             run_h160_setup3_shape(s)
         elif s["name"] in GROUPED_SERIAL_SHAPES:
             run_grouped_serial_shape(s)
+        elif s["groups"] > 1 and _is_depthwise(s["in_c"], s["out_c"], s["groups"]):
+            rows_dw = planner.descriptor_rows_for_shape(s)
+            if len(rows_dw) > 1:
+                run_depthwise_shape(s)
+            else:
+                run_grouped_serial_shape(s)
         elif s["groups"] > 1:
             raise ValueError("grouped/depthwise native and serial paths are fenced after post-health timeout; no submit attempted")
         elif s["name"] in POINTWISE_CHAINED_Y_SHAPES:

@@ -36,7 +36,7 @@ class Capture:
         except gdb.MemoryError:
             task_number, task_obj_addr = 0, 0
         print(f"submit #{cls.dumps}: task_number={task_number} task_obj_addr=0x{task_obj_addr:x}")
-        gdb.execute("shell python3 /tmp/dump_rknpu_task_gems.py 1 2 3 4 5 6", to_string=False)
+        gdb.execute("shell python3 /home/orangepi/rk3588/experimental/rknn/dump_rknpu_task_gems.py --qword-window 2:923648:1504 1 2 3 4 5 6", to_string=False)
 
 end
 

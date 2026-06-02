@@ -20,6 +20,7 @@ TASK_FIELDS = (
     "regcfg_offset",
     "regcmd_addr",
 )
+QWORD_STRUCT = struct.Struct("<Q")
 
 
 class drm_gem_open(ctypes.Structure):
@@ -53,7 +54,17 @@ def decode_tasks(buf):
     return rows
 
 
-def dump_gem(fd, flink):
+def parse_qword_window(spec):
+    fields = spec.split(":")
+    if len(fields) != 3:
+        raise argparse.ArgumentTypeError("qword window must be GEM:OFFSET:COUNT")
+    try:
+        return tuple(int(field, 0) for field in fields)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def dump_gem(fd, flink, qword_windows):
     gem = drm_gem_open(name=flink)
     fcntl.ioctl(fd, DRM_IOCTL_GEM_OPEN, gem)
     mapper = rknpu_mem_map(handle=gem.handle)
@@ -74,18 +85,31 @@ def dump_gem(fd, flink):
             f"int_status=0x{row['int_status']:08x} regcfg_amount={row['regcfg_amount']} "
             f"regcfg_offset={row['regcfg_offset']} regcmd_addr=0x{row['regcmd_addr']:016x}"
         )
+    for window_gem, offset, count in qword_windows:
+        if window_gem != flink:
+            continue
+        end = offset + count * QWORD_STRUCT.size
+        if end > len(data):
+            print(f"  QWORD_WINDOW off=0x{offset:x} count={count} unavailable size={len(data)}")
+            continue
+        print(f"  QWORD_WINDOW off=0x{offset:x} count={count}")
+        for idx in range(count):
+            qword_off = offset + idx * QWORD_STRUCT.size
+            value = QWORD_STRUCT.unpack_from(data, qword_off)[0]
+            print(f"  regcmd_qword[{idx}] off=0x{qword_off:x} value=0x{value:016x}")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("gems", nargs="*", type=int, default=[1, 2])
     parser.add_argument("--device", default="/dev/dri/card1")
+    parser.add_argument("--qword-window", action="append", type=parse_qword_window, default=[])
     args = parser.parse_args()
     fd = os.open(args.device, os.O_RDWR)
     try:
         for flink in args.gems:
             try:
-                dump_gem(fd, flink)
+                dump_gem(fd, flink, args.qword_window)
             except OSError as exc:
                 print(f"GEM {flink}: unavailable: {exc}")
     finally:

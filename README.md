@@ -12,7 +12,9 @@
 - therefore, i am working on [nvdla vp](https://github.com/allbilly/nvdla) now to check ONNC and NVDLA KMD on their tiling strageries on "difficult shapes" that clean code like examples/conv.py could not pass
 - shape_stratgery.md: grouped each of the 217 test conv shapes in conv_new.py on which strategey they used
 - WIP conv_expt/conv_tile_cpu.py conv_plan.md conv_tile_result.md
-- are we on good progress use simple strategey to achieve clean conv.py with < 1000 lines? review and update conv_expt/conv_plan.md 
+- used prefix replay conv_expt/gdb/rknn_prefix_replay.gdb for RKNN and conv.py to pass diffcult shapes
+- but examples/conv.py has contains hex blob and a lot of special cases code again
+- are we on good progress use simple strategey to achieve clean conv.py with < 1000 lines? can we make examples/conv.py more generic and remove special cases? completely rewrite conv_expt/conv_plan.md 
 
 # RK3588 
 

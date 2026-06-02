@@ -1,20 +1,12 @@
-import errno, os, sys, mmap, ctypes, numpy as np
+import os, sys, mmap, ctypes, numpy as np
 from dataclasses import dataclass
 from fcntl import ioctl
 
 RKNPU_MEM_KERNEL_MAPPING = 8
 RKNPU_MEM_NON_CACHEABLE = 0
-RKNPU_MEM_NON_CONTIGUOUS = 1 << 0
-RKNPU_MEM_CACHEABLE = 1 << 1
-RKNPU_MEM_IOMMU_LIMIT_IOVA_ALIGNMENT = 1 << 10
 RKNPU_MEM_SYNC_TO_DEVICE = 1 << 0
 RKNPU_MEM_SYNC_FROM_DEVICE = 1 << 1
-RKNPU_GET_HW_VERSION = 0
-RKNPU_GET_DRV_VERSION = 1
 RKNPU_ACT_RESET = 6
-RKNPU_GET_IOMMU_EN = 18
-RKNPU_SET_PROC_NICE = 19
-RKNPU_POWER_ON = 20
 RKNPU_JOB_PC = 1 << 0
 RKNPU_JOB_BLOCK = 0 << 1
 RKNPU_JOB_NONBLOCK = 1 << 1
@@ -30,180 +22,25 @@ CBUF_BANK_SIZE = CBUF_ENTRIES_PER_BANK * CBUF_ENTRY_BYTES
 RK_MAX_CONV_FLAT_STRIDE = 992
 PC_CHAIN_TAIL_QWORDS = 4
 DPU_CLEAR_REGS = tuple(range(0x4100, 0x4130, 4))
-DIRECT_SPATIAL_ENV = "RK3588_CONV_DIRECT_SPATIAL"
-DIRECT_SPATIAL_UNSAFE_ENV = "RK3588_CONV_DIRECT_SPATIAL_UNSAFE"
-DIRECT_SPATIAL_TASKS_ENV = "RK3588_CONV_DIRECT_SPATIAL_TASKS"
-C64_H56_SPARSE_UNSAFE_ENV = "RK3588_CONV_C64_H56_SPARSE_UNSAFE"
 NO_DEVICE_ENV = "RK3588_CONV_NO_DEVICE"
-RKNN_MEM_SYNC_ENV = "RK3588_CONV_RKNN_MEM_SYNC"
-RKNN_SKIP_RESET_ENV = "RK3588_CONV_RKNN_SKIP_RESET"
-RKNN_INIT_ACTIONS_ENV = "RK3588_CONV_RKNN_INIT_ACTIONS"
-RKNN_TASK_BYTES = 680
-RKNN_REGCMD_BYTES = 936384
-RKNN_REGCMD_ACTIVE_OFFSET = 923648
-RKNN_REGCMD_ACTIVE_BYTES = 12032
-RKNN_C64_H56_TASK_BYTES = 560
-RKNN_C64_H56_REGCMD_BYTES = 28352
-RKNN_C64_H56_REGCMD_ACTIVE_BYTES = 9344
-RKNN_WEIGHT_BYTES = 1436160
-RKNN_INPUT_BYTES = 512000
-RKNN_OUTPUT_BYTES = 924160
-RKNN_C64_H56_WEIGHT_BYTES = 1204224
-RKNN_C64_H56_INPUT_BYTES = 401408
-RKNN_C64_H56_OUTPUT_BYTES = 802816
 TASK_POLICY_REG_LISTS = "reg_lists"
-TASK_POLICY_RAW_SPANS = "raw_spans"
-DIRECT_SPATIAL_POLICY_SINGLE_STREAM = "single_stream"
-DIRECT_SPATIAL_POLICY_SPARSE_SINGLE = "sparse_single"
-DIRECT_SPATIAL_POLICY_ROCKET_RECORD_AMOUNTS = "rocket_record_amounts"
-DIRECT_SPATIAL_POLICY_RKNPU_SPARSE_TASK_GEM = "rknpu_sparse_task_gem"
-# Rejected/crashy: this mirrors the allbilly/rknpu_driver 3-core tail indexing
-# hypothesis, but it rebooted/crashed the local RK3588 board on the target conv.
-DIRECT_SPATIAL_POLICY_RKNPU_SPARSE_TASK_GEM_TAIL = "rknpu_sparse_task_gem_tail"
-TASK_POLICY_RKNPU_SPARSE_TASK_GEM = "rknpu_sparse_task_gem"
 BUFFER_SCOPE_TILE = "tile"
 BUFFER_SCOPE_FULL = "full"
 UNPACK_KIND_NC1HWC2 = "nc1hwc2"
 UNPACK_KIND_FLAT_1X1 = "flat_1x1"
 UNPACK_KIND_DIRECT_SPATIAL = "direct_spatial"
 FAMILY_DIRECT_SPATIAL = "direct_spatial"
-FAMILY_DIRECT_SPATIAL_GATED = "direct_spatial_gated"
 FAMILY_GROUPED_SERIAL = "grouped_serial"
 FAMILY_SPATIAL_IM2COL_FALLBACK = "spatial_im2col_fallback"
 FAMILY_SPATIAL_OC_SERIAL = "spatial_oc_serial"
 FAMILY_DEPTHWISE_SPATIAL_TILED = "depthwise_spatial_tiled"
 FAMILY_POINTWISE_OC = "pointwise_oc"
 FAMILY_GENERIC_YK = "generic_yk"
-DIRECT_SPATIAL_POLICY_PC_ROOT6 = "pc_root6"
-
 # The direct-spatial schedules below are RKNN-captured templates, not a general
 # tiling compiler. Register bodies still use decoded field math, but record
 # counts, PC links, core assignment, and some CBUF/grain fields are only promoted
 # after a live RKNN GEM window proves byte-level equality.
-DIRECT_SPATIAL_PC_ROOT6_RECORD_AMOUNTS = (
-    108, 108, 104, 104, 26, 104, 104, 26, 104, 104, 26, 104, 104, 26, 104, 104, 26,
-)
-DIRECT_SPATIAL_PC_ROOT6_LINK_RECORDS = (1, None, 3, 4, 6, 7, 9, 10, 12, 13, 15, 16)
-DIRECT_SPATIAL_PC_ROOT6_RECORD_LINKS = (
-    1, None, 3, 4, None, 6, 7, None, 9, 10, None, 12, 13, None, 15, 16, None,
-)
-DIRECT_SPATIAL_PC_ROOT6_ROOT_RECORDS = (0, 2, 5, 8, 11, 14)
-DIRECT_SPATIAL_PC_ROOT6_STREAM_QWORDS = 1280
-DIRECT_SPATIAL_PC_ROOT6_H40_SCHEDULE = (
-    ("setup", 0, 23, 21, 0, 320),
-    ("setup", 21, 19, 17, 0, 320),
-    ("k_half", 0, 23, 21, 0, 160),
-    ("k_half", 21, 19, 17, 0, 160),
-    ("k_half", 0, 23, 21, 160, 160),
-    ("k_half", 21, 19, 17, 160, 160),
-    ("k_tile", 0, 23, 21, 0, 112),
-    ("k_tile", 21, 19, 17, 0, 112),
-    ("k_tile", 0, 23, 21, 112, 112),
-    ("k_tile", 21, 19, 17, 112, 112),
-    ("k_tile", 0, 23, 21, 224, 96),
-    ("k_tile", 21, 19, 17, 224, 96),
-)
-DIRECT_SPATIAL_SIXDESC_H7_RECORD_AMOUNTS = (
-    108, 104, 26, 104, 26, 104, 26, 104, 26, 104, 26,
-)
-DIRECT_SPATIAL_SIXDESC_RECORD_LINKS = (
-    None, 2, None, 4, None, 6, None, 8, None, 10, None,
-)
-DIRECT_SPATIAL_SIXDESC_H7_SCHEDULE = (
-    ("setup", 0, 7, 5, 0, 320),
-    ("k_half", 0, 7, 5, 0, 160),
-    ("k_half", 0, 7, 5, 160, 160),
-    ("k_tile", 0, 7, 5, 0, 112),
-    ("k_tile", 0, 7, 5, 112, 112),
-    ("k_tile", 0, 7, 5, 224, 96),
-)
-DIRECT_SPATIAL_SIXDESC_H14_SCHEDULE = (
-    ("setup", 0, 14, 12, 0, 320),
-    ("k_half", 0, 14, 12, 0, 160),
-    ("k_half", 0, 14, 12, 160, 160),
-    ("k_tile", 0, 14, 12, 0, 112),
-    ("k_tile", 0, 14, 12, 112, 112),
-    ("k_tile", 0, 14, 12, 224, 96),
-)
-DIRECT_SPATIAL_SIXDESC_C32_H14_SCHEDULE = (
-    ("setup", 0, 14, 12, 0, 128),
-    ("k_half", 0, 14, 12, 0, 64),
-    ("k_half", 0, 14, 12, 64, 64),
-    ("y_tile", 0, 6, 4, 0, 128),
-    ("y_tile", 4, 6, 4, 0, 128),
-    ("y_tile", 8, 6, 4, 0, 128),
-)
 DIRECT_SPATIAL_SIXDESC_C32_H14_PC_CORES = (0, 1, 1, 2, 2, 2)
-DIRECT_SPATIAL_SIXDESC_PW_C256_H14_SCHEDULE = (
-    ("setup", 0, 14, 14, 0, 512),
-    ("k_half", 0, 14, 14, 0, 256),
-    ("k_half", 0, 14, 14, 256, 256),
-    ("y_tile", 0, 5, 5, 0, 512),
-    ("y_tile", 5, 5, 5, 0, 512),
-    ("y_tile", 10, 4, 4, 0, 512),
-)
-DIRECT_SPATIAL_C64_H56_RECORD_AMOUNTS = (
-    108, 108, 104, 104, 26, 104, 104, 26, 104, 26, 104, 26, 104, 26,
-)
-DIRECT_SPATIAL_C64_H56_ACTIVE_OFFSET = 0x4800
-DIRECT_SPATIAL_C64_H56_RECORD_LINKS = (
-    1, None, 3, 4, None, 6, 7, None, 9, None, 11, None, 13, None,
-)
-DIRECT_SPATIAL_C64_H56_SCHEDULE = (
-    ("setup", 0, 50, 50, 0, 128),
-    ("setup", 50, 6, 6, 0, 128),
-    ("k_half", 0, 50, 50, 0, 64),
-    ("k_half", 50, 6, 6, 0, 64),
-    ("k_half", 0, 50, 50, 64, 64),
-    ("k_half", 50, 6, 6, 64, 64),
-    ("y_tile", 0, 19, 19, 0, 128),
-    ("y_tile", 19, 19, 19, 0, 128),
-    ("y_tile", 38, 18, 18, 0, 128),
-)
-DIRECT_SPATIAL_OUTC64_H20_POST = {
-    32: ("k_half_y_tile", None),
-    48: ("y_mid_k_tile", (16, 16, 16)),
-    64: ("k_half_y_tile", None),
-    96: ("k_half_k_tile", (32, 32, 32)),
-    112: ("y_mid_y_tile", None),
-    128: ("k_half_y_tile", None),
-    160: ("k_half_y_tile", None),
-    192: ("k_half_k_tile", (64, 64, 64)),
-    224: ("k_half_y_tile", None),
-    256: ("k_half_y_tile", None),
-    288: ("k_half_k_tile", (96, 96, 96)),
-    320: ("k_half_k_tile", (112, 112, 96)),
-    384: ("k_half_k_tile", (128, 128, 128)),
-    512: ("k_half_k_tile", (176, 176, 160)),
-}
-DIRECT_SPATIAL_CHAN320_H20_IN_CHANNELS = frozenset((32, 40, 64, 72, 96, 128, 192, 256))
-DIRECT_SPATIAL_MIX72_H20_K_TILE_COUNTS = (96, 96, 96)
-DIRECT_SPATIAL_CMP32_H14_Y_WINDOWS = ((0, 6, 4), (4, 6, 4), (8, 6, 4))
-DIRECT_SPATIAL_POINTWISE_SIMPLE_Y_WINDOWS = {
-    14: ((0, 5), (5, 5), (10, 4)),
-    20: ((0, 7), (7, 7), (14, 6)),
-    28: ((0, 10), (10, 9), (19, 9)),
-    40: ((0, 14), (14, 13), (27, 13)),
-    56: ((0, 19), (19, 19), (38, 18)),
-}
-DIRECT_SPATIAL_POINTWISE_CROSSED = {
-    (256, 28, 512): {
-        "setup": ((0, 9), (9, 9)),
-        "k_half": ((0, 9), (9, 9), (18, 9), (27, 1)),
-        "y_tile": ((0, 5), (15, 5), (5, 5), (20, 4), (10, 5), (24, 4)),
-    },
-    (528, 20, 32): {
-        "setup": ((0, 15), (15, 5)),
-        "k_half": ((0, 15), (15, 5)),
-        "y_tile": ((0, 7), (7, 7), (14, 6)),
-    },
-    (528, 40, 32): {
-        "setup": ((0, 7), (7, 7)),
-        "k_half": ((0, 7), (7, 7), (14, 7), (21, 7), (28, 7), (35, 5)),
-        "y_tile": ((0, 7), (21, 7), (7, 7), (28, 6), (14, 7), (34, 6)),
-    },
-}
-
 class TileDesc:
     __slots__ = (
         "family", "family_bits", "grain_bits",
@@ -433,33 +270,7 @@ DRM_IOCTL_RKNPU_MEM_SYNC = _IOWR('d', 0x45, ctypes.sizeof(rknpu_mem_sync))
 DRM_IOCTL_RKNPU_SUBMIT = _IOWR('d', 0x41, ctypes.sizeof(rknpu_submit))
 DRM_IOCTL_RKNPU_ACTION = _IOWR('d', 0x40, ctypes.sizeof(rknpu_action))
 NO_DEVICE = os.environ.get(NO_DEVICE_ENV) == "1"
-RKNN_MEM_SYNC = os.environ.get(RKNN_MEM_SYNC_ENV) == "1"
-RKNN_SKIP_RESET = os.environ.get(RKNN_SKIP_RESET_ENV) == "1"
-RKNN_INIT_ACTIONS = os.environ.get(RKNN_INIT_ACTIONS_ENV) == "1"
-_rknn_active_regcmd_offset = RKNN_REGCMD_ACTIVE_OFFSET
-_rknn_active_regcmd_bytes = RKNN_REGCMD_ACTIVE_BYTES
-_rknn_c64_h56_sync_mode = False
 _offline_dma_cursor = 0xff000000
-
-def _initial_rknn_runtime_profile():
-    argv_text = " ".join(sys.argv[1:])
-    if "b1_c64_h56_w56_oc128_wic64_k1x1_g1" in argv_text:
-        return {
-            "task": RKNN_C64_H56_TASK_BYTES,
-            "regcmd": RKNN_C64_H56_REGCMD_BYTES,
-            "weight": RKNN_C64_H56_WEIGHT_BYTES,
-            "input": RKNN_C64_H56_INPUT_BYTES,
-            "output": RKNN_C64_H56_OUTPUT_BYTES,
-        }
-    return {
-        "task": RKNN_TASK_BYTES,
-        "regcmd": RKNN_REGCMD_BYTES,
-        "weight": RKNN_WEIGHT_BYTES,
-        "input": RKNN_INPUT_BYTES,
-        "output": RKNN_OUTPUT_BYTES,
-    }
-
-RKNN_RUNTIME_PROFILE = _initial_rknn_runtime_profile()
 
 def _offline_mem_create(size, flags=0):
     global _offline_dma_cursor
@@ -489,14 +300,6 @@ def npu_action(flags, value=0):
         return 0
     return ioctl(fd, DRM_IOCTL_RKNPU_ACTION, rknpu_action(flags=flags, value=value))
 
-def rknn_init_action(flags, value=0):
-    try:
-        return npu_action(flags, value)
-    except OSError as exc:
-        if exc.errno == errno.EINVAL:
-            return -errno.EINVAL
-        raise
-
 def mem_sync(mem_create, flags, size=None, offset=0):
     if NO_DEVICE:
         return 0
@@ -509,17 +312,6 @@ def mem_sync(mem_create, flags, size=None, offset=0):
     )
     return ioctl(fd, DRM_IOCTL_RKNPU_MEM_SYNC, sync)
 
-def set_rknn_active_regcmd_window(descs):
-    global _rknn_active_regcmd_offset, _rknn_active_regcmd_bytes, _rknn_c64_h56_sync_mode
-    if direct_spatial_c64_h56_supported(descs):
-        _rknn_active_regcmd_offset = DIRECT_SPATIAL_C64_H56_ACTIVE_OFFSET
-        _rknn_active_regcmd_bytes = RKNN_C64_H56_REGCMD_ACTIVE_BYTES
-        _rknn_c64_h56_sync_mode = True
-    else:
-        _rknn_active_regcmd_offset = RKNN_REGCMD_ACTIVE_OFFSET
-        _rknn_active_regcmd_bytes = RKNN_REGCMD_ACTIVE_BYTES
-        _rknn_c64_h56_sync_mode = False
-
 def npu_reset(fd):
     if NO_DEVICE:
         return 0
@@ -528,21 +320,7 @@ def npu_reset(fd):
 def npu_submit(task_count=1, flags=RKNPU_JOB_PC, task_start=0, core_mask=1, subcore_tasks=None):
     if NO_DEVICE:
         raise RuntimeError(f"{NO_DEVICE_ENV}=1 disables NPU submit")
-    if not RKNN_SKIP_RESET:
-        npu_reset(fd)
-    if RKNN_MEM_SYNC:
-        mem_sync(tasks_mem_create, RKNPU_MEM_SYNC_TO_DEVICE | RKNPU_MEM_SYNC_FROM_DEVICE)
-        mem_sync(regcmd_mem_create, RKNPU_MEM_SYNC_TO_DEVICE | RKNPU_MEM_SYNC_FROM_DEVICE)
-        mem_sync(regcmd_mem_create, RKNPU_MEM_SYNC_TO_DEVICE)
-        mem_sync(tasks_mem_create, RKNPU_MEM_SYNC_TO_DEVICE)
-        mem_sync(weight_mem_create, RKNPU_MEM_SYNC_TO_DEVICE | RKNPU_MEM_SYNC_FROM_DEVICE)
-        mem_sync(input_mem_create, RKNPU_MEM_SYNC_TO_DEVICE | RKNPU_MEM_SYNC_FROM_DEVICE)
-        mem_sync(output_mem_create, RKNPU_MEM_SYNC_TO_DEVICE | RKNPU_MEM_SYNC_FROM_DEVICE)
-        mem_sync(regcmd_mem_create, RKNPU_MEM_SYNC_TO_DEVICE, size=_rknn_active_regcmd_bytes, offset=_rknn_active_regcmd_offset)
-        mem_sync(input_mem_create, RKNPU_MEM_SYNC_TO_DEVICE)
-        if _rknn_c64_h56_sync_mode:
-            mem_sync(input_mem_create, RKNPU_MEM_SYNC_FROM_DEVICE)
-        mem_sync(regcmd_mem_create, RKNPU_MEM_SYNC_TO_DEVICE, size=_rknn_active_regcmd_bytes, offset=_rknn_active_regcmd_offset)
+    npu_reset(fd)
     submit_struct = rknpu_submit(
         flags=flags, timeout=6000, task_start=task_start, task_number=task_count,
         task_counter=0, priority=0, task_obj_addr=tasks_mem_create.obj_addr,
@@ -558,43 +336,16 @@ def npu_submit(task_count=1, flags=RKNPU_JOB_PC, task_start=0, core_mask=1, subc
     for idx, (subcore_start, subcore_count) in enumerate(subcore_tasks):
         submit_struct.subcore_task[idx] = rknpu_subcore_task(task_start=subcore_start, task_number=subcore_count)
     ret = ioctl(fd, DRM_IOCTL_RKNPU_SUBMIT, submit_struct)
-    if RKNN_MEM_SYNC:
-        for _ in range(4 if _rknn_c64_h56_sync_mode else 2):
-            mem_sync(output_mem_create, RKNPU_MEM_SYNC_FROM_DEVICE)
     if ret < 0:
         print(f"npu_submit failed: ret={ret}")
     return ret
 
 fd = -1 if NO_DEVICE else os.open("/dev/dri/card1", os.O_RDWR)
-if RKNN_MEM_SYNC:
-    rknn_mem_flags = RKNPU_MEM_NON_CONTIGUOUS | RKNPU_MEM_CACHEABLE | RKNPU_MEM_IOMMU_LIMIT_IOVA_ALIGNMENT
-    if RKNN_INIT_ACTIONS:
-        rknn_init_action(RKNPU_GET_HW_VERSION, 0xffffffff)
-        rknn_init_action(RKNPU_GET_DRV_VERSION, 0)
-        rknn_init_action(RKNPU_POWER_ON, 0)
-        rknn_init_action(RKNPU_SET_PROC_NICE, 0xffffffed)
-        rknn_init_action(RKNPU_GET_DRV_VERSION, 0)
-        rknn_init_action(RKNPU_GET_IOMMU_EN, 0)
-    task_map, tasks_mem_create = mem_allocate(fd, RKNN_RUNTIME_PROFILE["task"], rknn_mem_flags | RKNPU_MEM_KERNEL_MAPPING)
-    if RKNN_INIT_ACTIONS:
-        rknn_init_action(RKNPU_GET_IOMMU_EN, 0)
-    regcmd_map, regcmd_mem_create = mem_allocate(fd, RKNN_RUNTIME_PROFILE["regcmd"], rknn_mem_flags)
-    if RKNN_INIT_ACTIONS:
-        rknn_init_action(RKNPU_GET_DRV_VERSION, 0)
-        rknn_init_action(RKNPU_GET_IOMMU_EN, 0)
-    weight_map, weight_mem_create = mem_allocate(fd, RKNN_RUNTIME_PROFILE["weight"], rknn_mem_flags)
-    if RKNN_INIT_ACTIONS:
-        rknn_init_action(RKNPU_GET_IOMMU_EN, 0)
-    input_map, input_mem_create = mem_allocate(fd, RKNN_RUNTIME_PROFILE["input"], rknn_mem_flags)
-    if RKNN_INIT_ACTIONS:
-        rknn_init_action(RKNPU_GET_IOMMU_EN, 0)
-    output_map, output_mem_create = mem_allocate(fd, RKNN_RUNTIME_PROFILE["output"], rknn_mem_flags)
-else:
-    task_map, tasks_mem_create = mem_allocate(fd, 64*1024, RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
-    regcmd_map, regcmd_mem_create = mem_allocate(fd, 512*1024, RKNPU_MEM_NON_CACHEABLE)
-    input_map, input_mem_create = mem_allocate(fd, 4*1024*1024, RKNPU_MEM_NON_CACHEABLE)
-    weight_map, weight_mem_create = mem_allocate(fd, 4*1024*1024, RKNPU_MEM_NON_CACHEABLE)
-    output_map, output_mem_create = mem_allocate(fd, 4*1024*1024, RKNPU_MEM_NON_CACHEABLE)
+task_map, tasks_mem_create = mem_allocate(fd, 64*1024, RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
+regcmd_map, regcmd_mem_create = mem_allocate(fd, 512*1024, RKNPU_MEM_NON_CACHEABLE)
+input_map, input_mem_create = mem_allocate(fd, 4*1024*1024, RKNPU_MEM_NON_CACHEABLE)
+weight_map, weight_mem_create = mem_allocate(fd, 4*1024*1024, RKNPU_MEM_NON_CACHEABLE)
+output_map, output_mem_create = mem_allocate(fd, 4*1024*1024, RKNPU_MEM_NON_CACHEABLE)
 npu_tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
 npu_regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
 
@@ -1104,12 +855,7 @@ def _execute_conv_desc(d):
     _load_desc_buffers(d)
     if d.get("clear_output", True):
         _clear_output()
-    if d.get("task_policy") == TASK_POLICY_RAW_SPANS:
-        _submit_raw_task_spans(d["regs"])
-    elif d.get("task_policy") == TASK_POLICY_RKNPU_SPARSE_TASK_GEM:
-        _submit_direct_spatial_rknpu_sparse_task_gem(d["regs"])
-    else:
-        _submit_task_regs(d["regs"])
+    _submit_task_regs(d["regs"])
     _unpack_tile_result(d)
 
 def _store_tile_output(u, out):
@@ -1275,6 +1021,234 @@ def _rknn_spatial_pc_core(family):
         return 2
     return 0
 
+def _formula_direct_spatial_y_windows(in_c, out_c, kh, kw, in_h, in_w, groups, stride):
+    p, _split, y_boundary, _k_boundary, _reason, _ys, _ks = plan_conv_tiles(
+        in_c, out_c, kh, kw, in_h, in_w, groups, stride)
+    windows = []
+    for y0, y1 in zip(y_boundary, y_boundary[1:]):
+        output_h = y1 - y0
+        input_h = in_h - y0 * stride if y1 == p["out_h"] else (output_h - 1) * stride + kh
+        windows.append((y0, input_h, output_h))
+    return windows
+
+def _formula_direct_spatial_k_half_windows(out_c):
+    half = _align_up(out_c // 2, 16)
+    return [(0, half), (half, out_c - half)]
+
+def _formula_direct_spatial_k_tile_windows(p, in_c, out_c, kh, kw):
+    if kh == 1 and kw == 1:
+        step = _pointwise_oc_tile_c(in_c)
+    else:
+        data_in = _align_up(in_c, p["align_c"])
+        bytes_per_oc = kh * kw * data_in * FP16_BYTES
+        # RKNN's spatial K tiles use almost the full CBUF for reusable weights
+        # and keep only minimal streaming space for feature data.
+        step = max(16, (10 * CBUF_BANK_SIZE) // bytes_per_oc)
+        step = max(16, (step // 16) * 16)
+    windows = []
+    start = 0
+    while start < out_c:
+        count = min(step, out_c - start)
+        windows.append((start, count))
+        start += count
+    return windows
+
+def _formula_three_balanced_oc_windows(out_c):
+    first = _align_up(_ceil_div(out_c, 3), 16)
+    second = _align_up(_ceil_div(out_c - first, 2), 16)
+    return ((0, first), (first, second), (first + second, out_c - first - second))
+
+def _formula_direct_spatial_y_tile_windows(in_c, out_c, kh, kw, in_h, in_w, groups, stride,
+                                           desired_tiles=None):
+    out_h, _out_w = conv_output_hw(in_h, in_w, kh, kw, stride)
+    if desired_tiles is None:
+        row_bytes = in_w * _align_up(in_c, 32) * FP16_BYTES
+        rows_fit = max(1, (7 * CBUF_BANK_SIZE) // max(1, row_bytes))
+        tile_h = max(1, min(out_h, rows_fit))
+    else:
+        tile_h = _ceil_div(out_h, desired_tiles)
+    windows = []
+    start = 0
+    while start < out_h:
+        output_h = min(tile_h, out_h - start)
+        input_h = output_h if kh == 1 and kw == 1 else (output_h - 1) * stride + kh
+        windows.append((start, input_h, output_h))
+        start += output_h
+    return windows
+
+def _formula_three_balanced_y_windows(in_h, in_w, kh, kw, stride):
+    out_h, _out_w = conv_output_hw(in_h, in_w, kh, kw, stride)
+    first = _ceil_div(out_h, 3)
+    second = _ceil_div(out_h - first, 2)
+    windows = []
+    start = 0
+    for output_h in (first, second, out_h - first - second):
+        input_h = output_h if kh == 1 and kw == 1 else (output_h - 1) * stride + kh
+        windows.append((start, input_h, output_h))
+        start += output_h
+    return windows
+
+def _formula_two_overlap_y_mid_windows(in_h, in_w, kh, kw, stride):
+    out_h, _out_w = conv_output_hw(in_h, in_w, kh, kw, stride)
+    output_h = _ceil_div(out_h, 2)
+    windows = []
+    for output_y in (0, out_h - output_h):
+        input_h = output_h if kh == 1 and kw == 1 else (output_h - 1) * stride + kh
+        windows.append((output_y, input_h, output_h))
+    return windows
+
+def _formula_floor_third_plus_tail_windows(in_h, in_w, kh, kw, stride):
+    out_h, _out_w = conv_output_hw(in_h, in_w, kh, kw, stride)
+    step = max(1, out_h // 3)
+    windows = []
+    start = 0
+    while start < out_h:
+        output_h = min(step, out_h - start)
+        input_h = output_h if kh == 1 and kw == 1 else (output_h - 1) * stride + kh
+        windows.append((start, input_h, output_h))
+        start += output_h
+    return windows
+
+def _formula_two_column_interleave_y_windows(in_h, in_w, kh, kw, stride):
+    out_h, _out_w = conv_output_hw(in_h, in_w, kh, kw, stride)
+    quantum = _ceil_div(out_h, 6)
+    split = 3 * quantum
+    right_rows = out_h - split
+    right_first = _ceil_div(right_rows, 3) if right_rows > 0 else 0
+    right_second = _ceil_div(right_rows - right_first, 2) if right_rows > right_first else 0
+    right_lengths = (right_first, right_second, right_rows - right_first - right_second)
+    windows = []
+    right_start = split
+    for idx, base in enumerate(range(0, split, quantum)):
+        left = (base, quantum)
+        right_len = right_lengths[idx] if idx < len(right_lengths) else 0
+        for start, output_h in (left, (right_start, right_len)):
+            if start >= out_h or output_h <= 0:
+                continue
+            input_h = output_h if kh == 1 and kw == 1 else (output_h - 1) * stride + kh
+            windows.append((start, input_h, output_h))
+            if start == right_start:
+                right_start += output_h
+    return windows
+
+def formula_direct_spatial_schedule(in_c, out_c, kh, kw, in_h, in_w, groups=1, stride=1):
+    """Return RKNN-derived direct-spatial schedule rows from formulas.
+
+    Rows are `(family, input_y, input_h, output_h, oc_start, oc_count)`.
+    This is the staging interface for replacing captured schedule tables in the
+    clean `conv_tiles.py` path; unsupported shapes stay on the observed-template
+    path until their formulas are proved offline.
+    """
+    if not (groups == 1 and stride == 1 and in_h == in_w):
+        return None
+    p = _conv_params(in_c, in_h, in_w, out_c, kh, kw, groups, stride)
+    rows = []
+
+    if kh == 3 and kw == 3 and in_c == 160 and out_c == 320:
+        y_windows = _formula_direct_spatial_y_windows(in_c, out_c, kh, kw, in_h, in_w, groups, stride)
+        for family, k_windows in (
+            ("setup", [(0, out_c)]),
+            ("k_half", _formula_direct_spatial_k_half_windows(out_c)),
+            ("k_tile", _formula_direct_spatial_k_tile_windows(p, in_c, out_c, kh, kw)),
+        ):
+            for oc_start, oc_count in k_windows:
+                for input_y, input_h, output_h in y_windows:
+                    rows.append((family, input_y, input_h, output_h, oc_start, oc_count))
+        return tuple(rows)
+
+    if kh == 3 and kw == 3 and in_c == 32 and out_c == 128 and in_h == 14:
+        rows.append(("setup", 0, in_h, p["out_h"], 0, out_c))
+        for oc_start, oc_count in _formula_direct_spatial_k_half_windows(out_c):
+            rows.append(("k_half", 0, in_h, p["out_h"], oc_start, oc_count))
+        for input_y, input_h, output_h in _formula_direct_spatial_y_tile_windows(
+                in_c, out_c, kh, kw, in_h, in_w, groups, stride, desired_tiles=3):
+            rows.append(("y_tile", input_y, input_h, output_h, 0, out_c))
+        return tuple(rows)
+
+    if kh == 3 and kw == 3 and out_c == 320 and in_h == 20:
+        rows.append(("setup", 0, in_h, p["out_h"], 0, out_c))
+        for oc_start, oc_count in _formula_direct_spatial_k_half_windows(out_c):
+            rows.append(("k_half", 0, in_h, p["out_h"], oc_start, oc_count))
+        if kh * kw * in_c <= 360:
+            for input_y, input_h, output_h in _formula_direct_spatial_y_tile_windows(
+                    in_c, out_c, kh, kw, in_h, in_w, groups, stride, desired_tiles=3):
+                rows.append(("y_tile", input_y, input_h, output_h, 0, out_c))
+        else:
+            for oc_start, oc_count in _formula_three_balanced_oc_windows(out_c):
+                rows.append(("k_tile", 0, in_h, p["out_h"], oc_start, oc_count))
+        return tuple(rows)
+
+    if kh == 3 and kw == 3 and out_c == 288 and in_h == 20 and in_c in {64, 72}:
+        rows.append(("setup", 0, in_h, p["out_h"], 0, out_c))
+        for oc_start, oc_count in _formula_direct_spatial_k_half_windows(out_c):
+            rows.append(("k_half", 0, in_h, p["out_h"], oc_start, oc_count))
+        for oc_start, oc_count in _formula_three_balanced_oc_windows(out_c):
+            rows.append(("k_tile", 0, in_h, p["out_h"], oc_start, oc_count))
+        return tuple(rows)
+
+    if kh == 3 and kw == 3 and in_c == 64 and in_h == 20:
+        rows.append(("setup", 0, in_h, p["out_h"], 0, out_c))
+        if out_c % 16 != 0:
+            return None
+        if out_c in {48, 112}:
+            for input_y, input_h, output_h in _formula_two_overlap_y_mid_windows(in_h, in_w, kh, kw, stride):
+                rows.append(("y_mid", input_y, input_h, output_h, 0, out_c))
+        else:
+            for oc_start, oc_count in _formula_direct_spatial_k_half_windows(out_c):
+                rows.append(("k_half", 0, in_h, p["out_h"], oc_start, oc_count))
+        if out_c in {32, 64, 112, 128, 160, 224, 256}:
+            for input_y, input_h, output_h in _formula_direct_spatial_y_tile_windows(
+                    in_c, out_c, kh, kw, in_h, in_w, groups, stride, desired_tiles=3):
+                rows.append(("y_tile", input_y, input_h, output_h, 0, out_c))
+        else:
+            for oc_start, oc_count in _formula_three_balanced_oc_windows(out_c):
+                rows.append(("k_tile", 0, in_h, p["out_h"], oc_start, oc_count))
+        return tuple(rows)
+
+    if kh == 1 and kw == 1 and in_c == 256 and out_c == 512 and in_h == 14:
+        rows.append(("setup", 0, in_h, p["out_h"], 0, out_c))
+        for oc_start, oc_count in _formula_direct_spatial_k_half_windows(out_c):
+            rows.append(("k_half", 0, in_h, p["out_h"], oc_start, oc_count))
+        for input_y, input_h, output_h in _formula_direct_spatial_y_tile_windows(
+                in_c, out_c, kh, kw, in_h, in_w, groups, stride, desired_tiles=3):
+            rows.append(("y_tile", input_y, input_h, output_h, 0, out_c))
+        return tuple(rows)
+
+    if kh == 1 and kw == 1 and in_c == 256 and out_c == 512 and in_h == 28:
+        setup_windows = _formula_floor_third_plus_tail_windows(in_h, in_w, kh, kw, stride)[:2]
+        for input_y, input_h, output_h in setup_windows:
+            rows.append(("setup", input_y, input_h, output_h, 0, out_c))
+        for oc_start, oc_count in _formula_direct_spatial_k_half_windows(out_c):
+            for input_y, input_h, output_h in _formula_floor_third_plus_tail_windows(in_h, in_w, kh, kw, stride):
+                rows.append(("k_half", input_y, input_h, output_h, oc_start, oc_count))
+        for input_y, input_h, output_h in _formula_two_column_interleave_y_windows(in_h, in_w, kh, kw, stride):
+            rows.append(("y_tile", input_y, input_h, output_h, 0, out_c))
+        return tuple(rows)
+
+    if kh == 1 and kw == 1 and ((in_c, out_c) == (40, 320) or (in_c, out_c) == (528, 32)):
+        rows.append(("setup", 0, in_h, p["out_h"], 0, out_c))
+        for oc_start, oc_count in _formula_direct_spatial_k_half_windows(out_c):
+            rows.append(("k_half", 0, in_h, p["out_h"], oc_start, oc_count))
+        for input_y, input_h, output_h in _formula_three_balanced_y_windows(in_h, in_w, kh, kw, stride):
+            rows.append(("y_tile", input_y, input_h, output_h, 0, out_c))
+        return tuple(rows)
+
+    if kh == 1 and kw == 1 and in_c == 64 and out_c == 128 and in_h == 56:
+        setup_rows = max(1, min(p["out_h"], (11 * CBUF_BANK_SIZE) // (in_w * in_c * FP16_BYTES)))
+        setup_windows = [(0, setup_rows, setup_rows), (setup_rows, p["out_h"] - setup_rows, p["out_h"] - setup_rows)]
+        for input_y, input_h, output_h in setup_windows:
+            rows.append(("setup", input_y, input_h, output_h, 0, out_c))
+        for oc_start, oc_count in _formula_direct_spatial_k_half_windows(out_c):
+            for input_y, input_h, output_h in setup_windows:
+                rows.append(("k_half", input_y, input_h, output_h, oc_start, oc_count))
+        y_tile_h = max(1, (17 * CBUF_BANK_SIZE) // (2 * in_w * out_c * FP16_BYTES))
+        for input_y in range(0, p["out_h"], y_tile_h):
+            output_h = min(y_tile_h, p["out_h"] - input_y)
+            rows.append(("y_tile", input_y, output_h, output_h, 0, out_c))
+        return tuple(rows)
+
+    return None
+
 def _make_observed_spatial_tile_desc(family, input_y, input_h, output_h, output_w,
                                      oc_start, oc_count, feature_off, weight_off, output_off,
                                      grain_bits=None, cbuf0=None, cbuf1=None):
@@ -1319,138 +1293,51 @@ def _append_observed_spatial_desc(descs, p, offsets, family, input_y, input_h, o
         cbuf0=cbuf0,
     ))
 
-def _append_outc64_h20_setup(descs, p, offsets, in_h, out_c):
-    _append_observed_spatial_desc(descs, p, offsets, "setup", 0, in_h, p["out_h"], 0, out_c)
-
-def _append_outc64_h20_k_half(descs, p, offsets, in_h, out_c):
-    half = _align_up(out_c // 2, 16)
-    for oc_start, oc_count in ((0, half), (half, out_c - half)):
-        _append_observed_spatial_desc(descs, p, offsets, "k_half", 0, in_h, p["out_h"], oc_start, oc_count)
-
-def _append_outc64_h20_y_mid(descs, p, offsets, out_c):
-    for input_y in (0, 9):
-        _append_observed_spatial_desc(descs, p, offsets, "y_mid", input_y, 11, 9, 0, out_c)
-
-def _append_outc64_h20_y_tile(descs, p, offsets, in_h, out_c):
-    for input_y, input_rows, output_rows in _rknn_spatial_full_y_tile_windows(in_h, p["out_h"]):
-        _append_observed_spatial_desc(descs, p, offsets, "y_tile", input_y, input_rows, output_rows, 0, out_c)
-
-def _append_outc64_h20_k_tile(descs, p, offsets, in_h, k_counts):
-    oc_start = 0
-    for oc_count in k_counts:
-        _append_observed_spatial_desc(descs, p, offsets, "k_tile", 0, in_h, p["out_h"], oc_start, oc_count)
-        oc_start += oc_count
-
-def _plan_outc64_h20_descs(p, in_c, out_c, kh, kw, in_h, in_w):
-    mode_k_counts = DIRECT_SPATIAL_OUTC64_H20_POST.get(out_c)
-    if not (in_c == 64 and in_h == 20 and mode_k_counts is not None):
-        return []
-    mode, k_counts = mode_k_counts
-    offsets = _observed_spatial_desc_offsets(p, in_c, kh, kw, in_w)
-    descs = []
-    _append_outc64_h20_setup(descs, p, offsets, in_h, out_c)
-    if mode.startswith("k_half"):
-        _append_outc64_h20_k_half(descs, p, offsets, in_h, out_c)
-    elif mode.startswith("y_mid"):
-        _append_outc64_h20_y_mid(descs, p, offsets, out_c)
-    if mode.endswith("y_tile"):
-        _append_outc64_h20_y_tile(descs, p, offsets, in_h, out_c)
-    elif mode.endswith("k_tile"):
-        _append_outc64_h20_k_tile(descs, p, offsets, in_h, k_counts)
-    return descs
-
-def _plan_chan320_h20_descs(p, in_c, out_c, kh, kw, in_h, in_w):
-    if not (out_c == 320 and in_h == 20 and in_c in DIRECT_SPATIAL_CHAN320_H20_IN_CHANNELS):
-        return []
-    offsets = _observed_spatial_desc_offsets(p, in_c, kh, kw, in_w)
-    descs = []
-    _append_outc64_h20_setup(descs, p, offsets, in_h, out_c)
-    _append_outc64_h20_k_half(descs, p, offsets, in_h, out_c)
-    if in_c in {32, 40}:
-        _append_outc64_h20_y_tile(descs, p, offsets, in_h, out_c)
-    else:
-        _append_outc64_h20_k_tile(descs, p, offsets, in_h, (112, 112, 96))
-    return descs
-
-def _plan_mix72_h20_descs(p, in_c, out_c, kh, kw, in_h, in_w):
-    if not (in_c == 72 and out_c == 288 and in_h == 20):
-        return []
-    offsets = _observed_spatial_desc_offsets(p, in_c, kh, kw, in_w)
-    descs = []
-    _append_outc64_h20_setup(descs, p, offsets, in_h, out_c)
-    _append_outc64_h20_k_half(descs, p, offsets, in_h, out_c)
-    _append_outc64_h20_k_tile(descs, p, offsets, in_h, DIRECT_SPATIAL_MIX72_H20_K_TILE_COUNTS)
-    return descs
-
-def _plan_cmp32_h14_descs(p, in_c, out_c, kh, kw, in_h, in_w):
-    if not (in_c == 32 and out_c == 128 and in_h == 14):
-        return []
-    offsets = _observed_spatial_desc_offsets(p, in_c, kh, kw, in_w)
-    descs = []
-    _append_observed_spatial_desc(descs, p, offsets, "setup", 0, in_h, p["out_h"], 0, out_c,
-                                  grain_bits=0x110, cbuf0=0xb1)
-    _append_outc64_h20_k_half(descs, p, offsets, in_h, out_c)
-    for desc in descs[1:]:
-        desc.grain_bits = 0x110
-        desc.cbuf0 = 0xb1
-    for input_y, input_h, output_h in DIRECT_SPATIAL_CMP32_H14_Y_WINDOWS:
-        _append_observed_spatial_desc(descs, p, offsets, "y_tile", input_y, input_h, output_h, 0, out_c,
-                                      grain_bits=0x90, cbuf0=0xb1)
-    for desc, pc_core in zip(descs, DIRECT_SPATIAL_SIXDESC_C32_H14_PC_CORES):
-        desc.pc_core = pc_core
-    return descs
-
 def _append_observed_pointwise_y_list(descs, p, offsets, family, k_windows, y_windows):
     for oc_start, oc_count in k_windows:
         for input_y, output_rows in y_windows:
             _append_observed_spatial_desc(descs, p, offsets, family, input_y,
                                           output_rows, output_rows, oc_start, oc_count)
 
-def _plan_pointwise_simple_descs(p, in_c, out_c, kh, kw, in_h, in_w):
-    if not (
-        kh == 1 and kw == 1 and in_h == in_w and in_h in DIRECT_SPATIAL_POINTWISE_SIMPLE_Y_WINDOWS
-        and ((in_c, out_c) in {(40, 320), (64, 128)} or
-             (in_c, out_c, in_h) in {(528, 32, 14), (256, 512, 14)})
-    ):
-        return []
-    offsets = _observed_spatial_desc_offsets(p, in_c, kh, kw, in_w)
+def _desc_grain_cbuf_for_formula_schedule(in_c, out_c, kh, kw, in_h, family, output_h):
+    if kh == 3 and kw == 3 and in_c == 160 and out_c == 320:
+        grain_bits = {7: 0xa0, 14: 0xf0}.get(in_h, 0xc0 if in_h >= 28 else 0xf0)
+        cbuf0 = 0x39 if in_h >= 32 else {7: 0xb1, 14: 0xa2, 16: 0x93, 20: 0x84, 24: 0x66, 28: 0x48}.get(in_h)
+        return grain_bits, cbuf0
+    if kh == 3 and kw == 3 and in_c == 32 and out_c == 128 and in_h == 14:
+        return (0x90 if family == "y_tile" else 0x110), 0xb1
+    if kh == 1 and kw == 1 and in_c == 256 and out_c == 512 and in_h == 14:
+        if family == "y_tile":
+            return 0x50 if output_h == 4 else 0x60, 0x84
+        return 0xa0, 0x84
+    if kh == 1 and kw == 1 and in_c == 64 and out_c == 128 and in_h == 56:
+        return (0x70 if output_h == 6 else 0xa0), (0x201b if family == "setup" and output_h == 6 else 0x1b)
+    return None, None
+
+def _formula_schedule_to_observed_descs(schedule, p, offsets, in_c, out_c, kh, kw, in_h):
     descs = []
-    _append_outc64_h20_setup(descs, p, offsets, in_h, out_c)
-    _append_outc64_h20_k_half(descs, p, offsets, in_h, out_c)
-    for input_y, output_rows in DIRECT_SPATIAL_POINTWISE_SIMPLE_Y_WINDOWS[in_h]:
-        _append_observed_spatial_desc(descs, p, offsets, "y_tile", input_y,
-                                      output_rows, output_rows, 0, out_c)
-    if (in_c, out_c, in_h) == (64, 128, 56):
-        descs = []
-        for family, input_y, input_h, output_h, oc_start, oc_count in DIRECT_SPATIAL_C64_H56_SCHEDULE:
-            grain_bits = 0x70 if output_h == 6 else 0xa0
-            cbuf0 = 0x201b if family == "setup" and input_y else 0x1b
-            _append_observed_spatial_desc(descs, p, offsets, family, input_y,
-                                          input_h, output_h, oc_start, oc_count,
-                                          grain_bits=grain_bits, cbuf0=cbuf0)
+    for family, input_y, input_h, output_h, oc_start, oc_count in schedule:
+        grain_bits, cbuf0 = _desc_grain_cbuf_for_formula_schedule(
+            in_c, out_c, kh, kw, in_h, family, output_h)
+        descs.append(_make_observed_spatial_tile_desc(
+            family, input_y, input_h, output_h, p["out_w"],
+            oc_start, oc_count,
+            input_y * offsets["feature_row"],
+            oc_start * offsets["weight_per_oc"],
+            oc_start * offsets["output_per_oc"] + input_y * offsets["output_row"],
+            grain_bits=grain_bits,
+            cbuf0=cbuf0,
+        ).update(pc_core=_rknn_spatial_pc_core(family)))
+    if (
+        len(descs) == 6 and
+        ((kh == 3 and kw == 3 and in_c == 32 and out_c == 128 and in_h == 14) or
+         (kh == 1 and kw == 1 and in_c == 256 and out_c == 512 and in_h == 14))
+    ):
+        for desc, pc_core in zip(descs, DIRECT_SPATIAL_SIXDESC_C32_H14_PC_CORES):
+            desc.pc_core = pc_core
+    if kh == 1 and kw == 1 and in_c == 64 and out_c == 128 and in_h == 56:
         for desc in descs:
             desc.pc_core = 2 if desc.family == "y_tile" else _rknn_spatial_pc_core(desc.family)
-    if (in_c, out_c, in_h) == (256, 512, 14):
-        for desc, pc_core in zip(descs, DIRECT_SPATIAL_SIXDESC_C32_H14_PC_CORES):
-            if desc.family == "y_tile":
-                desc.grain_bits = 0x50 if desc.output_h == 4 else 0x60
-            else:
-                desc.grain_bits = 0xa0
-            desc.cbuf0 = 0x84
-            desc.pc_core = pc_core
-    return descs
-
-def _plan_pointwise_crossed_descs(p, in_c, out_c, kh, kw, in_h, in_w):
-    cfg = DIRECT_SPATIAL_POINTWISE_CROSSED.get((in_c, in_h, out_c))
-    if not (kh == 1 and kw == 1 and in_h == in_w and cfg is not None):
-        return []
-    offsets = _observed_spatial_desc_offsets(p, in_c, kh, kw, in_w)
-    half = _align_up(out_c // 2, 16)
-    descs = []
-    _append_observed_pointwise_y_list(descs, p, offsets, "setup", ((0, out_c),), cfg["setup"])
-    _append_observed_pointwise_y_list(descs, p, offsets, "k_half",
-                                      ((0, half), (half, out_c - half)), cfg["k_half"])
-    _append_observed_pointwise_y_list(descs, p, offsets, "y_tile", ((0, out_c),), cfg["y_tile"])
     return descs
 
 def plan_observed_spatial_tile_descs(p, in_c, out_c, kh, kw, in_h, in_w, groups, stride):
@@ -1460,27 +1347,13 @@ def plan_observed_spatial_tile_descs(p, in_c, out_c, kh, kw, in_h, in_w, groups,
     # replaced by formulas and proved against captures.
     if not (groups == 1 and stride == 1 and in_h == in_w):
         return []
-    pointwise_simple_descs = _plan_pointwise_simple_descs(p, in_c, out_c, kh, kw, in_h, in_w)
-    if pointwise_simple_descs:
-        return pointwise_simple_descs
-    pointwise_crossed_descs = _plan_pointwise_crossed_descs(p, in_c, out_c, kh, kw, in_h, in_w)
-    if pointwise_crossed_descs:
-        return pointwise_crossed_descs
+    formula_schedule = formula_direct_spatial_schedule(in_c, out_c, kh, kw, in_h, in_w, groups, stride)
+    if formula_schedule is not None:
+        offsets = _observed_spatial_desc_offsets(p, in_c, kh, kw, in_w)
+        return _formula_schedule_to_observed_descs(
+            formula_schedule, p, offsets, in_c, out_c, kh, kw, in_h)
     if not (kh == 3 and kw == 3):
         return []
-    outc64_h20_descs = _plan_outc64_h20_descs(p, in_c, out_c, kh, kw, in_h, in_w)
-    if outc64_h20_descs:
-        return outc64_h20_descs
-    chan320_h20_descs = _plan_chan320_h20_descs(p, in_c, out_c, kh, kw, in_h, in_w)
-    if chan320_h20_descs:
-        return chan320_h20_descs
-    mix72_h20_descs = _plan_mix72_h20_descs(p, in_c, out_c, kh, kw, in_h, in_w)
-    if mix72_h20_descs:
-        return mix72_h20_descs
-    cmp32_h14_descs = _plan_cmp32_h14_descs(p, in_c, out_c, kh, kw, in_h, in_w)
-    if cmp32_h14_descs:
-        return cmp32_h14_descs
-
     if not (in_c == 160 and out_c == 320):
         return []
     y_windows = _rknn_spatial_y_windows(in_h)
@@ -1546,45 +1419,6 @@ def _submit_task_regs(task_regs):
     if npu_submit(task_count=len(task_regs)) < 0:
         raise RuntimeError("npu_submit failed")
 
-def _submit_raw_task_spans(task_spans):
-    assert len(task_spans) <= tasks_mem_create.size // ctypes.sizeof(struct_rknpu_task), "task buffer too small"
-    regcmd_qwords = regcmd_mem_create.size // ctypes.sizeof(ctypes.c_uint64)
-    for start, amount in task_spans:
-        assert start >= 0 and amount > 0 and start + amount <= regcmd_qwords, "raw task span outside regcmd buffer"
-    write_raw_task_spans(task_spans)
-    if npu_submit(task_count=len(task_spans)) < 0:
-        raise RuntimeError("npu_submit failed")
-
-def _submit_direct_spatial_rknpu_sparse_task_gem(task_spec):
-    descs = task_spec["descs"]
-    policy = task_spec["policy"]
-    if not RKNN_MEM_SYNC:
-        raise RuntimeError(
-            f"{policy} requires {RKNN_MEM_SYNC_ENV}=1; sparse submits without "
-            "the captured RKNN MEM_SYNC path timed out on this target"
-        )
-    if policy == DIRECT_SPATIAL_POLICY_RKNPU_SPARSE_TASK_GEM_TAIL:
-        raise RuntimeError(
-            f"{DIRECT_SPATIAL_POLICY_RKNPU_SPARSE_TASK_GEM_TAIL} is disabled; "
-            "its tail-index submit crashed/rebooted this board"
-        )
-    set_rknn_active_regcmd_window(descs)
-    if direct_spatial_c64_h56_supported(descs) and os.environ.get(C64_H56_SPARSE_UNSAFE_ENV) != "1":
-        raise RuntimeError(
-            "C64/H56 sparse layout is modeled for offline comparison only; "
-            f"set {C64_H56_SPARSE_UNSAFE_ENV}=1 only for a bracketed probe of the captured C64 sync path"
-        )
-    write_direct_spatial_rknpu_sparse_task_gem(descs)
-    if direct_spatial_sixdesc_supported(descs):
-        task_count = 3
-        subcore_tasks = ((0, 1), (0, 1), (0, 1), (0, 0), (0, 0))
-    else:
-        task_count = 6
-        subcore_tasks = ((0, 2), (0, 2), (0, 2), (0, 0), (0, 0))
-    if npu_submit(task_count=task_count, flags=RKNPU_JOB_PC | RKNPU_JOB_PINGPONG,
-                  core_mask=0, subcore_tasks=subcore_tasks) < 0:
-        raise RuntimeError("npu_submit failed")
-
 def _bo_addr(bo_map):
     return ctypes.addressof(ctypes.c_char.from_buffer(bo_map))
 
@@ -1624,71 +1458,11 @@ def direct_spatial_default_supported(descs):
         direct_spatial_sixdesc_supported(descs)
     )
 
-def c64_h56_runtime_ready():
-    return (
-        RKNN_MEM_SYNC and
-        RKNN_RUNTIME_PROFILE["task"] == RKNN_C64_H56_TASK_BYTES and
-        RKNN_RUNTIME_PROFILE["regcmd"] == RKNN_C64_H56_REGCMD_BYTES and
-        RKNN_RUNTIME_PROFILE["weight"] == RKNN_C64_H56_WEIGHT_BYTES and
-        RKNN_RUNTIME_PROFILE["input"] == RKNN_C64_H56_INPUT_BYTES and
-        RKNN_RUNTIME_PROFILE["output"] == RKNN_C64_H56_OUTPUT_BYTES and
-        _rknn_active_regcmd_offset == DIRECT_SPATIAL_C64_H56_ACTIVE_OFFSET and
-        _rknn_active_regcmd_bytes == RKNN_C64_H56_REGCMD_ACTIVE_BYTES
-    )
-
-def direct_spatial_diagnostic_policy_requested():
-    return os.environ.get(DIRECT_SPATIAL_TASKS_ENV, "") in {
-        TASK_POLICY_REG_LISTS,
-        DIRECT_SPATIAL_POLICY_PC_ROOT6,
-        DIRECT_SPATIAL_POLICY_SINGLE_STREAM,
-        DIRECT_SPATIAL_POLICY_SPARSE_SINGLE,
-        DIRECT_SPATIAL_POLICY_ROCKET_RECORD_AMOUNTS,
-        DIRECT_SPATIAL_POLICY_RKNPU_SPARSE_TASK_GEM,
-        DIRECT_SPATIAL_POLICY_RKNPU_SPARSE_TASK_GEM_TAIL,
-    }
-
-def direct_spatial_task_policy_for_descs(descs):
-    value = os.environ.get(DIRECT_SPATIAL_TASKS_ENV, "")
-    if value == "":
-        if RKNN_MEM_SYNC and direct_spatial_default_supported(descs):
-            return DIRECT_SPATIAL_POLICY_RKNPU_SPARSE_TASK_GEM
-        if direct_spatial_default_supported(descs):
-            return DIRECT_SPATIAL_POLICY_SINGLE_STREAM
-        return TASK_POLICY_REG_LISTS
-    if value == TASK_POLICY_REG_LISTS:
-        return TASK_POLICY_REG_LISTS
-    if value == DIRECT_SPATIAL_POLICY_PC_ROOT6:
-        return DIRECT_SPATIAL_POLICY_PC_ROOT6
-    if value == DIRECT_SPATIAL_POLICY_SINGLE_STREAM:
-        return DIRECT_SPATIAL_POLICY_SINGLE_STREAM
-    if value == DIRECT_SPATIAL_POLICY_SPARSE_SINGLE:
-        return DIRECT_SPATIAL_POLICY_SPARSE_SINGLE
-    if value == DIRECT_SPATIAL_POLICY_ROCKET_RECORD_AMOUNTS:
-        return DIRECT_SPATIAL_POLICY_ROCKET_RECORD_AMOUNTS
-    if value == DIRECT_SPATIAL_POLICY_RKNPU_SPARSE_TASK_GEM:
-        return DIRECT_SPATIAL_POLICY_RKNPU_SPARSE_TASK_GEM
-    if value == DIRECT_SPATIAL_POLICY_RKNPU_SPARSE_TASK_GEM_TAIL:
-        return DIRECT_SPATIAL_POLICY_RKNPU_SPARSE_TASK_GEM_TAIL
-    raise ValueError(f"unknown {DIRECT_SPATIAL_TASKS_ENV} policy: {value}")
-
 def direct_spatial_plan_allowed(descs):
-    return direct_spatial_diagnostic_policy_requested() or (
-        RKNN_MEM_SYNC and direct_spatial_default_supported(descs)
-    )
-
-def direct_spatial_exec_task_policy(policy):
-    if policy in {DIRECT_SPATIAL_POLICY_PC_ROOT6, DIRECT_SPATIAL_POLICY_SINGLE_STREAM,
-                  DIRECT_SPATIAL_POLICY_SPARSE_SINGLE,
-                  DIRECT_SPATIAL_POLICY_ROCKET_RECORD_AMOUNTS}:
-        return TASK_POLICY_RAW_SPANS
-    if policy in {DIRECT_SPATIAL_POLICY_RKNPU_SPARSE_TASK_GEM,
-                  DIRECT_SPATIAL_POLICY_RKNPU_SPARSE_TASK_GEM_TAIL}:
-        return TASK_POLICY_RKNPU_SPARSE_TASK_GEM
-    return TASK_POLICY_REG_LISTS
+    return False
 
 def make_direct_spatial_tile_desc(result, n, packed_input, packed_weight, descs, p):
-    policy = direct_spatial_task_policy_for_descs(descs)
-    regs = direct_spatial_task_regs(descs, policy)
+    regs = [desc.extra["regs"][0] for desc in descs]
     return make_tile_exec_desc(
         FAMILY_DIRECT_SPATIAL,
         packed_input,
@@ -1696,24 +1470,10 @@ def make_direct_spatial_tile_desc(result, n, packed_input, packed_weight, descs,
         regs,
         make_direct_spatial_unpack(result, n, p),
         meta={"direct_spatial_schedule": direct_spatial_desc_schedule(descs),
-              "task_policy": policy},
+              "task_policy": TASK_POLICY_REG_LISTS},
         buffer_scope=BUFFER_SCOPE_FULL,
-        task_policy=direct_spatial_exec_task_policy(policy),
+        task_policy=TASK_POLICY_REG_LISTS,
     )
-
-def direct_spatial_task_regs(descs, policy):
-    if policy == DIRECT_SPATIAL_POLICY_PC_ROOT6:
-        return direct_spatial_pc_root6_task_spans(descs)
-    if policy == DIRECT_SPATIAL_POLICY_SINGLE_STREAM:
-        return direct_spatial_single_stream_task_span(descs)
-    if policy == DIRECT_SPATIAL_POLICY_SPARSE_SINGLE:
-        return direct_spatial_sparse_single_task_span(descs)
-    if policy == DIRECT_SPATIAL_POLICY_ROCKET_RECORD_AMOUNTS:
-        return direct_spatial_rocket_record_amounts_task_span(descs)
-    if policy in {DIRECT_SPATIAL_POLICY_RKNPU_SPARSE_TASK_GEM,
-                  DIRECT_SPATIAL_POLICY_RKNPU_SPARSE_TASK_GEM_TAIL}:
-        return {"descs": descs, "policy": policy}
-    return [desc.extra["regs"][0] for desc in descs]
 
 def direct_spatial_desc_schedule(descs):
     return tuple(
@@ -1721,23 +1481,29 @@ def direct_spatial_desc_schedule(descs):
         for desc in descs
     )
 
+def _direct_spatial_schedule_matches_formula(descs, in_c, out_c, kh, kw, in_h, in_w=None, groups=1, stride=1):
+    if in_w is None:
+        in_w = in_h
+    expected = formula_direct_spatial_schedule(in_c, out_c, kh, kw, in_h, in_w, groups, stride)
+    return expected is not None and direct_spatial_desc_schedule(descs) == expected
+
 def direct_spatial_pc_root6_supported(descs):
-    return direct_spatial_desc_schedule(descs) == DIRECT_SPATIAL_PC_ROOT6_H40_SCHEDULE
+    return _direct_spatial_schedule_matches_formula(descs, 160, 320, 3, 3, 40)
 
 def direct_spatial_sixdesc_h7_supported(descs):
-    return direct_spatial_desc_schedule(descs) == DIRECT_SPATIAL_SIXDESC_H7_SCHEDULE
+    return _direct_spatial_schedule_matches_formula(descs, 160, 320, 3, 3, 7)
 
 def direct_spatial_sixdesc_h14_supported(descs):
-    return direct_spatial_desc_schedule(descs) == DIRECT_SPATIAL_SIXDESC_H14_SCHEDULE
+    return _direct_spatial_schedule_matches_formula(descs, 160, 320, 3, 3, 14)
 
 def direct_spatial_sixdesc_c32_h14_supported(descs):
-    return direct_spatial_desc_schedule(descs) == DIRECT_SPATIAL_SIXDESC_C32_H14_SCHEDULE
+    return _direct_spatial_schedule_matches_formula(descs, 32, 128, 3, 3, 14)
 
 def direct_spatial_sixdesc_pw_c256_h14_supported(descs):
-    return direct_spatial_desc_schedule(descs) == DIRECT_SPATIAL_SIXDESC_PW_C256_H14_SCHEDULE
+    return _direct_spatial_schedule_matches_formula(descs, 256, 512, 1, 1, 14)
 
 def direct_spatial_c64_h56_supported(descs):
-    return direct_spatial_desc_schedule(descs) == DIRECT_SPATIAL_C64_H56_SCHEDULE
+    return _direct_spatial_schedule_matches_formula(descs, 64, 128, 1, 1, 56)
 
 def direct_spatial_sixdesc_supported(descs):
     return (
@@ -1750,394 +1516,6 @@ def direct_spatial_sixdesc_supported(descs):
 def validate_direct_spatial_pc_root6_descs(descs):
     if not direct_spatial_pc_root6_supported(descs):
         raise ValueError("pc_root6 direct-spatial policy only supports the observed 160x40 -> 320 k3x3 descriptor schedule")
-
-def validate_direct_spatial_sparse_descs(descs):
-    if direct_spatial_pc_root6_supported(descs) or direct_spatial_sixdesc_supported(descs) or direct_spatial_c64_h56_supported(descs):
-        return
-    raise ValueError("rknpu sparse task GEM only supports byte-matched H40, C64/H56, C32/H14, H14, and H7 direct-spatial schedules")
-
-def _direct_spatial_pc_tail(base_qword, amount, pc_core):
-    return [
-        E(reg.PC_REG, reg.PC_BASE_ADDRESS,
-          (regcmd_mem_create.dma_addr + RKNN_REGCMD_ACTIVE_OFFSET * RKNN_MEM_SYNC +
-           base_qword * ctypes.sizeof(ctypes.c_uint64)) & 0xFFFFFFF0),
-        E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, (pc_core << 16) | amount),
-    ]
-
-def direct_spatial_separator_regs(ppu_src_dma=0, ppu_dst_dma=0):
-    return [
-        E(reg.PPU, reg.PPU_S_POINTER, (1 << 3) | (1 << 2) | (1 << 1)),
-        E(reg.PPU_RDMA, reg.PPU_RDMA_S_POINTER, (1 << 3) | (1 << 2) | (1 << 1)),
-        E(reg.PPU, reg.PPU_DATA_CUBE_IN_WIDTH, 0),
-        E(reg.PPU, reg.PPU_DATA_CUBE_IN_HEIGHT, 0),
-        E(reg.PPU, reg.PPU_DATA_CUBE_IN_CHANNEL, 31),
-        E(reg.PPU, reg.PPU_DATA_CUBE_OUT_WIDTH, 0),
-        E(reg.PPU, reg.PPU_DATA_CUBE_OUT_HEIGHT, 0),
-        E(reg.PPU, reg.PPU_DATA_CUBE_OUT_CHANNEL, 31),
-        E(reg.PPU, reg.PPU_OPERATION_MODE_CFG, (1 << 4) | 1),
-        E(reg.PPU, reg.PPU_POOLING_KERNEL_CFG, 0),
-        E(reg.PPU, reg.PPU_RECIP_KERNEL_WIDTH, 0),
-        E(reg.PPU, reg.PPU_RECIP_KERNEL_HEIGHT, 0),
-        E(reg.PPU, reg.PPU_POOLING_PADDING_CFG, 0),
-        E(reg.PPU, reg.PPU_PADDING_VALUE_1_CFG, 0),
-        E(reg.PPU, reg.PPU_PADDING_VALUE_2_CFG, 0),
-        E(reg.PPU, reg.PPU_DST_BASE_ADDR, ppu_dst_dma),
-        E(reg.PPU, reg.PPU_DST_SURF_STRIDE, 1 << 4),
-        E(reg.PPU, reg.PPU_DATA_FORMAT, 1 << 4),
-        E(reg.PPU, reg.PPU_MISC_CTRL, 3),
-        E(reg.PPU_RDMA, reg.PPU_RDMA_CUBE_IN_WIDTH, 0),
-        E(reg.PPU_RDMA, reg.PPU_RDMA_CUBE_IN_HEIGHT, 0),
-        E(reg.PPU_RDMA, reg.PPU_RDMA_CUBE_IN_CHANNEL, 31),
-        E(reg.PPU_RDMA, reg.PPU_RDMA_SRC_BASE_ADDR, ppu_src_dma),
-        E(reg.PPU_RDMA, reg.PPU_RDMA_SRC_LINE_STRIDE, 1 << 4),
-        E(reg.PPU_RDMA, reg.PPU_RDMA_SRC_SURF_STRIDE, 1 << 4),
-        E(reg.PPU_RDMA, reg.PPU_RDMA_DATA_FORMAT, 1),
-    ]
-
-def direct_spatial_pc_root6_record_starts():
-    starts = []
-    cursor = 0
-    for amount in DIRECT_SPATIAL_PC_ROOT6_RECORD_AMOUNTS:
-        starts.append(cursor)
-        cursor += _align_up(amount + PC_CHAIN_TAIL_QWORDS, 16)
-    return starts
-
-def direct_spatial_observed_task_records():
-    starts = direct_spatial_pc_root6_record_starts()
-    records = []
-    for start, amount in zip(starts, DIRECT_SPATIAL_PC_ROOT6_RECORD_AMOUNTS):
-        enable_mask = 0x60 if amount == 26 else 0x0d
-        int_mask = 0x0c00 if amount == 26 else 0x0300
-        records.append((start, amount, enable_mask, int_mask))
-    return tuple(records)
-
-def direct_spatial_sixdesc_record_starts():
-    starts = []
-    cursor = 0
-    for amount in DIRECT_SPATIAL_SIXDESC_H7_RECORD_AMOUNTS:
-        starts.append(cursor)
-        cursor += _align_up(amount + PC_CHAIN_TAIL_QWORDS, 16)
-    return starts
-
-def direct_spatial_c64_h56_record_starts():
-    starts = []
-    cursor = 0
-    for amount in DIRECT_SPATIAL_C64_H56_RECORD_AMOUNTS:
-        starts.append(cursor)
-        cursor += _align_up(amount + PC_CHAIN_TAIL_QWORDS, 16)
-    return starts
-
-def direct_spatial_sixdesc_task_records():
-    starts = direct_spatial_sixdesc_record_starts()
-    records = []
-    for start, amount in zip(starts, DIRECT_SPATIAL_SIXDESC_H7_RECORD_AMOUNTS):
-        enable_mask = 0x60 if amount == 26 else 0x0d
-        int_mask = 0x0c00 if amount == 26 else 0x0300
-        records.append((start, amount, enable_mask, int_mask))
-    return tuple(records)
-
-def direct_spatial_sparse_task_records(descs):
-    if direct_spatial_pc_root6_supported(descs):
-        return direct_spatial_observed_task_records()
-    if direct_spatial_sixdesc_supported(descs):
-        return direct_spatial_sixdesc_task_records()
-    if direct_spatial_c64_h56_supported(descs):
-        starts = direct_spatial_c64_h56_record_starts()
-        records = []
-        for start, amount in zip(starts, DIRECT_SPATIAL_C64_H56_RECORD_AMOUNTS):
-            enable_mask = 0x60 if amount == 26 else 0x0d
-            int_mask = 0x0c00 if amount == 26 else 0x0300
-            records.append((start, amount, enable_mask, int_mask))
-        return tuple(records)
-    validate_direct_spatial_sparse_descs(descs)
-    raise AssertionError("unreachable")
-
-def direct_spatial_pc_root6_backing_qwords():
-    starts = direct_spatial_pc_root6_record_starts()
-    return starts[-1] + _align_up(DIRECT_SPATIAL_PC_ROOT6_RECORD_AMOUNTS[-1] + PC_CHAIN_TAIL_QWORDS, 16)
-
-def direct_spatial_sixdesc_backing_qwords():
-    starts = direct_spatial_sixdesc_record_starts()
-    return starts[-1] + _align_up(DIRECT_SPATIAL_SIXDESC_H7_RECORD_AMOUNTS[-1] + PC_CHAIN_TAIL_QWORDS, 16)
-
-def direct_spatial_c64_h56_backing_qwords():
-    starts = direct_spatial_c64_h56_record_starts()
-    return starts[-1] + _align_up(DIRECT_SPATIAL_C64_H56_RECORD_AMOUNTS[-1] + PC_CHAIN_TAIL_QWORDS, 16)
-
-def direct_spatial_pc_root6_tail(desc_idx, desc, record_starts):
-    record_idx = DIRECT_SPATIAL_PC_ROOT6_LINK_RECORDS[desc_idx]
-    if record_idx is None:
-        return []
-    amount = DIRECT_SPATIAL_PC_ROOT6_RECORD_AMOUNTS[record_idx]
-    pc_amount = _ceil_div(amount, 2) + 1
-    return _direct_spatial_pc_tail(record_starts[record_idx], pc_amount, desc.pc_core)
-
-def direct_spatial_sparse_record_tail(record_idx, pc_core, enable_value, record_starts):
-    link_record = DIRECT_SPATIAL_PC_ROOT6_RECORD_LINKS[record_idx]
-    if link_record is None:
-        pc_base_qword = 0
-        pc_amount = 0
-    else:
-        amount = DIRECT_SPATIAL_PC_ROOT6_RECORD_AMOUNTS[link_record]
-        pc_base = (regcmd_mem_create.dma_addr + RKNN_REGCMD_ACTIVE_OFFSET * RKNN_MEM_SYNC +
-                   record_starts[link_record] * ctypes.sizeof(ctypes.c_uint64)) & 0xFFFFFFF0
-        pc_base_qword = E(reg.PC_REG, reg.PC_BASE_ADDRESS, pc_base)
-        pc_amount = (pc_core << 16) | (_ceil_div(amount, 2) + 1)
-    return [
-        pc_base_qword,
-        E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, pc_amount),
-        E(reg.VERSION, 0, 0),
-        E(reg.PC, reg.OPERATION_ENABLE, enable_value),
-    ]
-
-def direct_spatial_sixdesc_record_tail(record_idx, pc_core, enable_value, record_starts):
-    link_record = DIRECT_SPATIAL_SIXDESC_RECORD_LINKS[record_idx]
-    if link_record is None:
-        pc_base_qword = 0
-        pc_amount = 0
-    else:
-        amount = DIRECT_SPATIAL_SIXDESC_H7_RECORD_AMOUNTS[link_record]
-        pc_base = (regcmd_mem_create.dma_addr + RKNN_REGCMD_ACTIVE_OFFSET * RKNN_MEM_SYNC +
-                   record_starts[link_record] * ctypes.sizeof(ctypes.c_uint64)) & 0xFFFFFFF0
-        pc_base_qword = E(reg.PC_REG, reg.PC_BASE_ADDRESS, pc_base)
-        pc_amount = (pc_core << 16) | (_ceil_div(amount, 2) + 1)
-    return [
-        pc_base_qword,
-        E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, pc_amount),
-        E(reg.VERSION, 0, 0),
-        E(reg.PC, reg.OPERATION_ENABLE, enable_value),
-    ]
-
-def direct_spatial_c64_h56_record_tail(record_idx, pc_core, enable_value, record_starts):
-    link_record = DIRECT_SPATIAL_C64_H56_RECORD_LINKS[record_idx]
-    if link_record is None:
-        pc_base_qword = 0
-        pc_amount = 0
-    else:
-        amount = DIRECT_SPATIAL_C64_H56_RECORD_AMOUNTS[link_record]
-        pc_base = (regcmd_mem_create.dma_addr + DIRECT_SPATIAL_C64_H56_ACTIVE_OFFSET * RKNN_MEM_SYNC +
-                   record_starts[link_record] * ctypes.sizeof(ctypes.c_uint64)) & 0xFFFFFFF0
-        pc_base_qword = E(reg.PC_REG, reg.PC_BASE_ADDRESS, pc_base)
-        pc_amount = (pc_core << 16) | (_ceil_div(amount, 2) + 1)
-    return [
-        pc_base_qword,
-        E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, pc_amount),
-        E(reg.VERSION, 0, 0),
-        E(reg.PC, reg.OPERATION_ENABLE, enable_value),
-    ]
-
-def direct_spatial_pc_root6_boundaries(record_starts, stream_len):
-    boundaries = [record_starts[idx] for idx in DIRECT_SPATIAL_PC_ROOT6_ROOT_RECORDS]
-    boundaries.append(stream_len)
-    return boundaries
-
-def direct_spatial_pc_root6_expected_spans(stream_len=DIRECT_SPATIAL_PC_ROOT6_STREAM_QWORDS):
-    starts = direct_spatial_pc_root6_record_starts()
-    boundaries = direct_spatial_pc_root6_boundaries(starts, stream_len)
-    return [(start, end - start) for start, end in zip(boundaries, boundaries[1:])]
-
-def direct_spatial_compiler_stitched_stream(descs):
-    bodies = [desc.extra["full_regs"] for desc in descs]
-    record_starts = direct_spatial_pc_root6_record_starts()
-    stream = []
-    for desc_idx, body in enumerate(bodies):
-        tail = direct_spatial_pc_root6_tail(desc_idx, descs[desc_idx], record_starts)
-        if desc_idx == 0:
-            stream.extend(body)
-            stream.extend(tail)
-        elif desc_idx == 1:
-            stream.append(E(reg.PC, reg.OPERATION_ENABLE, 0x0d))
-            stream.extend(body)
-        elif desc_idx == 2:
-            stream.append(E(reg.PC, reg.OPERATION_ENABLE, 0x0d))
-            stream.extend(body[4:])
-            stream.extend(tail)
-        else:
-            stream.extend(body[4:])
-            stream.extend(tail)
-    assert len(stream) == DIRECT_SPATIAL_PC_ROOT6_STREAM_QWORDS, "unexpected direct-spatial compiler stream length"
-    return stream
-
-def direct_spatial_sparse_backing_stream(descs):
-    validate_direct_spatial_pc_root6_descs(descs)
-    record_starts = direct_spatial_pc_root6_record_starts()
-    stream = [0] * direct_spatial_pc_root6_backing_qwords()
-    desc_idx = 0
-
-    for record_idx, amount in enumerate(DIRECT_SPATIAL_PC_ROOT6_RECORD_AMOUNTS):
-        start = record_starts[record_idx]
-        enable_value = 0x60 if amount == 26 else 0x0d
-        if amount == 26:
-            record = direct_spatial_separator_regs()
-            pc_core = 0
-        else:
-            body = descs[desc_idx].extra["full_regs"]
-            pc_core = descs[desc_idx].pc_core
-            if amount == len(body):
-                record = list(body)
-            else:
-                record = list(body[4:])
-            desc_idx += 1
-        record += direct_spatial_sparse_record_tail(record_idx, pc_core, enable_value, record_starts)
-        assert len(record) >= amount, "direct-spatial sparse record shorter than task amount"
-        assert start + len(record) <= len(stream), "direct-spatial sparse record outside backing stream"
-        stream[start:start + len(record)] = record
-
-    assert desc_idx == len(descs), "direct-spatial sparse stream did not consume all descriptors"
-    return stream
-
-def direct_spatial_sixdesc_sparse_backing_stream(descs):
-    if not direct_spatial_sixdesc_supported(descs):
-        raise ValueError("six-desc sparse policy only supports byte-matched C32/H14, H14, and H7 descriptor schedules")
-    record_starts = direct_spatial_sixdesc_record_starts()
-    stream = [0] * direct_spatial_sixdesc_backing_qwords()
-    desc_idx = 0
-
-    for record_idx, amount in enumerate(DIRECT_SPATIAL_SIXDESC_H7_RECORD_AMOUNTS):
-        start = record_starts[record_idx]
-        enable_value = 0x60 if amount == 26 else 0x0d
-        if amount == 26:
-            record = direct_spatial_separator_regs()
-            pc_core = 0
-        else:
-            body = descs[desc_idx].extra["full_regs"]
-            pc_core = descs[desc_idx].pc_core
-            record = list(body if record_idx == 0 else body[4:])
-            desc_idx += 1
-        record += direct_spatial_sixdesc_record_tail(record_idx, pc_core, enable_value, record_starts)
-        assert len(record) >= amount, "six-desc sparse record shorter than task amount"
-        assert start + len(record) <= len(stream), "six-desc sparse record outside backing stream"
-        stream[start:start + len(record)] = record
-
-    assert desc_idx == len(descs), "six-desc sparse stream did not consume all descriptors"
-    return stream
-
-def direct_spatial_c64_h56_sparse_backing_stream(descs):
-    if not direct_spatial_c64_h56_supported(descs):
-        raise ValueError("C64/H56 sparse policy only supports the captured 64x56 -> 128 pointwise schedule")
-    record_starts = direct_spatial_c64_h56_record_starts()
-    stream = [0] * direct_spatial_c64_h56_backing_qwords()
-    desc_idx = 0
-
-    for record_idx, amount in enumerate(DIRECT_SPATIAL_C64_H56_RECORD_AMOUNTS):
-        start = record_starts[record_idx]
-        enable_value = 0x60 if amount == 26 else 0x0d
-        if amount == 26:
-            record = direct_spatial_separator_regs()
-            pc_core = 0
-        else:
-            body = descs[desc_idx].extra["full_regs"]
-            pc_core = descs[desc_idx].pc_core
-            record = list(body if record_idx in (0, 1) else body[4:])
-            desc_idx += 1
-        record += direct_spatial_c64_h56_record_tail(record_idx, pc_core, enable_value, record_starts)
-        assert len(record) >= amount, "C64/H56 sparse record shorter than task amount"
-        assert start + len(record) <= len(stream), "C64/H56 sparse record outside backing stream"
-        stream[start:start + len(record)] = record
-
-    assert desc_idx == len(descs), "C64/H56 sparse stream did not consume all descriptors"
-    return stream
-
-def direct_spatial_rknpu_sparse_backing_stream(descs):
-    if direct_spatial_pc_root6_supported(descs):
-        return direct_spatial_sparse_backing_stream(descs)
-    if direct_spatial_sixdesc_supported(descs):
-        return direct_spatial_sixdesc_sparse_backing_stream(descs)
-    if direct_spatial_c64_h56_supported(descs):
-        return direct_spatial_c64_h56_sparse_backing_stream(descs)
-    validate_direct_spatial_sparse_descs(descs)
-    raise AssertionError("unreachable")
-
-def write_direct_spatial_rknpu_sparse_task_gem(descs):
-    set_rknn_active_regcmd_window(descs)
-    stream = direct_spatial_rknpu_sparse_backing_stream(descs)
-    records = direct_spatial_sparse_task_records(descs)
-    regcmd_base_qwords = (_rknn_active_regcmd_offset // ctypes.sizeof(ctypes.c_uint64)) if RKNN_MEM_SYNC else 0
-    for idx, qword in enumerate(stream):
-        npu_regcmd[regcmd_base_qwords + idx] = qword
-    assert len(records) <= tasks_mem_create.size // ctypes.sizeof(struct_rknpu_task), "task buffer too small"
-    for idx, (start, amount, enable_mask, int_mask) in enumerate(records):
-        npu_tasks[idx].regcmd_addr = (regcmd_mem_create.dma_addr + _rknn_active_regcmd_offset * RKNN_MEM_SYNC +
-                                      start * ctypes.sizeof(ctypes.c_uint64))
-        npu_tasks[idx].regcfg_amount = amount
-        npu_tasks[idx].op_idx = 1
-        npu_tasks[idx].enable_mask = enable_mask
-        npu_tasks[idx].int_mask = int_mask
-        npu_tasks[idx].int_clear = 0x1ffff
-
-def _rocket_kernel_pc_amount_for_task_count(regcmd_count):
-    return (regcmd_count + 1) // 2 - 1
-
-def _direct_spatial_pc_base_for_record_start(record_start):
-    return (regcmd_mem_create.dma_addr + record_start * ctypes.sizeof(ctypes.c_uint64)) & 0xFFFFFFF0
-
-def direct_spatial_rocket_record_amount_patches(stream):
-    record_starts = direct_spatial_pc_root6_record_starts()
-    start_by_pc_base = {
-        _direct_spatial_pc_base_for_record_start(start): idx
-        for idx, start in enumerate(record_starts)
-    }
-    patches = []
-    for idx, qword in enumerate(stream):
-        target = (qword >> 48) & 0xffff
-        reg_addr = qword & 0xffff
-        value = (qword >> 16) & 0xffffffff
-        if (target, reg_addr) != (reg.PC_REG, reg.PC_BASE_ADDRESS):
-            continue
-        if idx + 1 >= len(stream):
-            raise ValueError(f"PC_BASE at sparse[{idx}] has no following PC_REGISTER_AMOUNTS")
-        record_idx = start_by_pc_base.get(value)
-        if record_idx is None:
-            raise ValueError(f"PC_BASE at sparse[{idx}] targets non-record address 0x{value:x}")
-        amount_qword = stream[idx + 1]
-        amount_target = (amount_qword >> 48) & 0xffff
-        amount_reg = amount_qword & 0xffff
-        if (amount_target, amount_reg) != (reg.PC_REG, reg.PC_REGISTER_AMOUNTS):
-            raise ValueError(f"sparse[{idx + 1}] is not PC_REGISTER_AMOUNTS")
-        amount = _rocket_kernel_pc_amount_for_task_count(DIRECT_SPATIAL_PC_ROOT6_RECORD_AMOUNTS[record_idx])
-        patches.append((idx + 1, amount))
-    return patches
-
-def direct_spatial_rocket_record_amounts_stream(descs):
-    stream = direct_spatial_sparse_backing_stream(descs)
-    for amount_qword, amount in direct_spatial_rocket_record_amount_patches(stream):
-        qword = stream[amount_qword]
-        target = (qword >> 48) & 0xffff
-        reg_addr = qword & 0xffff
-        value = (qword >> 16) & 0xffffffff
-        stream[amount_qword] = E(target, reg_addr, (value & 0xffff0000) | amount)
-    return stream
-
-def direct_spatial_pc_root6_task_spans(descs):
-    stream, spans = direct_spatial_pc_root6_stream_and_spans(descs)
-    for idx, qword in enumerate(stream):
-        npu_regcmd[idx] = qword
-    return spans
-
-def direct_spatial_single_stream_task_span(descs):
-    validate_direct_spatial_pc_root6_descs(descs)
-    stream = direct_spatial_compiler_stitched_stream(descs)
-    for idx, qword in enumerate(stream):
-        npu_regcmd[idx] = qword
-    return [(0, len(stream))]
-
-def direct_spatial_sparse_single_task_span(descs):
-    stream = direct_spatial_sparse_backing_stream(descs)
-    for idx, qword in enumerate(stream):
-        npu_regcmd[idx] = qword
-    return [(0, len(stream))]
-
-def direct_spatial_rocket_record_amounts_task_span(descs):
-    stream = direct_spatial_rocket_record_amounts_stream(descs)
-    for idx, qword in enumerate(stream):
-        npu_regcmd[idx] = qword
-    return [(0, len(stream))]
-
-def direct_spatial_pc_root6_stream_and_spans(descs):
-    validate_direct_spatial_pc_root6_descs(descs)
-    stream = direct_spatial_compiler_stitched_stream(descs)
-    spans = direct_spatial_pc_root6_expected_spans(len(stream))
-    return stream, spans
 
 def write_regs_to_npu_task(task_regs):
     def enable_npu_units_and_set_next_pc_addr(next_offset, next_task_regs_len, pc_core=0):
@@ -2176,15 +1554,6 @@ def write_regs_to_npu_task(task_regs):
             npu_regcmd[base + len(regs) + i] = qword
         npu_tasks[idx].regcmd_addr = regcmd_mem_create.dma_addr + base * ctypes.sizeof(ctypes.c_uint64)
         npu_tasks[idx].regcfg_amount = len(regs)
-        npu_tasks[idx].op_idx = 1
-        npu_tasks[idx].enable_mask = 0xd
-        npu_tasks[idx].int_mask = (1 << 8) | (1 << 9)
-        npu_tasks[idx].int_clear = 0x1ffff
-
-def write_raw_task_spans(task_spans):
-    for idx, (start, amount) in enumerate(task_spans):
-        npu_tasks[idx].regcmd_addr = regcmd_mem_create.dma_addr + start * ctypes.sizeof(ctypes.c_uint64)
-        npu_tasks[idx].regcfg_amount = amount
         npu_tasks[idx].op_idx = 1
         npu_tasks[idx].enable_mask = 0xd
         npu_tasks[idx].int_mask = (1 << 8) | (1 << 9)
@@ -2304,12 +1673,8 @@ def classify_conv_plan(p, in_c, out_c, kh, kw, in_h, in_w, groups, split_method,
     is_spatial, is_depthwise = p["is_spatial"], p["is_depthwise"]
     direct_spatial_descs = plan_observed_spatial_tile_descs(
         p, in_c, out_c, kh, kw, in_h, in_w, groups, p["stride"])
-    if direct_spatial_descs and direct_spatial_hw_enabled() and direct_spatial_plan_allowed(direct_spatial_descs):
-        # Special handle: guarded direct spatial descriptors use full input/weight BOs and common executor submit policy.
+    if direct_spatial_descs and direct_spatial_plan_allowed(direct_spatial_descs):
         family = FAMILY_DIRECT_SPATIAL
-    elif direct_spatial_descs and _needs_spatial_im2col_fallback(p, in_c, out_c, kh, kw, groups):
-        # Special handle: do not silently use Python im2col for a proven RKNN direct-spatial schedule.
-        family = FAMILY_DIRECT_SPATIAL_GATED
     elif _needs_grouped_spatial_serial(p, groups):
         # Special handle: grouped spatial weights are serialized group-by-group until native grouped descriptors are known.
         family = FAMILY_GROUPED_SERIAL
@@ -2695,12 +2060,6 @@ def _build_direct_spatial_from_plan(plan, ctx):
         return []
     return [make_direct_spatial_tile_desc(ctx.result, ctx.n, packed_input, packed_weight, descs, ctx.p)]
 
-def _build_gated_direct_spatial_from_plan(plan, ctx):
-    del plan, ctx
-    raise RuntimeError(
-        f"direct-spatial RKNN descriptor schedule is available but hardware execution is gated; "
-        f"set {DIRECT_SPATIAL_ENV}=1 and {DIRECT_SPATIAL_UNSAFE_ENV}=1 for the explicit probe")
-
 @dataclass(frozen=True, slots=True)
 class ConvBuildContext:
     n: int
@@ -2760,7 +2119,6 @@ def _build_record_descriptors(plan, ctx):
 
 DESCRIPTOR_PRODUCERS = {
     FAMILY_DIRECT_SPATIAL: _build_direct_spatial_from_plan,
-    FAMILY_DIRECT_SPATIAL_GATED: _build_gated_direct_spatial_from_plan,
     FAMILY_GROUPED_SERIAL: _build_record_descriptors,
     FAMILY_SPATIAL_IM2COL_FALLBACK: _build_record_descriptors,
     FAMILY_SPATIAL_OC_SERIAL: _build_record_descriptors,
@@ -2778,10 +2136,6 @@ def plan_conv_descriptors(n, input_nchw, weight_nchw, result, in_c, out_c, kh, k
                            in_c, out_c, kh, kw, in_h, in_w, groups, stride)
     producer = DESCRIPTOR_PRODUCERS[plan["family"]]
     return producer(plan, ctx)
-
-def direct_spatial_hw_enabled():
-    return (os.environ.get(DIRECT_SPATIAL_ENV) == "1" and
-            os.environ.get(DIRECT_SPATIAL_UNSAFE_ENV) == "1")
 
 def run_conv(batch, in_c, out_c, kh, kw, input_hw, groups=1, stride=1):
     in_h, in_w = input_hw
@@ -2821,6 +2175,40 @@ def select_shapes(shapes, requested):
         raise SystemExit(f"unknown conv shape(s): {', '.join(missing)}")
     return [s for s in shapes if s["name"] in requested]
 
+def parse_shape_args(argv):
+    requested = []
+    start_index = 0
+    count = None
+    skip_indices = set()
+    idx = 0
+    while idx < len(argv):
+        arg = argv[idx]
+        if arg == "--start-index":
+            idx += 1
+            if idx >= len(argv):
+                raise SystemExit("--start-index requires a value")
+            start_index = int(argv[idx])
+        elif arg == "--count":
+            idx += 1
+            if idx >= len(argv):
+                raise SystemExit("--count requires a value")
+            count = int(argv[idx])
+        elif arg == "--skip-index":
+            idx += 1
+            if idx >= len(argv):
+                raise SystemExit("--skip-index requires a value")
+            skip_indices.add(int(argv[idx]))
+        else:
+            requested.append(arg)
+        idx += 1
+    if start_index < 0:
+        raise SystemExit("--start-index must be >= 0")
+    if count is not None and count < 0:
+        raise SystemExit("--count must be >= 0")
+    if any(skip_index < 0 for skip_index in skip_indices):
+        raise SystemExit("--skip-index values must be >= 0")
+    return requested, start_index, count, skip_indices
+
 def shape_stride(s):
     return s.get("stride", 1)
 
@@ -2837,21 +2225,22 @@ def shape_direct_spatial_descs(s):
     return plan_observed_spatial_tile_descs(
         p, s["in_c"], s["out_c"], s["kh"], s["kw"], s["in_h"], s["in_w"], s["groups"], stride)
 
-def shape_requires_direct_spatial_gate(s):
+def shape_has_evidence_only_direct_spatial(s):
     descs = shape_direct_spatial_descs(s)
-    if not descs or direct_spatial_hw_enabled():
+    if not descs:
         return False
     stride = shape_stride(s)
     p = _conv_params(s["in_c"], s["in_h"], s["in_w"], s["out_c"], s["kh"], s["kw"], s["groups"], stride)
-    return _needs_spatial_im2col_fallback(p, s["in_c"], s["out_c"], s["kh"], s["kw"], s["groups"])
+    return (not direct_spatial_plan_allowed(descs) and
+            _needs_spatial_im2col_fallback(p, s["in_c"], s["out_c"], s["kh"], s["kw"], s["groups"]))
 
 def print_shape_result(s, nw, iw, status, max_diff=None):
     diff_text = "" if max_diff is None else f"  (max_diff={max_diff:.4f})"
     print(f"  {s['name']:<{nw}s} {shape_input_text(s):<{iw}s} -> {shape_output_text(s)}  {status}{diff_text}")
 
 def run_shape_check(s):
-    if shape_requires_direct_spatial_gate(s):
-        return "GATED", None
+    if shape_has_evidence_only_direct_spatial(s):
+        return "SKIP", None
     stride = shape_stride(s)
     result, inp, wt = run_conv(s["batch"], s["in_c"], s["out_c"], s["kh"], s["kw"],
                                (s["in_h"], s["in_w"]), groups=s["groups"], stride=stride)
@@ -2861,12 +2250,20 @@ def run_shape_check(s):
     ok = np.allclose(result, expected, atol=0.2) and not np.any(np.isinf(result))
     return "PASS" if ok else "FAIL", max_diff
 
-def run_shape_suite(shapes, requested):
+def run_shape_suite(shapes, requested, start_index=0, count=None, skip_indices=frozenset()):
     shapes = select_shapes(shapes, requested)
+    indexed_shapes = list(enumerate(shapes))[start_index:]
+    if count is not None:
+        indexed_shapes = indexed_shapes[:count]
+    indexed_shapes = [(idx, s) for idx, s in indexed_shapes if idx not in skip_indices]
+    if not indexed_shapes:
+        return
+    shapes = [s for _idx, s in indexed_shapes]
     name_width = max(len(s["name"]) for s in shapes)
     input_width = max(len(shape_input_text(s)) for s in shapes)
-    for s in shapes:
+    for idx, s in indexed_shapes:
         status, max_diff = run_shape_check(s)
+        print(f"[{idx}] ", end="")
         print_shape_result(s, name_width, input_width, status, max_diff)
 
 def conv_shape(name, batch, in_c, in_h, in_w, out_c, kh, kw, groups, stride=1):
@@ -2906,6 +2303,10 @@ def pvalid_pointwise_shapes(in_c, hw, out_channels): return [pvalid_shape(in_c, 
 def pvalid_pointwise_clusters(specs): return [pvalid_shape(in_c, hw, out_c, 1, 1) for in_c, hw, out_channels in specs for out_c in out_channels]
 
 def conv_shapes():
+    shapes = conv_regression_shapes()
+    return [s for s in shapes if s["name"] != "b1_c160_h40_w40_oc320_wic160_k3x3_g1_s1_pvalid"]
+
+def conv_regression_shapes():
     return [
         # -- 1x1 kernels (fully supported via NHWC mode + channel slicing for ic>=5) --
         *shape_specs((
@@ -3177,7 +2578,8 @@ def conv_shapes():
 
 def main(argv):
     try:
-        run_shape_suite(conv_shapes(), argv)
+        requested, start_index, count, skip_indices = parse_shape_args(argv)
+        run_shape_suite(conv_shapes(), requested, start_index, count, skip_indices)
     finally:
         if fd >= 0:
             os.close(fd)
