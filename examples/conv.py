@@ -62,6 +62,7 @@ PREFIX_BY_K_SHAPES = {
     "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid",
     "b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid",
     "b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid",
+    "b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid",
     "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid",
     "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid",
     "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1",
@@ -294,6 +295,7 @@ CBUF0_OVERRIDES = {
     "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid": 0x02a,
     "b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid": 0x0b1,
     "b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid": 0x0b1,
+    "b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid": 0x0b1,
     "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid": 0x084,
     "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x0a2,
     "b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x0a2,
@@ -310,6 +312,7 @@ DATA_SIZE1_OVERRIDES = {
     "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid": 0x003f00c0,
     "b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid":   0x003f0100,
     "b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid":   0x003f0100,
+    "b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid":   0x003f0100,
     "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid":  0x00270028,
     "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x003f0200,
     "b1_c512_h7_w7_oc1024_wic512_k1x1_g1":            0x003f0200,
@@ -339,6 +342,7 @@ CVT_CON0_OVERRIDES = {
     "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid": 0x000b,
     "b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid": 0x000b,
     "b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid": 0x000b,
+    "b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid": 0x000b,
     "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid": 0x000b,
     "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x000b,
     "b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x000b,
@@ -368,6 +372,7 @@ DMA_CON2_OVERRIDES = {
     "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid": 0x02a0,
     "b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid": 0x0ffffffc,
     "b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid": 0x0ffffffd,
+    "b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid": 0x0ffffffd,
     "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid": 0x05a0,
     "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x0015,
     "b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x0015,
@@ -381,6 +386,7 @@ KT_FAMILY_BITS_OVERRIDES = {
 # The K_SPLITS dict overrides the default for shapes where the default is wrong (e.g. oc=128 needs (0, 32), (32, 64), (64, 32))
 KT_TILE_SPLITS = {
     "b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid": ((0, 48), (48, 48), (96, 32)),
+    "b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid": ((0, 48), (48, 48), (96, 32)),
     # 1x1 pointwise: 3 k_tiles (per live c64_h1_oc128 capture)
     # Note: first k_tile covers 64 OC (overlaps with k_half)
     "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid":   ((0, 64), (48, 48), (96, 32)),
