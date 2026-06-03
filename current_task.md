@@ -385,3 +385,54 @@ The 6 remaining spatial 3x3 siblings likely need:
 
 `python3 examples/simple_add.py` PASS at 16:15. Worktree clean (c40_h40_oc160 and c72_h20_oc288 entries reverted via `git checkout examples/conv.py`).
 
+
+---
+
+## 13. This Session's Promotions (3 confirmed)
+
+After the comprehensive current_task.md rewrite (16:00), continued with promotion attempts:
+
+### 13.1 Successfully promoted (3 shapes, +3 PASS)
+
+| Shape | Commit | max_diff | Path |
+|---|---|---|---|
+| c256_h3_oc128_1x1 | `9cb0ea7` | 0.0155 | EXACT11 BY_K, body field overrides from c256_h3_oc24 sibling |
+| c128_h3_oc256_1x1 | `0f2dc04` | 0.0154 | EXACT11 BY_K, c128 family (DATA_SIZE1=0x003f0080) |
+| c128_h3_oc256_3x3 | `eb45bfb` | 0.0310 | EXACT11 BY_K, spatial 3x3 with CONV2_LOW=0x060 |
+
+All 3 used the same EXACT11 BY_K body field patches from sibling captures:
+- CBUF0=0x0b1
+- DATA_SIZE1=0x003f0080 (c128) or 0x003f0100 (c256)
+- CVT_CON0=0x000b
+- DMA_CON2=0x0ffffffd
+- KT_TILE_SPLITS summing to oc (16-aligned)
+
+### 13.2 Manifest entries added (commit df58206)
+
+3 manifest entries added to `conv_expt/rknn_prefix_replay.py` documenting the new promotions.
+
+### 13.3 Failed attempts (all reverted, no regressions)
+
+| Shape | max_diff | Note |
+|---|---|---|
+| c256_h3_oc546 | 35.69 | First 512 OC correct, OC 544 wrong (last k_tile issue) |
+| c288_h20_oc72 | 147 | Body fields from c256 family don't transfer |
+| c72_h20_oc576 | 105 | Body fields from c256 family don't transfer |
+| c96_h20_oc273 | 117 | Body fields from c128 family don't transfer |
+| c1024_h1_oc1001 | 77 | Body fields from c64_h1_oc128 don't transfer |
+| c480_h10_oc120 | 142 | Windows wrong for in_h=10 |
+| c384_h19_oc64/96 | 163 | Windows wrong for in_h=19 |
+| c832_h7_oc48 | inf | Large in_c, body fields need fresh decode |
+
+### 13.4 Sweep confirmation
+
+- Sweep 170242 (16:42): 142/75
+- Sweep 171610 (17:16): 142/75
+- Sweep 172056 (17:20): 142/75
+- All sweeps confirm no regressions, 3 promotions stable
+- NPU healthy throughout (simple_add.py PASS at every checkpoint)
+
+### 13.5 Key insight
+
+The c128 family (in_c=128, in_h=3, oc=256) was a "sweet spot" where body field constants from one shape (c128_h3_oc128_k1x1 promoted) transferred cleanly to siblings (c128_h3_oc256_k1x1, c128_h3_oc256_k3x3). Other families (c72, c96, c288, c480, c832) require more careful per-shape body field derivation.
+
