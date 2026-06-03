@@ -55,6 +55,124 @@ TARGETS = {
         "dump": "/home/orangepi/npu/ops_rknn/dump/conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1_dump.txt",
         "note": "unprefixed alias promoted with the pointwise exact-11 body rows proven by live regcmd-base capture on the prefixed shape",
     },
+    "c192_h28_oc96_pw_by_k": {
+        "shape": "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid",
+        "case": "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid 1 192 28 28 96 1 1 1 c192_h28_oc96_pw",
+        "emit": None,
+        "dump": "/home/orangepi/npu/ops_rknn/dump/prefix_c192_h28_oc96_keep1_gem1/dump_gem1.txt",
+        "note": "promoted via RKNN prefix replay and local exact11 OC-k-tile replay. RKNN KEEP_TASKS=1 PREFIX_MODE=linear passed max error 0.0311127 and post simple_add PASS. GEM1 task dump is exact11 amounts=108,104,26,104,26,104,26,104,26,104,26 masks=0x0d/0x60 offsets=0,112,224,256,368,400,512,544,656,688,800. GEM2 visible body fields showed CBUF0=0x2a, DATA_SIZE1=0x003f00c0, DMA_CON2=0x2a0, SURFACE_ADD=0x6200, and CONV2 sequence setup=0x90, two rows 0x40000090, then three rows 0x50000090. Existing h28 y-window reuse failed final tile, but OC k_tile splits 0:32/32:32/64:32 passed locally with max_diff=0.0306 and pre/post simple_add PASS.",
+    },
+    "c512_h14_oc32_pw_by_k": {
+        "shape": "b1_c512_h14_w14_oc32_wic512_k1x1_g1",
+        "case": "b1_c512_h14_w14_oc32_wic512_k1x1_g1 1 512 14 14 32 1 1 1 c512_h14_oc32_pw_by_k",
+        "emit": None,
+        "capture": "/tmp/c512_h14_oc32_capture.log",
+        "note": "promoted via targeted RKNN live regcmd capture of matched model: 11 task descriptors amounts=108,104,26,104,26,104,26,104,26,104,26 masks=0x0d/0x60 submit_task_number=3; body fields CBUF0=0x57 DATA_SIZE1=0x003f0200 DMA_CON2=0x8c CVT_CON0=0xb; y windows 0+5 conv2=0x60, 5+5 conv2=0x60, 10+4 conv2=0x50; NPU validation max_diff=0.0312 with pre/post simple_add PASS",
+    },
+    "c512_h14_oc112_pw_by_k": {
+        "shape": "b1_c512_h14_w14_oc112_wic512_k1x1_g1",
+        "case": "b1_c512_h14_w14_oc112_wic512_k1x1_g1 1 512 14 14 112 1 1 1 c512_h14_oc112_pw_by_k",
+        "emit": None,
+        "note": "promoted via the c512_h14 pointwise exact11 BY_K body proven for c512_h14_oc32: 11 task descriptors, CBUF0=0x57 DATA_SIZE1=0x003f0200 DMA_CON2=0x8c CVT_CON0=0xb, y windows 0+5/5+5/10+4 with conv2 0x60/0x60/0x50. One-off guarded submit PASS max_diff=0.0312, post simple_add PASS.",
+    },
+    "c512_h14_oc512_pw_by_k": {
+        "shape": "b1_c512_h14_w14_oc512_wic512_k1x1_g1",
+        "case": "b1_c512_h14_w14_oc512_wic512_k1x1_g1 1 512 14 14 512 1 1 1 c512_h14_oc512_pw_by_k",
+        "emit": None,
+        "note": "promoted via the c512_h14 pointwise exact11 BY_K body: 11 task descriptors, CBUF0=0x57 DATA_SIZE1=0x003f0200 DMA_CON2=0x8c CVT_CON0=0xb, y windows 0+5/5+5/10+4 with conv2 0x60/0x60/0x50. One-off guarded submit PASS max_diff=0.0312, post simple_add PASS.",
+    },
+    "cc_c512_h14_oc512_pw_by_k": {
+        "shape": "conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1",
+        "case": "conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1 1 512 14 14 512 1 1 1 cc_c512_h14_oc512_pw_by_k",
+        "emit": None,
+        "note": "promoted via the same c512_h14 pointwise exact11 BY_K body as the unprefixed alias: 11 task descriptors, CBUF0=0x57 DATA_SIZE1=0x003f0200 DMA_CON2=0x8c CVT_CON0=0xb, y windows 0+5/5+5/10+4 with conv2 0x60/0x60/0x50. One-off guarded submit PASS max_diff=0.0312, post simple_add PASS.",
+    },
+    "c384_h14_oc96_pw_by_k": {
+        "shape": "b1_c384_h14_w14_oc96_wic384_k1x1_g1",
+        "case": "b1_c384_h14_w14_oc96_wic384_k1x1_g1 1 384 14 14 96 1 1 1 c384_h14_oc96_pw_by_k",
+        "emit": None,
+        "note": "promoted via h14 pointwise exact11 BY_K body: 11 task descriptors, CBUF0=0x57 DATA_SIZE1=0x00bf0180 DMA_CON2=0x8c CVT_CON0=0xb, y windows 0+5/5+5/10+4 with conv2 0x60/0x60/0x50. One-off guarded submit PASS max_diff=0.0312, post simple_add PASS.",
+    },
+    "c480_h14_oc96_pw_by_k": {
+        "shape": "b1_c480_h14_w14_oc96_wic480_k1x1_g1",
+        "case": "b1_c480_h14_w14_oc96_wic480_k1x1_g1 1 480 14 14 96 1 1 1 c480_h14_oc96_pw_by_k",
+        "emit": None,
+        "note": "promoted via h14 pointwise exact11 BY_K body: 11 task descriptors, CBUF0=0x57 DATA_SIZE1=0x00ef01e0 DMA_CON2=0x8c CVT_CON0=0xb, y windows 0+5/5+5/10+4 with conv2 0x60/0x60/0x50. One-off guarded submit PASS max_diff=0.0312, post simple_add PASS.",
+    },
+    "c528_h14_pointwise_family_by_k": {
+        "shape": "b1_c528_h14_w14_oc32_wic528_k1x1_g1",
+        "case": "b1_c528_h14_w14_oc32_wic528_k1x1_g1 1 528 14 14 32 1 1 1 c528_h14_pointwise_family_by_k",
+        "emit": None,
+        "note": "promoted c528 h14 pointwise exact11 BY_K family with corrected natural DATA_SIZE1=0x01070210, CBUF0=0x57, DMA_CON2=0x8c, CVT_CON0=0xb, y windows 0+5/5+5/10+4 with conv2 0x60/0x60/0x50. Hardware PASS for oc32/128/160/256 and _s1_pvalid aliases; earlier oc32 negative used wrong c512 DATA_SIZE1=0x003f0200.",
+    },
+    "c528_h14_oc128_pw_by_k": {
+        "shape": "b1_c528_h14_w14_oc128_wic528_k1x1_g1",
+        "case": "b1_c528_h14_w14_oc128_wic528_k1x1_g1 1 528 14 14 128 1 1 1 c528_h14_oc128_pw_by_k",
+        "emit": None,
+        "note": "promoted via c528 h14 pointwise family body, DATA_SIZE1=0x01070210; guarded submit PASS max_diff=0.0311.",
+    },
+    "c528_h14_oc160_pw_by_k": {
+        "shape": "b1_c528_h14_w14_oc160_wic528_k1x1_g1",
+        "case": "b1_c528_h14_w14_oc160_wic528_k1x1_g1 1 528 14 14 160 1 1 1 c528_h14_oc160_pw_by_k",
+        "emit": None,
+        "note": "promoted via c528 h14 pointwise family body, DATA_SIZE1=0x01070210; guarded submit PASS max_diff=0.0311.",
+    },
+    "c528_h14_oc256_pw_by_k": {
+        "shape": "b1_c528_h14_w14_oc256_wic528_k1x1_g1",
+        "case": "b1_c528_h14_w14_oc256_wic528_k1x1_g1 1 528 14 14 256 1 1 1 c528_h14_oc256_pw_by_k",
+        "emit": None,
+        "note": "promoted via c528 h14 pointwise family body, DATA_SIZE1=0x01070210; guarded submit PASS max_diff=0.0312.",
+    },
+    "c528_h14_oc32_pvalid_pw_by_k": {
+        "shape": "b1_c528_h14_w14_oc32_wic528_k1x1_g1_s1_pvalid",
+        "case": "b1_c528_h14_w14_oc32_wic528_k1x1_g1_s1_pvalid 1 528 14 14 32 1 1 1 c528_h14_oc32_pvalid_pw_by_k",
+        "emit": None,
+        "note": "promoted via c528 h14 pointwise family body, DATA_SIZE1=0x01070210; guarded submit PASS max_diff=0.0311.",
+    },
+    "c528_h14_oc128_pvalid_pw_by_k": {
+        "shape": "b1_c528_h14_w14_oc128_wic528_k1x1_g1_s1_pvalid",
+        "case": "b1_c528_h14_w14_oc128_wic528_k1x1_g1_s1_pvalid 1 528 14 14 128 1 1 1 c528_h14_oc128_pvalid_pw_by_k",
+        "emit": None,
+        "note": "promoted via c528 h14 pointwise family body, DATA_SIZE1=0x01070210; guarded submit PASS max_diff=0.0311.",
+    },
+    "c528_h14_oc160_pvalid_pw_by_k": {
+        "shape": "b1_c528_h14_w14_oc160_wic528_k1x1_g1_s1_pvalid",
+        "case": "b1_c528_h14_w14_oc160_wic528_k1x1_g1_s1_pvalid 1 528 14 14 160 1 1 1 c528_h14_oc160_pvalid_pw_by_k",
+        "emit": None,
+        "note": "promoted via c528 h14 pointwise family body, DATA_SIZE1=0x01070210; guarded submit PASS max_diff=0.0311.",
+    },
+    "c528_h14_oc256_pvalid_pw_by_k": {
+        "shape": "b1_c528_h14_w14_oc256_wic528_k1x1_g1_s1_pvalid",
+        "case": "b1_c528_h14_w14_oc256_wic528_k1x1_g1_s1_pvalid 1 528 14 14 256 1 1 1 c528_h14_oc256_pvalid_pw_by_k",
+        "emit": None,
+        "note": "promoted via c528 h14 pointwise family body, DATA_SIZE1=0x01070210; guarded submit PASS max_diff=0.0312.",
+    },
+    "c576_h14_oc96_pw_by_k": {
+        "shape": "b1_c576_h14_w14_oc96_wic576_k1x1_g1",
+        "case": "b1_c576_h14_w14_oc96_wic576_k1x1_g1 1 576 14 14 96 1 1 1 c576_h14_oc96_pw_by_k",
+        "emit": None,
+        "note": "promoted via h14 pointwise exact11 BY_K body: 11 task descriptors, CBUF0=0x57 DATA_SIZE1=0x011f0240 DMA_CON2=0x8c CVT_CON0=0xb, y windows 0+5/5+5/10+4 with conv2 0x60/0x60/0x50. One-off guarded submit PASS max_diff=0.0312, post simple_add PASS.",
+    },
+    "c512_h14_oc24_pw_by_k_negative_probe": {
+        "shape": "b1_c512_h14_w14_oc24_wic512_k1x1_g1",
+        "case": "match_b1_c512_h14_w14_oc24_wic512_k1x1_g1 1 512 14 14 24 1 1 1 c512_h14_oc24_pw_by_k_negative_probe",
+        "emit": None,
+        "dump": "/home/orangepi/npu/ops_rknn/dump/prefix_c512_h14_oc24_keep1_gem1/dump_gem1.txt",
+        "note": "kept fenced: fresh RKNN prefix replay on matched model passed with max error 0.0539551 and NPU health PASS. GEM1 task dump shows exact11 descriptors amounts=108,104,26,104,26,104,26,104,26,104,26 masks=0x0d/0x60 offsets=0,112,224,256,368,400,512,544,656,688,800, original submit three one-task subcores. GEM2 body rows differ from wider c512 oc32: setup CONV2=0x90, then two full-OC input_h=7 body rows CONV2=0x10000080, then y rows 0x20000060/0x20000060/0x20000050, WEIGHT_SIZE0=0x6000 throughout. Replaying those visible row fields in conv.py still failed with max_diff=135.3407 and post simple_add PASS, so visible body/task fields alone are not the missing closure.",
+    },
+    "c832_h7_oc48_pw_by_k_negative_probe": {
+        "shape": "b1_c832_h7_w7_oc48_wic832_k1x1_g1",
+        "case": "match_b1_c832_h7_w7_oc48_wic832_k1x1_g1 1 832 7 7 48 1 1 1 c832_h7_oc48_pw_by_k",
+        "emit": None,
+        "dump": "/home/orangepi/npu/ops_rknn/dump/prefix_c832_h7_oc48_keep1_gem1/dump_gem1.txt",
+        "note": "kept fenced: safe RKNN KEEP_TASKS=1 PREFIX_MODE=linear passed max error 0.0584869 and post simple_add PASS. GEM1 is exact11 amounts=108,104,26,104,26,104,26,104,26,104,26 masks=0x0d/0x60 offsets=0,112,224,256,368,400,512,544,656,688,800. GEM2 shows a narrow h7 body setup,setup,ppu_pdp,setup,ppu_pdp,k_tile,ppu_pdp,k_tile,ppu_pdp,k_tile,ppu_pdp with full-OC setup rows then three 16-channel k_tile rows, constants CBUF0=0x93 DATA_SIZE1=0x003f0340 DMA_CON2=0x15 DST_SURF_STRIDE=0x34 SURFACE_ADD=0x68. No-submit materializer matches critical fields, but local 11-row replay and local task0 setup108 replay both produced inf output while health stayed PASS. Keep fenced pending buffer/layout parity.",
+    },
+    "c480_h14_oc16_pw_by_k_negative_probe": {
+        "shape": "b1_c480_h14_w14_oc16_wic480_k1x1_g1",
+        "case": "b1_c480_h14_w14_oc16_wic480_k1x1_g1 1 480 14 14 16 1 1 1 c480_h14_oc16_pw_by_k_negative_probe",
+        "emit": None,
+        "note": "kept fenced: same guessed h14 pointwise exact11 body as c480_h14_oc96 timed out on one-off guarded submit. Post simple_add PASS, but this shape needs a narrow-OC RKNN closure before promotion.",
+    },
     "h7_by_k": {
         "shape": "b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid",
         "case": "b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid 1 160 7 7 320 3 3 1 h7_by_k",
@@ -157,7 +275,7 @@ TARGETS = {
         "case": "b1_c576_h19_w19_oc12_wic576_k1x1_g1_s1_pvalid 1 576 19 19 12 1 1 1 c576_h19_pw_by_y",
         "emit": None,
         "dump": "/home/orangepi/npu/ops_rknn/dump/prefix_c576_h19_keep1_gem1/dump_gem1.txt",
-        "note": "kept fenced: local replay timed out; RKNN task dump shows 12 descriptors with amounts 108,108,104,26,104,26,104,26,104,26,104,26 and masks 0x0d/0x60, so this needs RKNN closure semantics",
+        "note": "kept fenced: local replay timed out; RKNN task dump shows 12 descriptors with amounts 108,108,104,26,104,26,104,26,104,26,104,26 and masks 0x0d/0x60. Fresh KEEP_TASKS=1 PREFIX_MODE=linear run exited cleanly but failed numerically with broad mismatches (first output got small nonzero values, tail got zeros) and post simple_add PASS, so this needs RKNN closure semantics beyond one-task prefix.",
     },
     "c128_h80_pw_by_y": {
         "shape": "b1_c128_h80_w80_oc16_wic128_k1x1_g1_s1_pvalid",
@@ -173,6 +291,13 @@ TARGETS = {
         "shape": "b1_c160_h40_w40_oc40_wic160_k1x1_g1_s1_pvalid",
         "case": "b1_c160_h40_w40_oc40_wic160_k1x1_g1_s1_pvalid 1 160 40 40 40 1 1 1 c160_h40_pw_by_yk",
         "emit": None,
+    },
+    "c40_h40_oc320_pw_by_yk": {
+        "shape": "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid",
+        "case": "match_b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid 1 40 40 40 320 1 1 1 c40_h40_oc320_pw_by_yk",
+        "emit": None,
+        "dump": "/home/orangepi/npu/ops_rknn/dump/prefix_c40_h40_oc320_keep1_gem1/dump_gem1.txt",
+        "note": "promoted via RKNN prefix replay and local one-task setup108 compact-weight replay. KEEP_TASKS=1 PREFIX_MODE=linear passed with max error 0.0178719 and post simple_add PASS. Original submit is three one-task subcores. GEM1 task dump is exact11 amounts=108,104,26,104,26,104,26,104,26,104,26 masks=0x0d/0x60 offsets=0,112,224,256,368,400,512,544,656,688,800. Fresh GEM2 dump /home/orangepi/npu/ops_rknn/dump/prefix_c40_h40_oc320_keep1_gem2/dump_gem2.txt shows setup row fields CBUF0=0x84, CONV2=0x160, DATA_SIZE1=0x00270028, CBUF1=0x32, WEIGHT_SIZE0=0x6400, WEIGHT_SIZE1=0x50, DMA_CON2=0x5a0, FC_DATA_SIZE1=0x28. Local 11-task replay failed numerically, matching the safe prefix result that task 0 alone computes the full output. Local examples/conv.py setup108 compact-weight replay PASS max_diff=0.0155 with pre/post simple_add PASS.",
     },
     "cc_c32_h112_pw_by_yk": {
         "shape": "conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1",
@@ -300,13 +425,22 @@ TARGETS = {
         "shape": "b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid",
         "case": "b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid 1 256 3 3 24 1 1 1 c256_h3_oc24_pw_none",
         "emit": None,
-        "note": "pointwise-wide NONE remains fenced: one-off local setup-row replay was numerically wrong (max_diff=75.3440), so RKNN 108-row closure is still required",
+        "dump": "/home/orangepi/npu/ops_rknn/dump/prefix_c256_h3_none_keep1_gem1/dump_gem1.txt",
+        "note": "promoted via RKNN prefix replay and local exact11 compact-weight PC-chain replay. KEEP_TASKS=1 PREFIX_MODE=linear passed in RKNN with max error 0.0190849 and post simple_add PASS. GEM1 task dump is exact11 amounts=108,104,26,104,26,104,26,104,26,104,26 masks=0x0d/0x60 offsets=0,112,224,256,368,400,512,544,656,688,800. GEM2 at /home/orangepi/npu/ops_rknn/dump/prefix_c256_h3_none_keep1_gem2/dump_gem2.txt shows the active 11-row PC-chain: setup h3 conv2=0x40, h2 conv2=0x10000030, h1 conv2=0x10000020, then y_start 0/1/2 rows conv2=0x20000020, compact WEIGHT_SIZE0=0x3000, CBUF0=0xb1, DATA_SIZE1=0x003f0100, DMA_CON2=0x0ffffffd. Local examples/conv.py PASS max_diff=0.0149 and post simple_add PASS.",
     },
     "c256_h2_oc24_pw_none": {
         "shape": "b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid",
         "case": "b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid 1 256 2 2 24 1 1 1 c256_h2_oc24_pw_none",
         "emit": None,
-        "note": "pointwise-wide NONE remains fenced: one-off local setup-row replay was numerically wrong (max_diff=69.0113), so RKNN 108-row closure is still required",
+        "dump": "/home/orangepi/npu/ops_rknn/dump/prefix_c256_h2_none_keep1_gem2/dump_gem2.txt",
+        "note": "promoted via RKNN setup108 body plus compact pointwise weight packing. GEM2 active row at offset 0x3840 exactly matches _exact11_body_regs setup after overrides CBUF0=0xb1, CONV2_LOW=0x30, DATA_SIZE1=0x003f0100, CVT_CON0=0xb, DMA_CON2=0x0ffffffc. Local padded pointwise weight packing wrote 0x4000 bytes and made channels 16-23 wrong; compact 24-kernel packing writes RKNN's WEIGHT_SIZE0=0x3000 bytes and passes. Direct examples/conv.py PASS max_diff=0.0245 with pre/post simple_add PASS; one-shape sweep /tmp/opencode/conv_py_217_sweep_20260602_204347_summary.txt PASS pre_health_rc=0 post_health_rc=0.",
+    },
+    "c256_h2_oc64_crash_fence": {
+        "shape": "b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid",
+        "case": "b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid 1 256 2 2 64 1 1 1 c256_h2_oc64_crash_fence",
+        "emit": None,
+        "dump": "/home/orangepi/npu/ops_rknn/dump/prefix_c256_h2_oc64_keep1_gem1/dump_gem1.txt",
+        "note": "crash-fenced after local oc24 setup108 generalization reboot. Existing RKNN prefix artifacts are now asserted by examples/conv_crash_fence_no_submit.py c256_h2_oc64: GEM1 exact11 task metadata amounts=108,104,26,104,26,104,26,104,26,104,26 masks=0x0d/0x60 offsets=0,112,224,256,368,400,512,544,656,688,800; GEM2 body rows are setup,k_half,ppu_pdp,k_half,ppu_pdp,k_tile,ppu_pdp,k_tile,ppu_pdp,k_tile,ppu_pdp with row lengths 130,106,29,106,29,106,29,106,29,106,29. Key fields: CBUF0=0xb1 DATA_SIZE1=0x003f0100 DMA_CON2=0x0ffffffc setup WEIGHT_SIZE0=0x8000, k_half/k_tile 0x4000/0x2000, out_c 64,32,32,32,16,16. This is not the oc24 one-task setup108 closure; keep crash-fenced until runtime emits the exact11 oc64 body safely.",
     },
     "c128_h1_oc24_pw_none": {
         "shape": "b1_c128_h1_w1_oc24_wic128_k1x1_g1_s1_pvalid",
@@ -320,6 +454,48 @@ TARGETS = {
         "case": "conv2d_b1_c32_h32_w32_oc32_wic1_k1x1_g32 1 32 32 32 32 1 1 32 dw32_h32_pw_serial",
         "emit": None,
         "note": "promoted after one-off local grouped_serial replay passed: 32 one-task submits, max_diff=0.0010, post simple_add PASS; path is depthwise+1x1+setup/NONE, gated by run_grouped_serial_shape (no RKNN 108-row closure needed); sibling shapes conv2d_b1_c3_h11_w28_oc3_wic1_k3x3_g3 and conv2d_b2_c3_h11_w28_oc3_wic1_k3x3_g3 also pass via the same 1-row depthwise dispatch with grouped_serial submits=3 and 6 respectively; depthwise BY_K path (4 k_tile submits) on b1_c128_h3_w3_oc128_wic1_k3x3_g128_s1_pvalid confirmed as timing out (6s NPU submit timeout), so multi-row depthwise remains fenced pending RKNN 108/104/26-row closure derivation; conv2d_multi cross-check of fenced shapes (c32_h14_oc64, c32_h7_oc128, c16_h80_oc64, c16_h80_oc128, c128_h1_oc24, c256_h3_oc24, c256_h2_oc24, c40_h40_oc320, c8_h160, c256_h28_oc256, c576_h19_oc12, c96_h20_oc96) is VALID when the .rknn models are built with /tmp/build_matched.py which constructs weights from the same MT19937(seed=0) sequence that conv2d_multi consumes for its CPU reference (replacing the input RNG portion and then producing the weight RNG in the exact same order). All 12 representative fenced shapes PASS in rknn_runtime with max error 0.0070-0.0447. This proves the NPU works for all 12; the conv.py fences reflect missing register setup, not NPU bugs.",
+    },
+    "dw96_h20_by_yk": {
+        "shape": "b1_c96_h20_w20_oc96_wic1_k3x3_g96_s1_pvalid",
+        "case": "match_b1_c96_h20_w20_oc96_wic1_k3x3_g96_s1_pvalid 1 96 20 20 96 3 3 96 dw_c96_h20_by_yk",
+        "emit": None,
+        "dump": "/home/orangepi/npu/ops_rknn/dump/prefix_dw_c96_h20_keep1_gem1/dump_gem1.txt",
+        "note": "fresh RKNN prefix evidence for a depthwise BY_YK representative: KEEP_TASKS=1 PREFIX_MODE=linear passed with max error 0.00697899 and post simple_add PASS. Original submit is three one-task subcores. GEM1 task dump is exact11 amounts=108,104,26,104,26,104,26,104,26,104,26 masks=0x0d/0x60 offsets=0,112,224,256,368,400,512,544,656,688,800.",
+    },
+    "dw96_h112_by_yk_task_dump": {
+        "shape": "b1_c96_h112_w112_oc96_wic1_k3x3_g96_s1_pvalid",
+        "case": "match_b1_c96_h112_w112_oc96_wic1_k3x3_g96_s1_pvalid 1 96 112 112 96 3 3 96 c96_h112_dw_by_yk",
+        "emit": None,
+        "dump": "/home/orangepi/npu/ops_rknn/dump/prefix_c96_h112_dw_by_yk_keep1_gem1/dump_gem1.txt",
+        "note": "task-only prefix evidence for a remaining depthwise BY_YK fence. Existing matched model /home/orangepi/npu/ops_rknn/models/match_b1_c96_h112_w112_oc96_wic1_k3x3_g96_s1_pvalid.rknn was run with safe KEEP_TASKS=1 PREFIX_MODE=linear DUMP_GEM=1. The one-task prefix exited cleanly and failed numerically with partial output, as expected; post simple_add PASS. examples/conv_depthwise_by_y_layout_no_submit.py c96_h112_by_yk_task asserts GEM1 task metadata: 31 tasks, amounts=108,108,12,12,12,12,16,16,12,104,104,104,104,26,104,104,104,104,26,104,104,104,26,104,104,104,26,104,104,104,26 masks=0x0d/0x60 offsets=0,112,224,240,256,272,288,312,336,352,464,576,688,800,832,944,1056,1168,1280,1312,1424,1536,1648,1680,1792,1904,2016,2048,2160,2272,2384. Local planner emits 90 equal BY_YK rows, so it is not RKNN-equivalent. This is not replay-ready because GEM2/body rows are not captured yet.",
+    },
+    "dw144_h56_by_yk_task_dump": {
+        "shape": "b1_c144_h56_w56_oc144_wic1_k3x3_g144_s1_pvalid",
+        "case": "match_b1_c144_h56_w56_oc144_wic1_k3x3_g144_s1_pvalid 1 144 56 56 144 3 3 144 c144_h56_dw_by_yk",
+        "emit": None,
+        "dump": "/home/orangepi/npu/ops_rknn/dump/prefix_c144_h56_dw_by_yk_keep1_gem1/dump_gem1.txt",
+        "note": "task-only prefix evidence for a remaining depthwise BY_YK fence. Built matched model /home/orangepi/npu/ops_rknn/models/match_b1_c144_h56_w56_oc144_wic1_k3x3_g144_s1_pvalid.rknn, then ran safe KEEP_TASKS=1 PREFIX_MODE=linear DUMP_GEM=1. The one-task prefix exited cleanly and failed numerically with partial output, as expected. examples/conv_depthwise_by_y_layout_no_submit.py c144_h56_by_yk_task asserts GEM1 task metadata: 17 tasks, amounts=108,108,12,12,18,104,104,26,104,104,26,104,26,104,26,104,26 masks=0x0d/0x60 offsets=0,112,224,240,256,280,392,504,536,648,760,792,904,936,1048,1080,1192. Local planner emits 75 equal BY_YK rows, so it is not RKNN-equivalent. This is not replay-ready because GEM2/body rows are not captured yet.",
+    },
+    "cc_c512_h14_dw_by_k": {
+        "shape": "conv2d_cc_b1_c512_h14_w14_oc512_wic1_k3x3_g512",
+        "case": "match_b1_c512_h14_w14_oc512_wic1_k3x3_g512 1 512 14 14 512 3 3 512 c512_h14_dw_by_k",
+        "emit": None,
+        "dump": "/home/orangepi/npu/ops_rknn/dump/prefix_c512_h14_dw_by_k_keep1_gem1/dump_gem1.txt",
+        "note": "fresh difficult-shape depthwise BY_K prefix evidence after crash follow-up: built matched model /home/orangepi/npu/ops_rknn/models/match_b1_c512_h14_w14_oc512_wic1_k3x3_g512.rknn, then ran KEEP_TASKS=1 PREFIX_MODE=linear twice with DUMP_GEM=1 and DUMP_GEM=2. Both passed max error 0.0076313 and post simple_add PASS. Patched submit was task_number=1, subcore_task[0]=(0,1), other subcores zero. GEM1 exact11 task metadata amounts=108,104,26,104,26,104,26,104,26,104,26 masks=0x0d/0x60 offsets=0,112,224,256,368,400,512,544,656,688,800. GEM2 rows at /home/orangepi/npu/ops_rknn/dump/prefix_c512_h14_dw_by_k_keep1_gem2/dump_gem2.txt decode as setup,setup,ppu_pdp,setup,ppu_pdp,y_tile,ppu_pdp,y_tile,ppu_pdp,y_tile,ppu_pdp with row lengths 115,106,29,106,29,106,29,106,29,106,29; active rows use full out_c=512 with input_h/out_h 14/11, 8/5, 8/5, 6/3, 6/3, 6/3. This proves the local BY_K/k_tile fence is not RKNN-equivalent for this depthwise shape.",
+    },
+    "cc_c512_h7_oc1024_pw_by_k": {
+        "shape": "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1",
+        "case": "match_b1_c512_h7_w7_oc1024_wic512_k1x1_g1 1 512 7 7 1024 1 1 1 c512_h7_oc1024_pw_by_k",
+        "emit": None,
+        "dump": "/home/orangepi/npu/ops_rknn/dump/prefix_c512_h7_oc1024_pw_by_k_keep1_gem1/dump_gem1.txt",
+        "note": "promoted via safe RKNN prefix evidence plus local exact11 BY_K replay. Built matched model /home/orangepi/npu/ops_rknn/models/match_b1_c512_h7_w7_oc1024_wic512_k1x1_g1.rknn and ran KEEP_TASKS=1 PREFIX_MODE=linear with DUMP_GEM=1 and DUMP_GEM=2; both passed max error 0.0458069 and post simple_add PASS. GEM1 exact11 task metadata amounts=108,104,26,104,26,104,26,104,26,104,26 masks=0x0d/0x60 offsets=0,112,224,256,368,400,512,544,656,688,800. GEM2 rows decode as setup,k_half,ppu_pdp,k_half,ppu_pdp,k_tile,ppu_pdp,k_tile,ppu_pdp,k_tile,ppu_pdp with active out_c 1024,512,512,352,336,336 and constants CBUF0=0xa2 DATA_SIZE1=0x003f0200 DMA_CON2=0x15 WEIGHT_SIZE0=0x100000/0x80000/0x58000/0x54000/0x54000. Local examples/conv.py direct run PASS max_diff=0.0312 with pre/post simple_add PASS after adding the captured 352/336/336 OC splits and constants.",
+    },
+    "c512_h7_oc1024_pw_by_k": {
+        "shape": "b1_c512_h7_w7_oc1024_wic512_k1x1_g1",
+        "case": "match_b1_c512_h7_w7_oc1024_wic512_k1x1_g1 1 512 7 7 1024 1 1 1 c512_h7_oc1024_pw_by_k",
+        "emit": None,
+        "dump": "/home/orangepi/npu/ops_rknn/dump/prefix_c512_h7_oc1024_pw_by_k_keep1_gem1/dump_gem1.txt",
+        "note": "promoted as the unprefixed alias of cc_c512_h7_oc1024_pw_by_k using the same exact11 BY_K body: amounts=108,104,26,104,26,104,26,104,26,104,26 masks=0x0d/0x60 offsets=0,112,224,256,368,400,512,544,656,688,800; GEM2 body is setup,k_half,ppu_pdp,k_half,ppu_pdp,k_tile,ppu_pdp,k_tile,ppu_pdp,k_tile,ppu_pdp with out_c 1024,512,512,352,336,336. Local examples/conv.py direct run PASS max_diff=0.0312 with post simple_add PASS.",
     },
     "c32_h14_oc64_promoted_via_generic_fix": {
         "shape": "b1_c32_h14_w14_oc64_wic32_k3x3_g1_s1_pvalid",
@@ -355,21 +531,77 @@ TARGETS = {
         "case": "conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1 1 256 28 28 256 1 1 1 cc_c256_h28_pw_by_yk_dump",
         "emit": None,
         "dump": "/home/orangepi/npu/ops_rknn/dump/conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1_dump.txt",
-        "note": "dump-only evidence for a remaining BY_YK fence; local setup-row replay was numerically wrong (max_diff=122.6959). RKNN rows show full-OC setup/y_tile rows with 128-channel k_half rows and PPU/PDP separators, so mixed Y/K task layout remains unresolved.",
+        "note": "dump-only evidence for a remaining BY_YK fence; local setup-row replay was numerically wrong (max_diff=122.6959). examples/conv_pointwise_by_yk_layout_no_submit.py cc_c256_h28 now asserts the RKNN 14-row closure: setup/setup, two 128-channel k_half pairs, PPU/PDP separators, and three full-OC y_tile rows. Constants are DATA_SIZE1=0x003f0100, DMA_CON2=0x2a0, DST_SURF_STRIDE=0x310, SURFACE_ADD=0x620, CBUF0=0x48/0x2048. Dynamic deltas are feature=0,0x1f80,0,0x1f80,...,0,0x1180,0x2140; weight second k_half block starts at 0x10000; output second k_half block starts at 0x31000/0x32f80. Local planner emits 48 32-OC setup/k_half/k_tile rows, so mixed Y/K task layout remains unresolved and fenced.",
+    },
+    "c256_h28_pw_by_yk_dump": {
+        "shape": "b1_c256_h28_w28_oc256_wic256_k1x1_g1",
+        "case": "b1_c256_h28_w28_oc256_wic256_k1x1_g1 1 256 28 28 256 1 1 1 c256_h28_pw_by_yk_dump",
+        "emit": None,
+        "dump": "/home/orangepi/npu/ops_rknn/dump/conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1_dump.txt",
+        "note": "unprefixed alias of cc_c256_h28_pw_by_yk_dump. examples/conv_pointwise_by_yk_layout_no_submit.py asserts that the local planner descriptor sequence is identical to the prefixed RKNN-dumped shape, so the same 14-row RKNN BY_YK closure evidence applies; still fenced until runtime can emit that mixed full-OC/128-channel-k-half/PPU-PDP closure.",
     },
     "cc_c64_h112_dw_by_yk_dump": {
         "shape": "conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64",
         "case": "conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64 1 64 112 112 64 3 3 64 cc_c64_h112_dw_by_yk_dump",
         "emit": None,
         "dump": "/home/orangepi/npu/ops_rknn/dump/conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64_dump.txt",
-        "note": "dump-only evidence for a remaining depthwise BY_YK fence; RKNN rows include irregular setup prologue rows, repeated 64-channel setup/y_tile pairs, and PPU/PDP separators, so grouped/depthwise replay is not promoted from this dump",
+        "note": "dump-only evidence for a remaining depthwise BY_YK fence; RKNN rows include irregular setup prologue rows, repeated 64-channel setup/y_tile pairs, and PPU/PDP separators. examples/conv_depthwise_by_y_layout_no_submit.py c64_by_yk asserts the 23-task closure: amounts=108,108,12,12,16,16,104,104,104,26,104,104,104,26,104,104,26,104,104,26,104,104,26 offsets=0,112,224,240,256,280,304,416,528,640,672,784,896,1008,1040,1152,1264,1296,1408,1520,1552,1664,1776 constants CBUF0=0x1b/0x201b DATA_SIZE1=0x003f0040 DMA_CON2=0x2f40 DST_SURF_STRIDE=0x2f44 SURFACE_ADD=0xbd10. Local planner emits 60 equal BY_YK rows and is not RKNN-equivalent, so grouped/depthwise replay is not promoted from this dump.",
+    },
+    "c64_h112_dw_by_yk_dump": {
+        "shape": "b1_c64_h112_w112_oc64_wic1_k3x3_g64",
+        "case": "b1_c64_h112_w112_oc64_wic1_k3x3_g64 1 64 112 112 64 3 3 64 c64_h112_dw_by_yk_dump",
+        "emit": None,
+        "dump": "/home/orangepi/npu/ops_rknn/dump/conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64_dump.txt",
+        "note": "unprefixed alias of cc_c64_h112_dw_by_yk_dump. examples/conv_depthwise_by_y_layout_no_submit.py c64_by_yk asserts that the local planner descriptor sequence is identical to the prefixed RKNN-dumped shape, so the same 23-task RKNN BY_YK closure evidence applies; still fenced until grouped/depthwise runtime can emit that task-safe closure.",
+    },
+    "cc_c128_h56_dw_by_yk_task_dump": {
+        "shape": "conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128",
+        "case": "match_b1_c128_h56_w56_oc128_wic1_k3x3_g128 1 128 56 56 128 3 3 128 c128_h56_dw_by_yk",
+        "emit": None,
+        "dump": "/home/orangepi/npu/ops_rknn/dump/prefix_c128_h56_dw_by_yk_keep1_gem1/dump_gem1.txt",
+        "note": "task-only prefix evidence for a remaining c128 h56 depthwise BY_YK fence. Built matched model /home/orangepi/npu/ops_rknn/models/match_b1_c128_h56_w56_oc128_wic1_k3x3_g128.rknn with gen_conv2d_models.py, then ran safe KEEP_TASKS=1 PREFIX_MODE=linear DUMP_GEM=1 prefix replay. The prefix output was intentionally partial and failed numerically, post simple_add PASS. examples/conv_depthwise_by_y_layout_no_submit.py c128_h56_by_yk_task asserts GEM1 task metadata amounts=108,108,12,12,104,104,26,104,104,26,104,26,104,26,104,26 masks=0x0d/0x60 offsets=0,112,224,240,256,368,480,512,624,736,768,880,912,1024,1056,1168. Local planner emits 60 equal BY_YK rows, so it is not RKNN-equivalent. This is not replay-ready because GEM2/body rows and constants are not captured yet.",
+    },
+    "c128_h56_dw_by_yk_task_dump": {
+        "shape": "b1_c128_h56_w56_oc128_wic1_k3x3_g128",
+        "case": "b1_c128_h56_w56_oc128_wic1_k3x3_g128 1 128 56 56 128 3 3 128 c128_h56_dw_by_yk_task",
+        "emit": None,
+        "dump": "/home/orangepi/npu/ops_rknn/dump/prefix_c128_h56_dw_by_yk_keep1_gem1/dump_gem1.txt",
+        "note": "unprefixed alias of cc_c128_h56_dw_by_yk_task_dump. examples/conv_depthwise_by_y_layout_no_submit.py c128_h56_by_yk_task asserts that the local planner descriptor sequence is identical to the prefixed shape, so the same 16-task RKNN BY_YK task-layout evidence applies; still fenced until GEM2/body rows are captured and runtime can emit that task-safe closure.",
+    },
+    "cc_c256_h28_dw_by_yk_task_dump": {
+        "shape": "conv2d_cc_b1_c256_h28_w28_oc256_wic1_k3x3_g256",
+        "case": "match_b1_c256_h28_w28_oc256_wic1_k3x3_g256 1 256 28 28 256 3 3 256 c256_h28_dw_by_yk",
+        "emit": None,
+        "dump": "/home/orangepi/npu/ops_rknn/dump/prefix_c256_h28_dw_by_yk_keep1_gem1/dump_gem1.txt",
+        "note": "task-only prefix evidence for a remaining c256 h28 depthwise BY_YK fence. Built matched model /home/orangepi/npu/ops_rknn/models/match_b1_c256_h28_w28_oc256_wic1_k3x3_g256.rknn with gen_conv2d_models.py, then ran safe KEEP_TASKS=1 PREFIX_MODE=linear DUMP_GEM=1 prefix replay. The prefix output was intentionally partial and failed numerically, post simple_add PASS. examples/conv_depthwise_by_y_layout_no_submit.py c256_h28_by_yk_task asserts GEM1 task metadata amounts=108,108,104,26,104,26,104,26,104,26,104,26 masks=0x0d/0x60 offsets=0,112,224,336,368,480,512,624,656,768,800,912. Local planner emits 72 equal BY_YK rows, so it is not RKNN-equivalent. This is not replay-ready because GEM2/body rows and constants are not captured yet.",
+    },
+    "c256_h28_dw_by_yk_task_dump": {
+        "shape": "b1_c256_h28_w28_oc256_wic1_k3x3_g256",
+        "case": "b1_c256_h28_w28_oc256_wic1_k3x3_g256 1 256 28 28 256 3 3 256 c256_h28_dw_by_yk_task",
+        "emit": None,
+        "dump": "/home/orangepi/npu/ops_rknn/dump/prefix_c256_h28_dw_by_yk_keep1_gem1/dump_gem1.txt",
+        "note": "unprefixed alias of cc_c256_h28_dw_by_yk_task_dump. examples/conv_depthwise_by_y_layout_no_submit.py c256_h28_by_yk_task asserts that the local planner descriptor sequence is identical to the prefixed shape, so the same 12-task RKNN BY_YK task-layout evidence applies; still fenced until GEM2/body rows are captured and runtime can emit that task-safe closure.",
     },
     "cc_c32_h112_dw_by_y_dump": {
         "shape": "conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32",
         "case": "conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32 1 32 112 112 32 3 3 32 cc_c32_h112_dw_by_y_dump",
         "emit": None,
         "dump": "/home/orangepi/npu/ops_rknn/dump/conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32_dump.txt",
-        "note": "dump-only evidence for a remaining depthwise BY_Y fence; RKNN rows include setup prologue rows, 32-channel setup/y_tile pairs, and PPU/PDP separators, so grouped/depthwise replay still needs task-safe closure",
+        "note": "dump and fresh prefix evidence for a remaining depthwise BY_Y fence. RKNN rows include setup prologue rows, 32-channel setup/y_tile pairs, and PPU/PDP separators. Fresh KEEP_TASKS=1 PREFIX_MODE=linear showed original submit task_number=9 with subcore_task=(0,3),(0,3),(0,3),(0,0),(0,0); partial prefix exited normally and post simple_add PASS. GEM1 task layout is stable: amounts=108,108,17,104,104,26,104,104,26,104,26,104,26,104,26 masks=0x0d/0x60 offsets=0,112,224,248,360,472,504,616,728,760,872,904,1016,1048,1160. Visible body constants: CBUF0=0x1b/0x201b reuse, DATA_SIZE1=0x001f0020, DMA_CON2=0x2f40, DST_SURF_STRIDE=0x2f44, SURFACE_ADD=0xbd10. examples/conv_depthwise_by_y_layout_no_submit.py c32_by_y asserts this dump/task closure and shows the local planner emits a non-equivalent 10-row equal BY_Y layout; grouped/depthwise replay needs this 15-row/9-submit-lane closure.",
+    },
+    "c32_h112_dw_by_y_dump": {
+        "shape": "b1_c32_h112_w112_oc32_wic1_k3x3_g32",
+        "case": "b1_c32_h112_w112_oc32_wic1_k3x3_g32 1 32 112 112 32 3 3 32 c32_h112_dw_by_y_dump",
+        "emit": None,
+        "dump": "/home/orangepi/npu/ops_rknn/dump/conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32_dump.txt",
+        "note": "unprefixed alias of cc_c32_h112_dw_by_y_dump. examples/conv_depthwise_by_y_layout_no_submit.py c32_by_y asserts that the local planner descriptor sequence is identical to the prefixed RKNN-dumped shape, so the same 15-task RKNN BY_Y closure evidence applies; still fenced until grouped/depthwise runtime can emit that task-safe closure.",
+    },
+    "c32_h150_dw_by_y_task_dump": {
+        "shape": "b1_c32_h150_w150_oc32_wic1_k3x3_g32_s1_pvalid",
+        "case": "b1_c32_h150_w150_oc32_wic1_k3x3_g32_s1_pvalid 1 32 150 150 32 3 3 32 c32_h150_dw_by_y_task",
+        "emit": None,
+        "dump": "/home/orangepi/npu/ops_rknn/dump/prefix_c32_h150_dw_by_y_keep1_gem1/dump_gem1.txt",
+        "note": "task-only prefix evidence for the remaining c32 h150 depthwise BY_Y fence. examples/conv_depthwise_by_y_layout_no_submit.py c32_h150_by_y_task asserts GEM1 task metadata amounts=108,108,13,12,17,104,104,104,26,104,104,104,26,104,104,26,104,104,26,104,104,26 masks=0x0d/0x60 offsets=0,112,224,248,264,288,400,512,624,656,768,880,992,1024,1136,1248,1280,1392,1504,1536,1648,1760. Local planner emits 13 equal BY_Y rows with input_h 14x12 then 6, so it is not RKNN-equivalent. This is not replay-ready because GEM2/body rows and constants are not captured yet.",
     },
 }
 
@@ -524,6 +756,7 @@ def dump_task_summary(path, gem_index=1):
         "amounts": tuple(task.get("amount") for task in tasks),
         "masks": tuple(task.get("mask") for task in tasks),
         "op_idx": tuple(task.get("op_idx") for task in tasks),
+        "regcmd_addrs": tuple(task.get("regcmd_addr") for task in tasks),
         "offsets": offsets,
     }
 
@@ -539,6 +772,8 @@ def print_task_summary(prefix, summary):
         print(f"  {prefix}_submit_task_number={summary['submit_task_number']}")
     print(f"  {prefix}_amounts=" + ",".join(str(value) for value in summary["amounts"]))
     print(f"  {prefix}_masks=" + ",".join(hex(value) for value in summary["masks"]))
+    if summary.get("regcmd_addrs"):
+        print(f"  {prefix}_regcmd_addrs=" + ",".join(f"0x{value:x}" for value in summary["regcmd_addrs"]))
     if summary["offsets"] is not None:
         print(f"  {prefix}_offsets=" + ",".join(str(value) for value in summary["offsets"]))
 
@@ -551,6 +786,14 @@ def task_pattern(summary):
     if len(amounts) == 11 and amounts == (108, 104, 26, 104, 26, 104, 26, 104, 26, 104, 26):
         if masks == (0x0d, 0x0d, 0x60, 0x0d, 0x60, 0x0d, 0x60, 0x0d, 0x60, 0x0d, 0x60):
             return "by_k_exact11_108_104_26"
+    if len(amounts) == 3 and amounts == (108, 108, 108) and masks == (0x0d, 0x0d, 0x0d):
+        addrs = summary.get("regcmd_addrs")
+        if addrs and len(set(addrs)) == 1:
+            return "same_regcmd_3subcore_setup108"
+        return "triple_setup108"
+    if len(amounts) == 15 and amounts == (108, 108, 17, 104, 104, 26, 104, 104, 26, 104, 26, 104, 26, 104, 26):
+        if masks == (0x0d, 0x0d, 0x0d, 0x0d, 0x0d, 0x60, 0x0d, 0x0d, 0x60, 0x0d, 0x60, 0x0d, 0x60, 0x0d, 0x60):
+            return "depthwise_by_y_15task_108_108_17_104_104_26"
     return f"tasks{len(amounts)}_" + "_".join(str(value) for value in amounts[:6])
 
 
@@ -599,11 +842,13 @@ def fenced_shapes(summary_path):
     shapes = []
     for line in summary_path.read_text().splitlines():
         parts = line.split()
-        if len(parts) < 2 or not parts[0].isdigit() or parts[1] != "FENCED":
+        if len(parts) >= 2 and parts[0] == "FENCED":
+            shapes.append(parts[1])
             continue
-        run = next((part[4:] for part in parts if part.startswith("run=")), None)
-        if run:
-            shapes.append(run)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1] == "FENCED":
+            run = next((part[4:] for part in parts if part.startswith("run=")), None)
+            if run:
+                shapes.append(run)
     return shapes
 
 
@@ -664,7 +909,7 @@ def main():
         meta = TARGETS[key]
         rows, task_summaries = target_evidence(meta)
         print(f"target={key} shape={meta['shape']} emit_rows={len(rows)}")
-        if meta["emit"] is None:
+        if meta.get("emit") is None:
             print("  status=no_emit_manifest use hardware submit decode for task topology")
         elif not rows:
             print("  status=missing_emit_dump generate RKNN model/dump before prefix replay")
@@ -682,14 +927,20 @@ def main():
             print(f"  note={meta['note']}")
         if rows:
             print_alignment_summary(rows, task_summaries, meta)
+        else:
+            for name, summary in task_summaries:
+                pattern = task_pattern(summary)
+                if pattern:
+                    print(f"  {name}_pattern={pattern}")
         for idx, row in enumerate(rows):
             info = summarize_row(row)
             print(f"  prefix={idx + 1:02d} family={info['family']:<7} input_h={info['input_h']} out_h={info['out_h']} out_c={info['out_c']} pc_amount={info['amount']}")
         print("  manual_replay:")
         print("    cd ~/npu/ops_rknn")
         print("    g++ -o conv2d_multi conv2d_multi.cpp -I../include -lrknnrt -std=c++11")
-        print(f"    # edit ioctl.gdb KEEP_TASKS=N and uncomment _patch_submit(regs[\"arg\"]), then run one N at a time")
-        print(f"    gdb -x ioctl.gdb --args ./conv2d_multi --case {meta['case']}")
+        print("    # safe prefix replay: one task, linearized onto subcore0")
+        print(f"    KEEP_TASKS=1 PREFIX_MODE=linear gdb -q -x ioctl_prefix_replay.gdb --args ./conv2d_multi --case {meta['case']}")
+        print("    # KEEP_TASKS>1 or PREFIX_MODE=subcores is unsafe on difficult shapes; ioctl_prefix_replay.gdb requires ALLOW_UNSAFE_PREFIX_REPLAY=1")
 
 
 if __name__ == "__main__":

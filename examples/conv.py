@@ -36,6 +36,9 @@ EXACT11_BYK_PC_AMOUNTS = (0, 0x1000e, 0, 0x1000e, 0, 0x2000e, 0, 0x2000e, 0, 0x2
 EXACT11_BYK_ROLES = ("setup_body", "k_half_body0", "aux0", "k_half_body1", "aux1", "k_tile_body0", "aux2", "k_tile_body1", "aux3", "k_tile_body2", "aux4")
 EXACT11_BYK_TAIL_CLASSES = ("ZERO_PADDING,PC_REGISTER_AMOUNTS,VERSION,PC_OPERATION_ENABLE", "PC_BASE_ADDRESS,PC_REGISTER_AMOUNTS,VERSION,PC_OPERATION_ENABLE,ZERO_PADDING,ZERO_PADDING,ZERO_PADDING,ZERO_PADDING", "ZERO_PADDING,PC_REGISTER_AMOUNTS,VERSION,PC_OPERATION_ENABLE,ZERO_PADDING,ZERO_PADDING", "PC_BASE_ADDRESS,PC_REGISTER_AMOUNTS,VERSION,PC_OPERATION_ENABLE,ZERO_PADDING,ZERO_PADDING,ZERO_PADDING,ZERO_PADDING", "ZERO_PADDING,PC_REGISTER_AMOUNTS,VERSION,PC_OPERATION_ENABLE,ZERO_PADDING,ZERO_PADDING", "PC_BASE_ADDRESS,PC_REGISTER_AMOUNTS,VERSION,PC_OPERATION_ENABLE,ZERO_PADDING,ZERO_PADDING,ZERO_PADDING,ZERO_PADDING", "ZERO_PADDING,PC_REGISTER_AMOUNTS,VERSION,PC_OPERATION_ENABLE,ZERO_PADDING,ZERO_PADDING", "PC_BASE_ADDRESS,PC_REGISTER_AMOUNTS,VERSION,PC_OPERATION_ENABLE,ZERO_PADDING,ZERO_PADDING,ZERO_PADDING,ZERO_PADDING", "ZERO_PADDING,PC_REGISTER_AMOUNTS,VERSION,PC_OPERATION_ENABLE,ZERO_PADDING,ZERO_PADDING", "PC_BASE_ADDRESS,PC_REGISTER_AMOUNTS,VERSION,PC_OPERATION_ENABLE,ZERO_PADDING,ZERO_PADDING,ZERO_PADDING,ZERO_PADDING")
 EXACT11_BYK_TAIL_VALUES = ("0,0,0,13", "0,65550,0,13,0,0,0,0", "0,0,0,96,0,0", "0,65550,0,13,0,0,0,0", "0,0,0,96,0,0", "0,131086,0,13,0,0,0,0", "0,0,0,96,0,0", "0,131086,0,13,0,0,0,0", "0,0,0,96,0,0", "0,131086,0,13,0,0,0,0")
+EXACT_BYK_BODY_AMOUNT = 104
+EXACT_BYK_SETUP_AMOUNT = 108
+EXACT_BYK_AUX_AMOUNT = 26
 H40_EXACT17_AMOUNTS = (108, 108, 104, 104, 26, 104, 104, 26, 104, 104, 26, 104, 104, 26, 104, 104, 26)
 H40_EXACT17_MASKS = (0x0d, 0x0d, 0x0d, 0x0d, 0x60, 0x0d, 0x0d, 0x60, 0x0d, 0x0d, 0x60, 0x0d, 0x0d, 0x60, 0x0d, 0x0d, 0x60)
 H40_EXACT17_PC_AMOUNTS = (55, 0, 0x10035, 0x1000e, 0, 0x10035, 0x1000e, 0, 0x20035, 0x2000e, 0, 0x20035, 0x2000e, 0, 0x20035, 0x2000e)
@@ -52,30 +55,115 @@ PREFIX_BY_Y_SHAPES = {
     "b1_c3_h320_w320_oc32_wic3_k3x3_g1_s1_pvalid",
 }
 SETUP2_CLOSURE_SHAPES = {"b1_c128_h40_w40_oc40_wic128_k1x1_g1_s1_pvalid"}
-PREFIX_BY_K_SHAPES = {EXACT11_BYK_SHAPE, "b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid", "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid", "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid"}
+PREFIX_BY_K_SHAPES = {
+    EXACT11_BYK_SHAPE,
+    "b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid",
+    "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid",
+    "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid",
+    "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid",
+    "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1",
+    "b1_c512_h7_w7_oc1024_wic512_k1x1_g1",
+}
 POINTWISE_EXACT11_BYK_SHAPES = {
     "conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1",
     "conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1",
     "b1_c128_h28_w28_oc256_wic128_k1x1_g1",
     "b1_c256_h14_w14_oc512_wic256_k1x1_g1",
+    "b1_c512_h14_w14_oc32_wic512_k1x1_g1",
+    "b1_c512_h14_w14_oc112_wic512_k1x1_g1",
+    "b1_c512_h14_w14_oc512_wic512_k1x1_g1",
+    "conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1",
+    "b1_c384_h14_w14_oc96_wic384_k1x1_g1",
+    "b1_c480_h14_w14_oc96_wic480_k1x1_g1",
+    "b1_c528_h14_w14_oc32_wic528_k1x1_g1",
+    "b1_c528_h14_w14_oc128_wic528_k1x1_g1",
+    "b1_c528_h14_w14_oc160_wic528_k1x1_g1",
+    "b1_c528_h14_w14_oc256_wic528_k1x1_g1",
+    "b1_c528_h14_w14_oc32_wic528_k1x1_g1_s1_pvalid",
+    "b1_c528_h14_w14_oc128_wic528_k1x1_g1_s1_pvalid",
+    "b1_c528_h14_w14_oc160_wic528_k1x1_g1_s1_pvalid",
+    "b1_c528_h14_w14_oc256_wic528_k1x1_g1_s1_pvalid",
+    "b1_c576_h14_w14_oc96_wic576_k1x1_g1",
 }
 POINTWISE_EXACT11_BYK_WINDOWS = {
     "conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1": ((0, 10, 0x0a0), (10, 9, 0x090), (19, 9, 0x090)),
     "conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1": ((0, 5, 0x060), (5, 5, 0x060), (10, 4, 0x050)),
     "b1_c128_h28_w28_oc256_wic128_k1x1_g1": ((0, 10, 0x0a0), (10, 9, 0x090), (19, 9, 0x090)),
     "b1_c256_h14_w14_oc512_wic256_k1x1_g1": ((0, 5, 0x060), (5, 5, 0x060), (10, 4, 0x050)),
+    "b1_c512_h14_w14_oc32_wic512_k1x1_g1": ((0, 5, 0x060), (5, 5, 0x060), (10, 4, 0x050)),
+    "b1_c512_h14_w14_oc112_wic512_k1x1_g1": ((0, 5, 0x060), (5, 5, 0x060), (10, 4, 0x050)),
+    "b1_c512_h14_w14_oc512_wic512_k1x1_g1": ((0, 5, 0x060), (5, 5, 0x060), (10, 4, 0x050)),
+    "conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1": ((0, 5, 0x060), (5, 5, 0x060), (10, 4, 0x050)),
+    "b1_c384_h14_w14_oc96_wic384_k1x1_g1": ((0, 5, 0x060), (5, 5, 0x060), (10, 4, 0x050)),
+    "b1_c480_h14_w14_oc96_wic480_k1x1_g1": ((0, 5, 0x060), (5, 5, 0x060), (10, 4, 0x050)),
+    "b1_c528_h14_w14_oc32_wic528_k1x1_g1": ((0, 5, 0x060), (5, 5, 0x060), (10, 4, 0x050)),
+    "b1_c528_h14_w14_oc128_wic528_k1x1_g1": ((0, 5, 0x060), (5, 5, 0x060), (10, 4, 0x050)),
+    "b1_c528_h14_w14_oc160_wic528_k1x1_g1": ((0, 5, 0x060), (5, 5, 0x060), (10, 4, 0x050)),
+    "b1_c528_h14_w14_oc256_wic528_k1x1_g1": ((0, 5, 0x060), (5, 5, 0x060), (10, 4, 0x050)),
+    "b1_c528_h14_w14_oc32_wic528_k1x1_g1_s1_pvalid": ((0, 5, 0x060), (5, 5, 0x060), (10, 4, 0x050)),
+    "b1_c528_h14_w14_oc128_wic528_k1x1_g1_s1_pvalid": ((0, 5, 0x060), (5, 5, 0x060), (10, 4, 0x050)),
+    "b1_c528_h14_w14_oc160_wic528_k1x1_g1_s1_pvalid": ((0, 5, 0x060), (5, 5, 0x060), (10, 4, 0x050)),
+    "b1_c528_h14_w14_oc256_wic528_k1x1_g1_s1_pvalid": ((0, 5, 0x060), (5, 5, 0x060), (10, 4, 0x050)),
+    "b1_c576_h14_w14_oc96_wic576_k1x1_g1": ((0, 5, 0x060), (5, 5, 0x060), (10, 4, 0x050)),
 }
 POINTWISE_EXACT11_BYK_CBUF0 = {
     "conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1": 0x057,
     "conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1": 0x084,
     "b1_c128_h28_w28_oc256_wic128_k1x1_g1": 0x057,
     "b1_c256_h14_w14_oc512_wic256_k1x1_g1": 0x084,
+    "b1_c512_h14_w14_oc32_wic512_k1x1_g1": 0x057,
+    "b1_c512_h14_w14_oc112_wic512_k1x1_g1": 0x057,
+    "b1_c512_h14_w14_oc512_wic512_k1x1_g1": 0x057,
+    "conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1": 0x057,
+    "b1_c384_h14_w14_oc96_wic384_k1x1_g1": 0x057,
+    "b1_c480_h14_w14_oc96_wic480_k1x1_g1": 0x057,
+    "b1_c528_h14_w14_oc32_wic528_k1x1_g1": 0x057,
+    "b1_c528_h14_w14_oc128_wic528_k1x1_g1": 0x057,
+    "b1_c528_h14_w14_oc160_wic528_k1x1_g1": 0x057,
+    "b1_c528_h14_w14_oc256_wic528_k1x1_g1": 0x057,
+    "b1_c528_h14_w14_oc32_wic528_k1x1_g1_s1_pvalid": 0x057,
+    "b1_c528_h14_w14_oc128_wic528_k1x1_g1_s1_pvalid": 0x057,
+    "b1_c528_h14_w14_oc160_wic528_k1x1_g1_s1_pvalid": 0x057,
+    "b1_c528_h14_w14_oc256_wic528_k1x1_g1_s1_pvalid": 0x057,
+    "b1_c576_h14_w14_oc96_wic576_k1x1_g1": 0x057,
 }
 POINTWISE_EXACT11_BYK_DMA2 = {
     "conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1": 0x2a0,
     "conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1": 0x08c,
     "b1_c128_h28_w28_oc256_wic128_k1x1_g1": 0x2a0,
     "b1_c256_h14_w14_oc512_wic256_k1x1_g1": 0x08c,
+    "b1_c512_h14_w14_oc32_wic512_k1x1_g1": 0x08c,
+    "b1_c512_h14_w14_oc112_wic512_k1x1_g1": 0x08c,
+    "b1_c512_h14_w14_oc512_wic512_k1x1_g1": 0x08c,
+    "conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1": 0x08c,
+    "b1_c384_h14_w14_oc96_wic384_k1x1_g1": 0x08c,
+    "b1_c480_h14_w14_oc96_wic480_k1x1_g1": 0x08c,
+    "b1_c528_h14_w14_oc32_wic528_k1x1_g1": 0x08c,
+    "b1_c528_h14_w14_oc128_wic528_k1x1_g1": 0x08c,
+    "b1_c528_h14_w14_oc160_wic528_k1x1_g1": 0x08c,
+    "b1_c528_h14_w14_oc256_wic528_k1x1_g1": 0x08c,
+    "b1_c528_h14_w14_oc32_wic528_k1x1_g1_s1_pvalid": 0x08c,
+    "b1_c528_h14_w14_oc128_wic528_k1x1_g1_s1_pvalid": 0x08c,
+    "b1_c528_h14_w14_oc160_wic528_k1x1_g1_s1_pvalid": 0x08c,
+    "b1_c528_h14_w14_oc256_wic528_k1x1_g1_s1_pvalid": 0x08c,
+    "b1_c576_h14_w14_oc96_wic576_k1x1_g1": 0x08c,
+}
+POINTWISE_EXACT11_BYK_DATA_SIZE1 = {
+    "b1_c512_h14_w14_oc32_wic512_k1x1_g1": 0x003f0200,
+    "b1_c512_h14_w14_oc112_wic512_k1x1_g1": 0x003f0200,
+    "b1_c512_h14_w14_oc512_wic512_k1x1_g1": 0x003f0200,
+    "conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1": 0x003f0200,
+    "b1_c384_h14_w14_oc96_wic384_k1x1_g1": 0x00bf0180,
+    "b1_c480_h14_w14_oc96_wic480_k1x1_g1": 0x00ef01e0,
+    "b1_c528_h14_w14_oc32_wic528_k1x1_g1": 0x01070210,
+    "b1_c528_h14_w14_oc128_wic528_k1x1_g1": 0x01070210,
+    "b1_c528_h14_w14_oc160_wic528_k1x1_g1": 0x01070210,
+    "b1_c528_h14_w14_oc256_wic528_k1x1_g1": 0x01070210,
+    "b1_c528_h14_w14_oc32_wic528_k1x1_g1_s1_pvalid": 0x01070210,
+    "b1_c528_h14_w14_oc128_wic528_k1x1_g1_s1_pvalid": 0x01070210,
+    "b1_c528_h14_w14_oc160_wic528_k1x1_g1_s1_pvalid": 0x01070210,
+    "b1_c528_h14_w14_oc256_wic528_k1x1_g1_s1_pvalid": 0x01070210,
+    "b1_c576_h14_w14_oc96_wic576_k1x1_g1": 0x011f0240,
 }
 POINTWISE_YK_SHAPES = {"b1_c128_h40_w40_oc40_wic128_k1x1_g1_s1_pvalid"}
 LOCAL_POINTWISE_YK_SHAPES = {
@@ -89,6 +177,22 @@ LOCAL_POINTWISE_YK_SHAPES = {
     "b1_c16_h150_w150_oc96_wic16_k1x1_g1_s1_pvalid",
 }
 POINTWISE_CHAINED_Y_SHAPES = {"conv2d_b1_c256_h28_w28_oc32_wic256_k1x1_g1"}
+POINTWISE_SETUP108_COMPACT_WEIGHT_SHAPES = {
+    "b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid",
+    "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid",
+}
+CRASH_FENCED_SHAPES = {
+    "b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid",
+    "b1_c256_h2_w2_oc546_wic256_k1x1_g1_s1_pvalid",
+}
+C256_H2_OC64_EXACT11_SHAPE = "b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid"
+C256_H2_OC64_EXACT11_OUT_C = (64, 32, None, 32, None, 32, None, 16, None, 16, None)
+C256_H2_OC64_EXACT11_WEIGHT_SIZE0 = (0x8000, 0x4000, None, 0x4000, None, 0x4000, None, 0x2000, None, 0x2000, None)
+C256_H2_OC64_EXACT11_DST_OFFSETS = (0x0, 0x0, None, 0x100, None, 0x0, None, 0x100, None, 0x180, None)
+POINTWISE_EXACT11_CHAIN_COMPACT_WEIGHT_SHAPES = {
+    "b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid",
+}
+POINTWISE_EXACT11_COMPACT_WEIGHT_SHAPES = set()
 GROUPED_SERIAL_SHAPES = {
     "conv2d_b1_c4_h1_w1_oc2_wic2_k1x1_g2",
     "b1_c4_h1_w1_oc4_wic2_k1x1_g2",
@@ -139,6 +243,7 @@ KNOWN_BAD_SPATIAL_SETUP_SHAPES = {
     "b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid",
 }
 DEPTHWISE_BODY_SHAPES = set()  # emptied: single-task rewrite needs more capture work; leave shapes fenced for now
+DEPTHWISE_SETUP108_SHAPES = set()
 class reg:
     CNA = 0x0201; CORE = 0x0801; DPU = 0x1001; PC = 0x0081; PC_REG = 0x0101; VERSION = 0x0041
     OPERATION_ENABLE = 0x0008; PC_BASE_ADDRESS = 0x0010; PC_REGISTER_AMOUNTS = 0x0014
@@ -161,6 +266,13 @@ CBUF0_OVERRIDES = {
     "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid": 0x057,
     # 1x1 pointwise family: cbuf0=0xb1 (per live rknn_runtime c64_h1_oc128 capture)
     "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid": 0x0b1,
+    "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid": 0x02a,
+    "b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid": 0x0b1,
+    "b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid": 0x0b1,
+    "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid": 0x084,
+    "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x0a2,
+    "b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x0a2,
+    "b1_c832_h7_w7_oc48_wic832_k1x1_g1": 0x093,
 }
 DATA_SIZE1_OVERRIDES = {
     "b1_c160_h14_w14_oc320_wic160_k3x3_g1_s1_pvalid": 0x1f00a0,
@@ -168,22 +280,42 @@ DATA_SIZE1_OVERRIDES = {
     # c16_h80_oc64: natural formula gives 0x000F0010 (different from c160's 0x1f00a0)
     "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid": 0x000F0010,
     "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid":   0x003f0040,
+    "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid": 0x003f00c0,
+    "b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid":   0x003f0100,
+    "b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid":   0x003f0100,
+    "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid":  0x00270028,
+    "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x003f0200,
+    "b1_c512_h7_w7_oc1024_wic512_k1x1_g1":            0x003f0200,
+    "b1_c832_h7_w7_oc48_wic832_k1x1_g1":              0x003f0340,
 }
 CBUF1_OVERRIDES = {
     # c160_h14 and c160_h7 fall through to make_regs default (_cbuf_entries)
+    "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid": 0x032,
+    "b1_c832_h7_w7_oc48_wic832_k1x1_g1": 0x0b6,
 }
 WEIGHT_SIZE0_OVERRIDES = {
     # 1x1 pointwise c64_h1_oc128: per-family weight sizes from live capture
     ("b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid", "setup"):  0x4000,
     ("b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid", "k_half"): 0x2000,
+    ("b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid", "setup"): 0x6400,
+    ("b1_c832_h7_w7_oc48_wic832_k1x1_g1", "setup"): 0x13800,
     # c16_h80_oc128 (3x3): setup=128*16*2=0x1000, k_half=64*16*2=0x800
 }
 WEIGHT_SIZE1_OVERRIDES = {
+    "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid": 0x050,
+    "b1_c832_h7_w7_oc48_wic832_k1x1_g1": 0x680,
 }
 WEIGHT_SIZE2_OVERRIDES = {}
 CVT_CON0_OVERRIDES = {
     # 1x1 pointwise c64_h1_oc128: live capture shows CVT_CON0=0xb even though kh=kw=1
     "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid": 0x000b,
+    "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid": 0x000b,
+    "b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid": 0x000b,
+    "b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid": 0x000b,
+    "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid": 0x000b,
+    "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x000b,
+    "b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x000b,
+    "b1_c832_h7_w7_oc48_wic832_k1x1_g1": 0x000b,
 }
 
 DEPTHWISE_OVERRIDES = {
@@ -200,10 +332,19 @@ DEPTHWISE_OVERRIDES = {
 }
 
 FC_DATA_SIZE1_OVERRIDES = {
+    "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid": 0x028,
+    "b1_c832_h7_w7_oc48_wic832_k1x1_g1": 0x340,
 }
 DMA_CON2_OVERRIDES = {
     # 1x1 pointwise c64_h1_oc128: live capture shows DMA_CON2=0x0ffffffd (huge aux buffer)
     "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid": 0x0ffffffd,
+    "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid": 0x02a0,
+    "b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid": 0x0ffffffc,
+    "b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid": 0x0ffffffd,
+    "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid": 0x05a0,
+    "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x0015,
+    "b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x0015,
+    "b1_c832_h7_w7_oc48_wic832_k1x1_g1": 0x0015,
 }
 KT_FAMILY_BITS_OVERRIDES = {
 }
@@ -216,6 +357,10 @@ KT_TILE_SPLITS = {
     # 1x1 pointwise: 3 k_tiles (per live c64_h1_oc128 capture)
     # Note: first k_tile covers 64 OC (overlaps with k_half)
     "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid":   ((0, 64), (48, 48), (96, 32)),
+    "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid": ((0, 32), (32, 32), (64, 32)),
+    "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1": ((0, 352), (352, 336), (688, 336)),
+    "b1_c512_h7_w7_oc1024_wic512_k1x1_g1":           ((0, 352), (352, 336), (688, 336)),
+    "b1_c832_h7_w7_oc48_wic832_k1x1_g1":             ((0, 16), (16, 16), (32, 16)),
 }
 CONV2_LOW_OVERRIDES = {
     # c160_h14 and c160_h7 fall through to the default logic below (0x0f0 / 0x0a0)
@@ -223,6 +368,10 @@ CONV2_LOW_OVERRIDES = {
     "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid": 0x1a0,
     # 1x1 pointwise family: conv2_low=0x20 (per live c64_h1_oc128 capture)
     "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid": 0x020,
+    "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid": 0x090,
+    "b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid": 0x030,
+    "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid": 0x160,
+    "b1_c832_h7_w7_oc48_wic832_k1x1_g1": 0x008,
 }
 # 1x1 with h*w=1: per-family DST_BASE offsets (per c64_h1_oc128 live capture)
 # Each k_half/k_tile writes oc_start * 2 bytes (per fp16, c2-packed) into output
@@ -431,6 +580,17 @@ def _pack_pointwise_wide(weight, out_c, in_c):
     return np.concatenate([rows[oc:oc + 16, ic:ic + 32].ravel()
                            for oc in range(0, aligned_out_c, 16) for ic in range(0, aligned_in_c, 32)])
 
+def _pack_pointwise_compact_weight(weight, out_c, in_c):
+    blocks = []
+    for oc in range(0, out_c, 16):
+        oc_count = min(16, out_c - oc)
+        for ic in range(0, in_c, 32):
+            blocks.append(weight[oc:oc + oc_count, ic:ic + 32, 0, 0].ravel())
+    return np.concatenate(blocks).astype(np.float16)
+
+def _pack_depthwise_compact_weight(weight, out_c, kh, kw):
+    return weight[:out_c, 0, :kh, :kw].reshape(out_c, kh, kw).ravel().astype(np.float16)
+
 def _pack_kh_major(weight, out_c, in_c, kh, kw, c2_out):
     aligned_in_c = c2_out * _ceil_div(in_c, c2_out)
     padded = np.zeros((out_c, aligned_in_c, kh, kw), dtype=np.float16)
@@ -605,6 +765,32 @@ def make_depthwise_setup_regs(s, p, in_dma, wt_dma, out_dma):
     regs = make_regs(s, p, in_dma, wt_dma, out_dma, True)
     return patch_regs(regs, _depthwise_body_patches(s, "setup"))
 
+def make_depthwise_setup108_regs(s, p, in_dma, wt_dma, out_dma):
+    if s["name"] != "b1_c96_h20_w20_oc96_wic1_k3x3_g96_s1_pvalid":
+        raise ValueError("depthwise setup108 replay is scoped to the prefix-proven c96_h20 shape")
+    regs = _exact11_body_regs(s, "setup", 0, s["out_c"], in_dma, wt_dma, out_dma, conv2_low=0x120)
+    regs = [qword for qword in regs if (qword >> 48, qword & 0xffff) not in {
+        (reg.CORE, reg.CORE_RESERVED_3030),
+        (reg.DPU, 0x40c4),
+    }]
+    regs.extend((E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, 0), E(reg.VERSION, 0, 0)))
+    return patch_regs(regs, {
+        (reg.CNA, reg.CNA_CONV_CON1): 0x123,
+        (reg.CNA, reg.CNA_CONV_CON2): 0x120,
+        (reg.CNA, reg.CNA_DATA_SIZE1): 0x001f0060,
+        (reg.CNA, reg.CNA_WEIGHT_SIZE0): 0x06c0,
+        (reg.CNA, reg.CNA_WEIGHT_SIZE1): 0x06c0,
+        (reg.CNA, reg.CNA_WEIGHT_SIZE2): 0x03030001,
+        (reg.CNA, reg.CNA_CBUF_CON0): 0x0093,
+        (reg.CNA, reg.CNA_CBUF_CON1): 0x003c,
+        (reg.CNA, reg.CNA_CVT_CON0): 0x000b,
+        (reg.CORE, reg.CORE_MISC_CFG): 0x202,
+        (reg.DPU, reg.FEATURE_MODE_CFG): 0x1fc,
+        (reg.DPU, reg.BS_OW_CFG): 0x36e,
+        (reg.DPU, reg.DST_SURF_STRIDE): 0x1440,
+        (reg.DPU, reg.SURFACE_ADD): 0x5100,
+    })
+
 def make_depthwise_k_tile_regs(s, p, row, in_dma, wt_dma, out_dma):
     tile_shape = dict(s, out_c=row["oc_count"])
     tile_p = _conv_params(tile_shape)
@@ -758,18 +944,54 @@ def _exact11_aux_regs(s, out_dma, aux_dma=None):
     ]
 
 def _exact11_task_regs(s, in_dma, wt_dma, out_dma):
+    layout = exact_byk_legacy_layout_check(s)
+    if s["name"] == "b1_c832_h7_w7_oc48_wic832_k1x1_g1":
+        setup0 = _exact11_body_regs(s, "setup", 0, s["out_c"], in_dma, wt_dma, out_dma, input_h=7, conv2_low=0x08)
+        setup1 = patch_regs(
+            _exact11_body_regs(s, "k_tile", 0, s["out_c"], in_dma, wt_dma, out_dma, y_start=0, input_h=4, conv2_low=0x08),
+            {(reg.CNA, reg.CNA_CONV_CON2): 0x10000005,
+             (reg.CNA, reg.CNA_WEIGHT_SIZE0): s["out_c"] * s["in_c"] * FP16_BYTES,
+             (reg.CNA, reg.CNA_WEIGHT_SIZE2): (s["kw"] << 24) | (s["kh"] << 16) | s["out_c"],
+             (reg.CORE, reg.CORE_DATAOUT_SIZE_1): s["out_c"] - 1,
+             (reg.DPU, reg.DATA_CUBE_CHANNEL): ((s["out_c"] - 1) << 16) | (s["out_c"] - 1),
+             (reg.DPU, reg.WDMA_SIZE_0): s["out_c"] - 1})
+        setup2 = patch_regs(
+            _exact11_body_regs(s, "k_tile", 0, s["out_c"], in_dma, wt_dma, out_dma, y_start=4, input_h=3, conv2_low=0x08),
+            {(reg.CNA, reg.CNA_CONV_CON2): 0x10000004,
+             (reg.CNA, reg.CNA_WEIGHT_SIZE0): s["out_c"] * s["in_c"] * FP16_BYTES,
+             (reg.CNA, reg.CNA_WEIGHT_SIZE2): (s["kw"] << 24) | (s["kh"] << 16) | s["out_c"],
+             (reg.CORE, reg.CORE_DATAOUT_SIZE_1): s["out_c"] - 1,
+             (reg.DPU, reg.DATA_CUBE_CHANNEL): ((s["out_c"] - 1) << 16) | (s["out_c"] - 1),
+             (reg.DPU, reg.WDMA_SIZE_0): s["out_c"] - 1})
+        rows = [setup0, setup1, _exact11_aux_regs(s, out_dma),
+                setup2, _exact11_aux_regs(s, out_dma)]
+        splits = exact_byk_splits(s)
+        last_oc_start = splits[-1][0]
+        for oc_start, oc_count in splits:
+            rows.append(patch_regs(
+                _exact11_body_regs(s, "k_tile", oc_start, oc_count, in_dma, wt_dma, out_dma, input_h=7, conv2_low=0x08),
+                {(reg.CORE, reg.CORE_DATAOUT_SIZE_1): oc_count - 1,
+                 (reg.DPU, reg.DATA_CUBE_CHANNEL): ((oc_count - 1) << 16) | (oc_count - 1),
+                 (reg.DPU, reg.WDMA_SIZE_0): oc_count - 1,
+                 (reg.DPU, reg.DST_BASE_ADDR): out_dma + oc_start * 0x68}))
+            if oc_start != last_oc_start:
+                rows.append(_exact11_aux_regs(s, out_dma))
+        rows.append(_exact11_aux_regs(s, out_dma))
+        if tuple(len(row) for row in rows) != layout["amounts"]:
+            raise RuntimeError("c832 h7 exact11 BY_K row amounts changed")
+        return rows
     half = _align_up(s["out_c"] // 2, 16)
     rows = [_exact11_body_regs(s, "setup", 0, s["out_c"], in_dma, wt_dma, out_dma),
             _exact11_body_regs(s, "k_half", 0, half, in_dma, wt_dma, out_dma), _exact11_aux_regs(s, out_dma),
             _exact11_body_regs(s, "k_half", half, s["out_c"] - half, in_dma, wt_dma, out_dma), _exact11_aux_regs(s, out_dma)]
-    splits = KT_TILE_SPLITS.get(s["name"], ((0, 112), (112, 112), (224, 96)))
+    splits = exact_byk_splits(s)
     last_oc_start = splits[-1][0]
     for oc_start, oc_count in splits:
         rows.append(_exact11_body_regs(s, "k_tile", oc_start, oc_count, in_dma, wt_dma, out_dma))
         if oc_start != last_oc_start:
             rows.append(_exact11_aux_regs(s, out_dma))
     rows.append(_exact11_aux_regs(s, out_dma))
-    if tuple(len(row) for row in rows) != EXACT11_BYK_AMOUNTS:
+    if tuple(len(row) for row in rows) != layout["amounts"]:
         raise RuntimeError("exact11 BY_K row amounts changed")
     return rows
 
@@ -792,7 +1014,8 @@ def _pointwise_exact11_byk_task_regs(s, in_dma, wt_dma, out_dma):
     def pointwise_row(family, oc_start, oc_count, y_start=0, input_h=None, conv2_low=0x0a0):
         return patch_regs(_exact11_body_regs(s, family, oc_start, oc_count, in_dma, wt_dma, out_dma,
                                              y_start, input_h, conv2_low),
-                          {(reg.CNA, reg.CNA_CBUF_CON0): cbuf0, (reg.CNA, reg.CNA_DATA_SIZE1): ((s["in_c"] // 2 - 1) << 16) | s["in_c"],
+                          {(reg.CNA, reg.CNA_CBUF_CON0): cbuf0,
+                           (reg.CNA, reg.CNA_DATA_SIZE1): POINTWISE_EXACT11_BYK_DATA_SIZE1.get(s["name"], ((s["in_c"] // 2 - 1) << 16) | s["in_c"]),
                            (reg.CNA, reg.CNA_CVT_CON0): 0xb, (reg.CNA, reg.CNA_DMA_CON2): full_dma2})
     rows = [pointwise_row("setup", 0, s["out_c"]),
             pointwise_row("k_half", 0, half), _exact11_aux_regs(s, out_dma, aux_dma),
@@ -806,8 +1029,8 @@ def _pointwise_exact11_byk_task_regs(s, in_dma, wt_dma, out_dma):
         raise RuntimeError("pointwise exact11 BY_K row amounts changed")
     return rows
 
-def write_exact11_byk_tasks(task_map, regcmd_map, regcmd_mem, task_regs):
-    offsets = (0, 112, 224, 256, 368, 400, 512, 544, 656, 688, 800)
+def write_exact11_byk_tasks(task_map, regcmd_map, regcmd_mem, task_regs, layout):
+    offsets = layout["offsets"]
     tasks = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), ctypes.POINTER(struct_rknpu_task))
     regcmd = ctypes.cast(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), ctypes.POINTER(ctypes.c_uint64))
     ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), 0, len(task_map))
@@ -817,22 +1040,21 @@ def write_exact11_byk_tasks(task_map, regcmd_map, regcmd_mem, task_regs):
         for i, qword in enumerate(regs):
             regcmd[base + i] = qword
         if idx + 1 < len(task_regs):
-            classes = EXACT11_BYK_TAIL_CLASSES[idx].split(",")
-            values = [int(value) for value in EXACT11_BYK_TAIL_VALUES[idx].split(",")]
-            for i, (cls, value) in enumerate(zip(classes, values)):
+            classes = exact_byk_tail_classes(layout["roles"][idx], idx)
+            for i, cls in enumerate(classes):
                 if cls == "ZERO_PADDING":
                     qword = 0
                 elif cls == "PC_BASE_ADDRESS":
                     qword = E(reg.PC_REG, reg.PC_BASE_ADDRESS, (regcmd_mem.dma_addr + offsets[idx + 1] * 8) & 0xfffffff0)
                 elif cls == "PC_REGISTER_AMOUNTS":
-                    qword = E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, value)
+                    qword = E(reg.PC_REG, reg.PC_REGISTER_AMOUNTS, layout["pc_amounts"][idx])
                 elif cls == "VERSION":
-                    qword = E(reg.VERSION, 0, value)
+                    qword = E(reg.VERSION, 0, 0)
                 else:
-                    qword = E(reg.PC, reg.OPERATION_ENABLE, value)
+                    qword = E(reg.PC, reg.OPERATION_ENABLE, layout["masks"][idx])
                 regcmd[base + len(regs) + i] = qword
         tasks[idx].op_idx = 1
-        tasks[idx].enable_mask = EXACT11_BYK_MASKS[idx]
+        tasks[idx].enable_mask = layout["masks"][idx]
         tasks[idx].int_mask = 0xc00 if tasks[idx].enable_mask == 0x60 else 0x300
         tasks[idx].int_clear = 0x1ffff
         tasks[idx].regcfg_amount = len(regs)
@@ -1003,6 +1225,8 @@ def post_submit_reset(fd):
         ioctl(fd, DRM_IOCTL_RKNPU_ACTION, rknpu_action(flags=reset_flag, value=0))
 
 def validate_phase_a_shape(s):
+    if s["name"] in CRASH_FENCED_SHAPES:
+        raise ValueError("shape is crash-fenced after c256_h2 setup108 generalization reboot; capture exact RKNN GEM1/GEM2 closure before submit")
     rows = planner.descriptor_rows_for_shape(s)
     families = {row["family"] for row in rows}
     if len(rows) == 1 and families == {"setup"} and rows[0]["split_method"] == "NONE":
@@ -1052,32 +1276,95 @@ def regcmd_layout_from_amounts(amounts):
     return tuple(offsets), (offsets[-1] + amounts[-1]) * 8
 def regcmd_alloc_bytes(required): return max(4096, _align_up(required, 4096))
 
+def exact_byk_splits(s):
+    return KT_TILE_SPLITS.get(s["name"], ((0, 112), (112, 112), (224, 96)))
+
+def exact_byk_layout(s):
+    splits = exact_byk_splits(s)
+    roles = ["setup_body", "k_half_body0", "aux0", "k_half_body1", "aux1"]
+    for idx, _split in enumerate(splits):
+        roles.append(f"k_tile_body{idx}")
+        if idx + 1 < len(splits):
+            roles.append(f"aux{idx + 2}")
+    roles.append(f"aux{len(splits) + 1}")
+    amounts = tuple(EXACT_BYK_SETUP_AMOUNT if role == "setup_body"
+                    else EXACT_BYK_AUX_AMOUNT if role.startswith("aux")
+                    else EXACT_BYK_BODY_AMOUNT for role in roles)
+    masks = tuple(0x60 if role.startswith("aux") else 0x0d for role in roles)
+    pc_amounts = tuple(0 if role.startswith("aux") or role == "setup_body"
+                       else 0x1000e if role.startswith("k_half")
+                       else 0x2000e for role in roles[:-1])
+    offsets = []
+    qoff = 0
+    for idx, amount in enumerate(amounts):
+        offsets.append(qoff)
+        if idx + 1 == len(amounts):
+            break
+        tail_qwords = 4 if idx == 0 else 6 if roles[idx].startswith("aux") else 8
+        qoff += _align_up(amount + tail_qwords, 8)
+    return {
+        "roles": tuple(roles),
+        "amounts": amounts,
+        "masks": masks,
+        "pc_amounts": pc_amounts,
+        "offsets": tuple(offsets),
+    }
+
+def exact_byk_tail_classes(role, idx):
+    if idx == 0:
+        return ("ZERO_PADDING", "PC_REGISTER_AMOUNTS", "VERSION", "PC_OPERATION_ENABLE")
+    if role.startswith("aux"):
+        return ("ZERO_PADDING", "PC_REGISTER_AMOUNTS", "VERSION", "PC_OPERATION_ENABLE", "ZERO_PADDING", "ZERO_PADDING")
+    return ("PC_BASE_ADDRESS", "PC_REGISTER_AMOUNTS", "VERSION", "PC_OPERATION_ENABLE",
+            "ZERO_PADDING", "ZERO_PADDING", "ZERO_PADDING", "ZERO_PADDING")
+
+def exact_byk_tail_value(cls, layout, idx):
+    if cls == "PC_REGISTER_AMOUNTS":
+        return layout["pc_amounts"][idx]
+    if cls == "PC_OPERATION_ENABLE":
+        return layout["masks"][idx]
+    return 0
+
+def exact_byk_legacy_layout_check(s):
+    layout = exact_byk_layout(s)
+    if len(exact_byk_splits(s)) == 3:
+        assert layout["amounts"] == EXACT11_BYK_AMOUNTS
+        assert layout["masks"] == EXACT11_BYK_MASKS
+        assert layout["pc_amounts"] == EXACT11_BYK_PC_AMOUNTS
+        assert layout["roles"] == EXACT11_BYK_ROLES
+        assert layout["offsets"] == (0, 112, 224, 256, 368, 400, 512, 544, 656, 688, 800)
+    return layout
+
 def dry_run_exact11_byk(s):
     rows = planner.descriptor_rows_for_shape(s)
-    if ((s["name"] not in {EXACT11_BYK_SHAPE, *POINTWISE_EXACT11_BYK_SHAPES}) or
+    if ((s["name"] not in PREFIX_BY_K_SHAPES and s["name"] not in POINTWISE_EXACT11_BYK_SHAPES) or
             rows[0]["split_method"] != "BY_K"):
         raise ValueError("exact11 BY_K dry-run is scoped only to RKNN-prefix proven shapes")
+    layout = exact_byk_legacy_layout_check(s)
     p = _conv_params(s)
     hw_out_fp16 = p["is_spatial"] or s["out_c"] >= 128 or p["out_width_stride"] > RK_MAX_CONV_FLAT_STRIDE or _is_pointwise_wide(s)
     c2 = UNPACK_C2 if hw_out_fp16 else FP16_ATOM_ELEMENTS // FP32_BYTES
     input_bytes = _ceil_div(s["in_c"], p["input_pack_c2"]) * p["input_pack_c2"] * s["in_h"] * p["width_stride"] * FP16_BYTES
     weight_bytes = _align_up(s["out_c"], 16) * _align_up(s["in_c"], p["align_c"]) * s["kh"] * s["kw"] * FP16_BYTES
     output_bytes = _ceil_div(p["align_out_c"], c2) * p["out_width_stride"] * c2 * (FP16_BYTES if hw_out_fp16 else FP32_BYTES)
-    offsets, regcmd_bytes = regcmd_layout_from_amounts(EXACT11_BYK_AMOUNTS)
-    print(f"dry_run=exact11_byk shape={s['name']} tasks={len(EXACT11_BYK_AMOUNTS)} regcmd_bytes={regcmd_bytes} regcmd_alloc={regcmd_alloc_bytes(regcmd_bytes)}")
-    print("amounts=" + ",".join(str(v) for v in EXACT11_BYK_AMOUNTS))
-    print("masks=" + ",".join(hex(v) for v in EXACT11_BYK_MASKS))
-    print("offsets=" + ",".join(str(v) for v in offsets))
-    print("pc_amounts=" + ",".join(hex(v) for v in EXACT11_BYK_PC_AMOUNTS))
+    regcmd_bytes = (layout["offsets"][-1] + layout["amounts"][-1]) * 8
+    print(f"dry_run=exact11_byk shape={s['name']} tasks={len(layout['amounts'])} regcmd_bytes={regcmd_bytes} regcmd_alloc={regcmd_alloc_bytes(regcmd_bytes)}")
+    print("amounts=" + ",".join(str(v) for v in layout["amounts"]))
+    print("masks=" + ",".join(hex(v) for v in layout["masks"]))
+    print("offsets=" + ",".join(str(v) for v in layout["offsets"]))
+    print("pc_amounts=" + ",".join(hex(v) for v in layout["pc_amounts"]))
     if s["name"] in POINTWISE_EXACT11_BYK_SHAPES:
         roles = ("setup_body", "k_half_body0", "aux0", "k_half_body1", "aux1", "y_tile_body0", "aux2", "y_tile_body1", "aux3", "y_tile_body2", "aux4")
         print("roles=" + ",".join(roles))
         print("y_windows=" + ",".join(f"{y}+{h}:0x{conv2:x}" for y, h, conv2 in POINTWISE_EXACT11_BYK_WINDOWS[s["name"]]))
     else:
-        print("roles=" + ",".join(EXACT11_BYK_ROLES))
-    print("tail_classes=" + "|".join(EXACT11_BYK_TAIL_CLASSES))
-    print("tail_values=" + "|".join(EXACT11_BYK_TAIL_VALUES))
-    print(f"bo_bytes=task:{len(EXACT11_BYK_AMOUNTS) * ctypes.sizeof(struct_rknpu_task)},regcmd:{regcmd_bytes},"
+        print("roles=" + ",".join(layout["roles"]))
+    print("tail_classes=" + "|".join(",".join(exact_byk_tail_classes(role, idx))
+                                      for idx, role in enumerate(layout["roles"][:-1])))
+    print("tail_values=" + "|".join(",".join(str(exact_byk_tail_value(cls, layout, idx))
+                                             for cls in exact_byk_tail_classes(role, idx))
+                                     for idx, role in enumerate(layout["roles"][:-1])))
+    print(f"bo_bytes=task:{len(layout['amounts']) * ctypes.sizeof(struct_rknpu_task)},regcmd:{regcmd_bytes},"
           f"input:{input_bytes},weight:{weight_bytes},output:{output_bytes}")
     print("status=no_drm_no_submit")
 
@@ -1167,12 +1454,16 @@ def run_h160_setup3_shape(s):
 def run_exact11_byk_shape(s):
     if s["name"] not in PREFIX_BY_K_SHAPES:
         raise ValueError("exact11 BY_K submit is scoped only to RKNN-proven h14/h7 shapes")
+    layout = exact_byk_legacy_layout_check(s)
     p = _conv_params(s)
     np.random.seed(42)
     inp = np.random.uniform(-2, 2, (s["batch"], s["in_c"], s["in_h"], s["in_w"])).astype(np.float16)
     wt = np.random.uniform(-2, 2, (s["out_c"], s["weight_in_c"], s["kh"], s["kw"])).astype(np.float16)
     input_flat = pack_input(inp[0], p).view(np.uint16)
-    weight_flat = pack_weights(wt, s, p).view(np.uint16)
+    if s["name"] in POINTWISE_EXACT11_COMPACT_WEIGHT_SHAPES:
+        weight_flat = _pack_pointwise_wide(wt, s["out_c"], s["in_c"]).view(np.uint16)
+    else:
+        weight_flat = pack_weights(wt, s, p).view(np.uint16)
     out_count = _ceil_div(p["align_out_c"], UNPACK_C2) * p["out_width_stride"] * UNPACK_C2
     output_bytes = out_count * np.dtype(np.float16).itemsize
     fd = os.open("/dev/dri/card1", os.O_RDWR)
@@ -1186,10 +1477,10 @@ def run_exact11_byk_shape(s):
         (ctypes.c_uint16 * len(weight_flat)).from_buffer(weight_map)[:] = weight_flat.tolist()
         ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_map.size())
         task_regs = _exact11_task_regs(s, input_mem.dma_addr, weight_mem.dma_addr, output_mem.dma_addr)
-        write_exact11_byk_tasks(task_map, regcmd_map, regcmd_mem, task_regs)
+        write_exact11_byk_tasks(task_map, regcmd_map, regcmd_mem, task_regs, layout)
         subcores = ((0, 1), (0, 1), (0, 1), (0, 0), (0, 0))
-        print("exact11_byk_submit tasks=11 submit_task_number=3 amounts=" + ";".join(str(v) for v in EXACT11_BYK_AMOUNTS) +
-              " masks=" + ";".join(hex(v) for v in EXACT11_BYK_MASKS) + " subcores=(0,1),(0,1),(0,1),(0,0),(0,0)")
+        print(f"exact11_byk_submit tasks={len(layout['amounts'])} submit_task_number=3 amounts=" + ";".join(str(v) for v in layout["amounts"]) +
+              " masks=" + ";".join(hex(v) for v in layout["masks"]) + " subcores=(0,1),(0,1),(0,1),(0,0),(0,0)")
         if npu_submit(fd, task_mem.obj_addr, 3, core_mask=0, subcores=subcores) < 0:
             raise RuntimeError("npu_submit failed")
         out_raw = np.frombuffer(output_map, dtype=np.float16, count=out_count).copy()
@@ -1202,7 +1493,7 @@ def run_exact11_byk_shape(s):
     expected = compute_expected_vectorized(inp, wt, s)
     max_diff = float(np.max(np.abs(got.astype(np.float32) - expected)))
     ok = bool(np.allclose(got, expected, atol=0.12))
-    print(f"shape={s['name']} guarded=exact11_byk tasks=11 submit_tasks=3 {'PASS' if ok else 'FAIL'} max_diff={max_diff:.4f}")
+    print(f"shape={s['name']} guarded=exact11_byk tasks={len(layout['amounts'])} submit_tasks=3 {'PASS' if ok else 'FAIL'} max_diff={max_diff:.4f}")
     if not ok:
         print("debug_exact11_byk_oc=" + ";".join(
             f"{start}:{float(np.max(np.abs(got[:, start:start + 32].astype(np.float32) - expected[:, start:start + 32]))):.4f}"
@@ -1214,12 +1505,16 @@ def run_exact11_byk_shape(s):
 def run_pointwise_exact11_byk_shape(s):
     if s["name"] not in POINTWISE_EXACT11_BYK_SHAPES:
         raise ValueError("pointwise exact11 BY_K submit is scoped only to RKNN-prefix proven pointwise shapes")
+    layout = exact_byk_legacy_layout_check(s)
     p = _conv_params(s)
     np.random.seed(42)
     inp = np.random.uniform(-2, 2, (s["batch"], s["in_c"], s["in_h"], s["in_w"])).astype(np.float16)
     wt = np.random.uniform(-2, 2, (s["out_c"], s["weight_in_c"], s["kh"], s["kw"])).astype(np.float16)
     input_flat = pack_input(inp[0], p).view(np.uint16)
-    weight_flat = pack_weights(wt, s, p).view(np.uint16)
+    if s["name"] in POINTWISE_EXACT11_COMPACT_WEIGHT_SHAPES:
+        weight_flat = _pack_pointwise_wide(wt, s["out_c"], s["in_c"]).view(np.uint16)
+    else:
+        weight_flat = pack_weights(wt, s, p).view(np.uint16)
     out_count = _ceil_div(p["align_out_c"], UNPACK_C2) * p["out_width_stride"] * UNPACK_C2
     output_bytes = out_count * np.dtype(np.float16).itemsize
     fd = os.open("/dev/dri/card1", os.O_RDWR)
@@ -1233,10 +1528,10 @@ def run_pointwise_exact11_byk_shape(s):
         (ctypes.c_uint16 * len(weight_flat)).from_buffer(weight_map)[:] = weight_flat.tolist()
         ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_map.size())
         task_regs = _pointwise_exact11_byk_task_regs(s, input_mem.dma_addr, weight_mem.dma_addr, output_mem.dma_addr)
-        write_exact11_byk_tasks(task_map, regcmd_map, regcmd_mem, task_regs)
+        write_exact11_byk_tasks(task_map, regcmd_map, regcmd_mem, task_regs, layout)
         subcores = ((0, 1), (0, 1), (0, 1), (0, 0), (0, 0))
-        print("pointwise_exact11_byk_submit tasks=11 submit_task_number=3 amounts=" + ";".join(str(v) for v in EXACT11_BYK_AMOUNTS) +
-              " masks=" + ";".join(hex(v) for v in EXACT11_BYK_MASKS) + " subcores=(0,1),(0,1),(0,1),(0,0),(0,0)")
+        print(f"pointwise_exact11_byk_submit tasks={len(layout['amounts'])} submit_task_number=3 amounts=" + ";".join(str(v) for v in layout["amounts"]) +
+              " masks=" + ";".join(hex(v) for v in layout["masks"]) + " subcores=(0,1),(0,1),(0,1),(0,0),(0,0)")
         if npu_submit(fd, task_mem.obj_addr, 3, core_mask=0, subcores=subcores) < 0:
             raise RuntimeError("npu_submit failed")
         out_raw = np.frombuffer(output_map, dtype=np.float16, count=out_count).copy()
@@ -1249,11 +1544,204 @@ def run_pointwise_exact11_byk_shape(s):
     expected = compute_expected_vectorized(inp, wt, s)
     max_diff = float(np.max(np.abs(got.astype(np.float32) - expected)))
     ok = bool(np.allclose(got, expected, atol=0.12))
-    print(f"shape={s['name']} guarded=pointwise_exact11_byk tasks=11 submit_tasks=3 {'PASS' if ok else 'FAIL'} max_diff={max_diff:.4f}")
+    print(f"shape={s['name']} guarded=pointwise_exact11_byk tasks={len(layout['amounts'])} submit_tasks=3 {'PASS' if ok else 'FAIL'} max_diff={max_diff:.4f}")
     if not ok:
         print("debug_pointwise_exact11_byk_y=" + ";".join(
             f"{y}:{float(np.max(np.abs(got[:, :, y:y + h].astype(np.float32) - expected[:, :, y:y + h]))):.4f}"
             for y, h, _ in POINTWISE_EXACT11_BYK_WINDOWS[s["name"]]))
+        raise AssertionError(f"output mismatch max_diff={max_diff:.4f}")
+
+def run_pointwise_setup108_compact_weight_shape(s):
+    if s["name"] not in POINTWISE_SETUP108_COMPACT_WEIGHT_SHAPES:
+        raise ValueError("pointwise setup108 compact-weight submit is scoped only to RKNN-prefix proven shapes")
+    p = _conv_params(s)
+    np.random.seed(42)
+    inp = np.random.uniform(-2, 2, (s["batch"], s["in_c"], s["in_h"], s["in_w"])).astype(np.float16)
+    wt = np.random.uniform(-2, 2, (s["out_c"], s["weight_in_c"], s["kh"], s["kw"])).astype(np.float16)
+    input_flat = pack_input(inp[0], p).view(np.uint16)
+    weight_flat = _pack_pointwise_compact_weight(wt, s["out_c"], s["in_c"]).view(np.uint16)
+    out_count = _ceil_div(p["align_out_c"], UNPACK_C2) * p["out_width_stride"] * UNPACK_C2
+    output_bytes = out_count * np.dtype(np.float16).itemsize
+    fd = os.open("/dev/dri/card1", os.O_RDWR)
+    task_map, task_mem = mem_allocate(fd, 4096, RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
+    regcmd_map, regcmd_mem = mem_allocate(fd, 4096, RKNPU_MEM_NON_CACHEABLE)
+    input_map, input_mem = mem_allocate(fd, 4 * 1024 * 1024, RKNPU_MEM_NON_CACHEABLE)
+    weight_map, weight_mem = mem_allocate(fd, 4 * 1024 * 1024, RKNPU_MEM_NON_CACHEABLE)
+    output_map, output_mem = mem_allocate(fd, max(4 * 1024 * 1024, output_bytes), RKNPU_MEM_NON_CACHEABLE)
+    try:
+        (ctypes.c_uint16 * len(input_flat)).from_buffer(input_map)[:] = input_flat.tolist()
+        (ctypes.c_uint16 * len(weight_flat)).from_buffer(weight_map)[:] = weight_flat.tolist()
+        ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_map.size())
+        task_regs = [_exact11_body_regs(s, "setup", 0, s["out_c"], input_mem.dma_addr, weight_mem.dma_addr, output_mem.dma_addr)]
+        if len(task_regs[0]) != EXACT_BYK_SETUP_AMOUNT:
+            raise RuntimeError("pointwise setup108 row amount changed")
+        write_tasks(task_map, regcmd_map, regcmd_mem, task_regs)
+        subcores = ((0, 1), (0, 0), (0, 0), (0, 0), (0, 0))
+        print(f"pointwise_setup108_compact_weight_submit tasks=1 amount={len(task_regs[0])} weight_bytes={weight_flat.nbytes} subcores=(0,1),(0,0),(0,0),(0,0),(0,0)")
+        if npu_submit(fd, task_mem.obj_addr, 1, core_mask=0, subcores=subcores) < 0:
+            raise RuntimeError("npu_submit failed")
+        out_raw = np.frombuffer(output_map, dtype=np.float16, count=out_count).copy()
+        post_submit_reset(fd)
+    finally:
+        close_allocations(fd, ((task_map, task_mem), (regcmd_map, regcmd_mem),
+                               (input_map, input_mem), (weight_map, weight_mem), (output_map, output_mem)))
+        os.close(fd)
+    got = unpack_output(out_raw, s["out_c"], p["out_h"], p["out_w"], p["out_width_stride"], UNPACK_C2).reshape(1, s["out_c"], p["out_h"], p["out_w"])
+    expected = compute_expected_vectorized(inp, wt, s)
+    max_diff = float(np.max(np.abs(got.astype(np.float32) - expected)))
+    ok = bool(np.allclose(got, expected, atol=0.12))
+    print(f"shape={s['name']} guarded=pointwise_setup108_compact_weight tasks=1 {'PASS' if ok else 'FAIL'} max_diff={max_diff:.4f}")
+    if not ok:
+        print("debug_pointwise_setup108_compact_weight_ch=" + ";".join(
+            f"{idx}:{float(np.max(np.abs(got[:, idx].astype(np.float32) - expected[:, idx]))):.4f}"
+            for idx in range(s["out_c"])))
+        raise AssertionError(f"output mismatch max_diff={max_diff:.4f}")
+
+def _pointwise_exact11_chain_compact_weight_task_regs(s, in_dma, wt_dma, out_dma):
+    if s["name"] != "b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid":
+        raise ValueError("pointwise exact11 compact-weight chain is scoped only to c256_h3")
+
+    def row(family, y_start, input_h, conv2):
+        regs = _exact11_body_regs(s, family, 0, s["out_c"], in_dma, wt_dma, out_dma, y_start, input_h)
+        return patch_regs(regs, {
+            (reg.CNA, reg.CNA_CONV_CON2): conv2,
+            (reg.CNA, reg.CNA_DATA_SIZE1): 0x003f0100,
+            (reg.CNA, reg.CNA_CBUF_CON0): 0x0b1,
+            (reg.CNA, reg.CNA_CVT_CON0): 0x000b,
+            (reg.CNA, reg.CNA_DMA_CON2): 0x0ffffffd,
+        })
+
+    aux_dma = wt_dma + 0x3000
+    rows = [
+        row("setup", 0, 3, 0x00000040),
+        row("k_half", 0, 2, 0x10000030), _exact11_aux_regs(s, out_dma, aux_dma),
+        row("k_half", 2, 1, 0x10000020), _exact11_aux_regs(s, out_dma, aux_dma),
+        row("y_tile", 0, 1, 0x20000020), _exact11_aux_regs(s, out_dma, aux_dma),
+        row("y_tile", 1, 1, 0x20000020), _exact11_aux_regs(s, out_dma, aux_dma),
+        row("y_tile", 2, 1, 0x20000020), _exact11_aux_regs(s, out_dma, aux_dma),
+    ]
+    if tuple(len(row_regs) for row_regs in rows) != EXACT11_BYK_AMOUNTS:
+        raise RuntimeError("pointwise exact11 compact-weight chain row amounts changed")
+    return rows
+
+def _c256_h2_oc64_exact11_task_regs(s, in_dma, wt_dma, out_dma):
+    if s["name"] != C256_H2_OC64_EXACT11_SHAPE:
+        raise ValueError("c256_h2_oc64 exact11 rows are scoped only to the crash-fenced oc64 shape")
+
+    def row(family, oc_start, oc_count, weight_size0):
+        regs = _exact11_body_regs(s, family, oc_start, oc_count, in_dma, wt_dma, out_dma, input_h=2, conv2_low=0x30)
+        return patch_regs(regs, {
+            (reg.CNA, reg.CNA_DATA_SIZE1): 0x003f0100,
+            (reg.CNA, reg.CNA_CBUF_CON0): 0x0b1,
+            (reg.CNA, reg.CNA_CVT_CON0): 0x000b,
+            (reg.CNA, reg.CNA_DMA_CON2): 0x0ffffffc,
+            (reg.CNA, reg.CNA_WEIGHT_SIZE0): weight_size0,
+            (reg.CNA, reg.CNA_WEIGHT_SIZE1): weight_size0 >> 8,
+            (reg.CNA, reg.CNA_WEIGHT_SIZE2): (s["kw"] << 24) | (s["kh"] << 16) | oc_count,
+            (reg.CORE, reg.CORE_DATAOUT_SIZE_1): oc_count - 1,
+            (reg.DPU, reg.DATA_CUBE_CHANNEL): ((oc_count - 1) << 16) | (oc_count - 1),
+            (reg.DPU, reg.WDMA_SIZE_0): oc_count - 1,
+        })
+
+    aux_dma = wt_dma + 0x8000
+    rows = [
+        row("setup", 0, 64, 0x8000),
+        row("k_half", 0, 32, 0x4000), _exact11_aux_regs(s, out_dma, aux_dma),
+        row("k_half", 32, 32, 0x4000), _exact11_aux_regs(s, out_dma, aux_dma),
+        row("k_tile", 0, 32, 0x4000), _exact11_aux_regs(s, out_dma, aux_dma),
+        row("k_tile", 32, 16, 0x2000), _exact11_aux_regs(s, out_dma, aux_dma),
+        row("k_tile", 48, 16, 0x2000), _exact11_aux_regs(s, out_dma, aux_dma),
+    ]
+    if tuple(len(row_regs) for row_regs in rows) != EXACT11_BYK_AMOUNTS:
+        raise RuntimeError("c256_h2_oc64 exact11 row amounts changed")
+    return rows
+
+def dry_run_c256_h2_oc64_exact11(s):
+    if s["name"] != C256_H2_OC64_EXACT11_SHAPE:
+        raise ValueError("c256_h2_oc64 exact11 dry-run is scoped only to the crash-fenced oc64 shape")
+    layout = exact_byk_legacy_layout_check(s)
+    in_dma, wt_dma, out_dma = 0x10000000, 0x20000000, 0x30000000
+    rows = _c256_h2_oc64_exact11_task_regs(s, in_dma, wt_dma, out_dma)
+    families = ("setup", "k_half", "ppu_pdp", "k_half", "ppu_pdp", "k_tile", "ppu_pdp", "k_tile", "ppu_pdp", "k_tile", "ppu_pdp")
+    out_c = []
+    weight_size0 = []
+    dst_offsets = []
+    for family, regs_row in zip(families, rows):
+        values = {(qword >> 48, qword & 0xffff): (qword >> 16) & 0xffffffff for qword in regs_row}
+        if family == "ppu_pdp":
+            out_c.append(None)
+            weight_size0.append(None)
+            dst_offsets.append(None)
+            continue
+        out_c.append((values[(reg.CORE, reg.CORE_DATAOUT_SIZE_1)] & 0xffff) + 1)
+        weight_size0.append(values[(reg.CNA, reg.CNA_WEIGHT_SIZE0)])
+        dst_offsets.append(values[(reg.DPU, reg.DST_BASE_ADDR)] - out_dma)
+        if values[(reg.CNA, reg.CNA_CBUF_CON0)] != 0x0b1:
+            raise RuntimeError("c256_h2_oc64 cbuf0 preflight mismatch")
+        if values[(reg.CNA, reg.CNA_DATA_SIZE1)] != 0x003f0100:
+            raise RuntimeError("c256_h2_oc64 data_size1 preflight mismatch")
+        if values[(reg.CNA, reg.CNA_DMA_CON2)] != 0x0ffffffc:
+            raise RuntimeError("c256_h2_oc64 dma2 preflight mismatch")
+    if tuple(out_c) != C256_H2_OC64_EXACT11_OUT_C:
+        raise RuntimeError("c256_h2_oc64 out_c preflight mismatch")
+    if tuple(weight_size0) != C256_H2_OC64_EXACT11_WEIGHT_SIZE0:
+        raise RuntimeError("c256_h2_oc64 weight_size0 preflight mismatch")
+    if tuple(dst_offsets) != C256_H2_OC64_EXACT11_DST_OFFSETS:
+        raise RuntimeError("c256_h2_oc64 dst offset preflight mismatch")
+    print(f"dry_run=c256_h2_oc64_exact11 shape={s['name']} status=no_drm_no_submit")
+    print("amounts=" + ",".join(str(value) for value in layout["amounts"]))
+    print("masks=" + ",".join(hex(value) for value in layout["masks"]))
+    print("offsets=" + ",".join(str(value) for value in layout["offsets"]))
+    print("families=" + ",".join(families))
+    print("out_c=" + ",".join("none" if value is None else str(value) for value in out_c))
+    print("weight_size0=" + ",".join("none" if value is None else hex(value) for value in weight_size0))
+    print("dst_offsets=" + ",".join("none" if value is None else hex(value) for value in dst_offsets))
+    print("consts=cbuf0:0xb1,data_size1:0x003f0100,dma2:0x0ffffffc")
+
+def run_pointwise_exact11_chain_compact_weight_shape(s):
+    if s["name"] not in POINTWISE_EXACT11_CHAIN_COMPACT_WEIGHT_SHAPES:
+        raise ValueError("pointwise exact11 compact-weight chain is scoped only to RKNN-prefix proven shapes")
+    layout = exact_byk_legacy_layout_check(s)
+    p = _conv_params(s)
+    np.random.seed(42)
+    inp = np.random.uniform(-2, 2, (s["batch"], s["in_c"], s["in_h"], s["in_w"])).astype(np.float16)
+    wt = np.random.uniform(-2, 2, (s["out_c"], s["weight_in_c"], s["kh"], s["kw"])).astype(np.float16)
+    input_flat = pack_input(inp[0], p).view(np.uint16)
+    weight_flat = _pack_pointwise_compact_weight(wt, s["out_c"], s["in_c"]).view(np.uint16)
+    out_count = _ceil_div(p["align_out_c"], UNPACK_C2) * p["out_width_stride"] * UNPACK_C2
+    output_bytes = out_count * np.dtype(np.float16).itemsize
+    regcmd_bytes = (layout["offsets"][-1] + layout["amounts"][-1]) * ctypes.sizeof(ctypes.c_uint64)
+    fd = os.open("/dev/dri/card1", os.O_RDWR)
+    task_map, task_mem = mem_allocate(fd, 4096, RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
+    regcmd_map, regcmd_mem = mem_allocate(fd, regcmd_alloc_bytes(regcmd_bytes), RKNPU_MEM_NON_CACHEABLE)
+    input_map, input_mem = mem_allocate(fd, 4 * 1024 * 1024, RKNPU_MEM_NON_CACHEABLE)
+    weight_map, weight_mem = mem_allocate(fd, 4 * 1024 * 1024, RKNPU_MEM_NON_CACHEABLE)
+    output_map, output_mem = mem_allocate(fd, max(4 * 1024 * 1024, output_bytes), RKNPU_MEM_NON_CACHEABLE)
+    try:
+        (ctypes.c_uint16 * len(input_flat)).from_buffer(input_map)[:] = input_flat.tolist()
+        (ctypes.c_uint16 * len(weight_flat)).from_buffer(weight_map)[:] = weight_flat.tolist()
+        ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_map.size())
+        task_regs = _pointwise_exact11_chain_compact_weight_task_regs(s, input_mem.dma_addr, weight_mem.dma_addr, output_mem.dma_addr)
+        write_exact11_byk_tasks(task_map, regcmd_map, regcmd_mem, task_regs, layout)
+        subcores = ((0, 1), (0, 0), (0, 0), (0, 0), (0, 0))
+        print(f"pointwise_exact11_chain_compact_weight_submit tasks={len(task_regs)} submit_task_number=1 weight_bytes={weight_flat.nbytes} subcores=(0,1),(0,0),(0,0),(0,0),(0,0)")
+        if npu_submit(fd, task_mem.obj_addr, 1, core_mask=0, subcores=subcores) < 0:
+            raise RuntimeError("npu_submit failed")
+        out_raw = np.frombuffer(output_map, dtype=np.float16, count=out_count).copy()
+        post_submit_reset(fd)
+    finally:
+        close_allocations(fd, ((task_map, task_mem), (regcmd_map, regcmd_mem),
+                               (input_map, input_mem), (weight_map, weight_mem), (output_map, output_mem)))
+        os.close(fd)
+    got = unpack_output(out_raw, s["out_c"], p["out_h"], p["out_w"], p["out_width_stride"], UNPACK_C2).reshape(1, s["out_c"], p["out_h"], p["out_w"])
+    expected = compute_expected_vectorized(inp, wt, s)
+    max_diff = float(np.max(np.abs(got.astype(np.float32) - expected)))
+    ok = bool(np.allclose(got, expected, atol=0.12))
+    print(f"shape={s['name']} guarded=pointwise_exact11_chain_compact_weight tasks={len(layout['amounts'])} submit_tasks=1 {'PASS' if ok else 'FAIL'} max_diff={max_diff:.4f}")
+    if not ok:
+        print("debug_pointwise_exact11_chain_compact_weight_ch=" + ";".join(
+            f"{idx}:{float(np.max(np.abs(got[:, idx].astype(np.float32) - expected[:, idx]))):.4f}"
+            for idx in range(s["out_c"])))
         raise AssertionError(f"output mismatch max_diff={max_diff:.4f}")
 
 def run_h40_exact17_shape(s):
@@ -1410,7 +1898,8 @@ def run_depthwise_shape(s):
     # only setup/NONE rows are safe to submit one-tile-at-a-time; multi-row
     # BY_Y/BY_K/BY_YK depthwise closures still need RKNN 108-row semantics
     if len(rows) > 1 and rows[0]["split_method"] != "NONE":
-        if rows[0]["split_method"] in ("BY_Y", "BY_K", "BY_YK") and s["name"] not in DEPTHWISE_BODY_SHAPES:
+        if (rows[0]["split_method"] in ("BY_Y", "BY_K", "BY_YK") and
+                s["name"] not in DEPTHWISE_BODY_SHAPES and s["name"] not in DEPTHWISE_SETUP108_SHAPES):
             raise ValueError(f"depthwise {rows[0]['split_method']} closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted")
     methods = {row["split_method"] for row in rows}
     families = {row["family"] for row in rows}
@@ -1428,12 +1917,19 @@ def run_depthwise_shape(s):
     output_map, output_mem = mem_allocate(fd, 4 * 1024 * 1024, RKNPU_MEM_NON_CACHEABLE)
     try:
         ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_map.size())
-        weight_flat = pack_weights(wt, s, p).view(np.uint16)
+        if s["name"] in DEPTHWISE_SETUP108_SHAPES:
+            weight_flat = _pack_depthwise_compact_weight(wt, s["out_c"], s["kh"], s["kw"]).view(np.uint16)
+        else:
+            weight_flat = pack_weights(wt, s, p).view(np.uint16)
         (ctypes.c_uint16 * len(weight_flat)).from_buffer(weight_map)[:] = weight_flat.tolist()
         input_base = ctypes.addressof(ctypes.c_char.from_buffer(input_map))
         weight_base = ctypes.addressof(ctypes.c_char.from_buffer(weight_map))
         task_regs = []
-        if len(rows) == 1 and rows[0]["family"] == "setup" and rows[0]["split_method"] == "NONE":
+        if s["name"] in DEPTHWISE_SETUP108_SHAPES:
+            input_flat = pack_input(inp[0], p).view(np.uint16)
+            (ctypes.c_uint16 * len(input_flat)).from_buffer(input_map)[:] = input_flat.tolist()
+            task_regs.append(make_depthwise_setup108_regs(s, p, input_mem.dma_addr, weight_mem.dma_addr, output_mem.dma_addr))
+        elif len(rows) == 1 and rows[0]["family"] == "setup" and rows[0]["split_method"] == "NONE":
             input_flat = pack_input(inp[0], p).view(np.uint16)
             (ctypes.c_uint16 * len(input_flat)).from_buffer(input_map)[:] = input_flat.tolist()
             task_regs.append(make_regs(s, p, input_mem.dma_addr, weight_mem.dma_addr, output_mem.dma_addr, True))
@@ -1770,6 +2266,7 @@ def main(argv=None):
     parser.add_argument("shape", nargs="?", help="supported shape name")
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--dry-run-exact11-byk", action="store_true", help="print exact-11 BY_K metadata without DRM")
+    parser.add_argument("--dry-run-c256-h2-oc64-exact11", action="store_true", help="print c256_h2_oc64 exact-11 metadata without DRM")
     parser.add_argument("--dry-run-h160-spatial-by-y", action="store_true", help="print h160 spatial BY_Y executable rows without DRM")
     parser.add_argument("--allow-h160-setup3-submit", action="store_true", help="run the guarded h160 setup3 closure attempt")
     parser.add_argument("--allow-exact11-byk-submit", action="store_true", help="run the guarded exact-11 BY_K h14 attempt")
@@ -1785,6 +2282,11 @@ def main(argv=None):
         return 1
     try:
         s = shape_from_name(args.shape)
+        if args.dry_run_c256_h2_oc64_exact11:
+            dry_run_c256_h2_oc64_exact11(s)
+            return 0
+        if s["name"] in CRASH_FENCED_SHAPES:
+            raise ValueError("shape is crash-fenced after c256_h2 setup108 generalization reboot; capture exact RKNN GEM1/GEM2 closure before submit")
         if args.dry_run_exact11_byk:
             dry_run_exact11_byk(s)
         elif args.dry_run_h160_spatial_by_y:
@@ -1793,6 +2295,10 @@ def main(argv=None):
             run_exact11_byk_shape(s)
         elif args.allow_pointwise_exact11_byk_submit or s["name"] in POINTWISE_EXACT11_BYK_SHAPES:
             run_pointwise_exact11_byk_shape(s)
+        elif s["name"] in POINTWISE_EXACT11_CHAIN_COMPACT_WEIGHT_SHAPES:
+            run_pointwise_exact11_chain_compact_weight_shape(s)
+        elif s["name"] in POINTWISE_SETUP108_COMPACT_WEIGHT_SHAPES:
+            run_pointwise_setup108_compact_weight_shape(s)
         elif s["name"] == H40_SPATIAL_BY_Y_SHAPE:
             run_h40_exact17_shape(s)
         elif args.allow_h160_setup3_submit or s["name"] == H160_SPATIAL_BY_Y_SHAPE:
