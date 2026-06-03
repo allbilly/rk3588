@@ -337,3 +337,46 @@ At the top of this session, the user reported `it crashed`. Contextually, this r
 - **Net promotions since 114 baseline: +25**
 - **Target: 78 more promotions to reach 217/217**
 - **ETA: 15-21 hours of focused work** (c16_h80 family took ~20 min total; spatial 3x3 batch is 6 more at ~10 min each if the full-OC k_tile hypothesis holds; pointwise 1x1 batch is 36 at ~5-10 min each after the first establishes the pattern; depthwise is the slow track at ~30 min each with new closure derivation)
+
+
+---
+
+## 12. Spatial 3x3 Promotion Attempts (this session, 16:00-16:15)
+
+After the current_task.md rewrite, attempted to promote c40_h40_oc160_3x3 and c72_h20_oc288_3x3 with the body field constants from the handoff table. **Both FAILED with high max_diff**, indicating the spatial 3x3 path needs more than just body field overrides — likely a different k_tile structure or y_offset patches.
+
+### 12.1 c40_h40_oc160_3x3 attempts (all reverted)
+
+| Attempt | CBUF0 | DATA_SIZE1 | CONV2_LOW | KT_TILE_SPLITS | Result |
+|---|---|---|---|---|---|
+| #1 (initial) | 0x87 | (default=0x00270030) | (default=0x0c0) | (default) | FAIL max_diff=inf (NaN) |
+| #2 (added DATA_SIZE1) | 0x87 | 0x00270028 | 0x160 | (default) | FAIL max_diff=163.0513 |
+| #3 (16-aligned splits) | 0x87 | 0x00270028 | 0x160 | ((0, 64), (64, 64), (128, 32)) | FAIL max_diff=163.0513 |
+| #4 (proportional) | 0x87 | 0x00270028 | 0x160 | ((0, 56), (56, 56), (112, 48)) | FAIL max_diff=163.0513 |
+| #5 (full-OC) | 0x87 | 0x00270028 | 0x160 | ((0, 160), (0, 160), (0, 160)) | RuntimeError: exact11 BY_K row amounts changed |
+
+**Observation:** the per-OC breakdown `debug_exact11_byk_oc=0:141;32:163;64:138;96:139;128:145` shows a wave-like error pattern, suggesting wrong k_tile body configuration (not just partitioning). All reverted; NPU healthy post-revert.
+
+### 12.2 c72_h20_oc288_3x3 attempts (all reverted)
+
+| Attempt | CBUF0 | DATA_SIZE1 | CONV2_LOW | KT_TILE_SPLITS | Result |
+|---|---|---|---|---|---|
+| #1 (handoff constants) | 0xa7 | 0x00070048 (handoff) | 0x140 | ((0, 96), (96, 96), (192, 96)) | FAIL max_diff=201.43 |
+| #2 (standard DATA_SIZE1) | 0xa7 | 0x00470048 | 0x140 | ((0, 96), (96, 96), (192, 96)) | FAIL max_diff=201.43 |
+| #3 (analytical CBUF0) | 0x47 | 0x00470048 | 0x140 | ((0, 96), (96, 96), (192, 96)) | FAIL max_diff=204.77 |
+
+**Observation:** per-OC breakdown `debug_exact11_byk_oc=0:162;32:189;64:193;96:162;128:121;160:142;192:133;224:134;256:180` shows large wave across all OCs. The DATA_SIZE1 handoff value 0x00070048 was suspicious (in_c-1=71=0x47, not 0x07). Using the standard formula 0x00470048 didn't help. CBUF0=0x47 (analytical) gave similar failure. All reverted; NPU healthy post-revert.
+
+### 12.3 Diagnosis
+
+The 6 remaining spatial 3x3 siblings likely need:
+1. A **different closure** (e.g. c576_h19_oc12-style 12-task with per-y_offset patches, or the SETUP2_CLOSURE for h=14 in_h)
+2. Or a **per-row y_offset patch** (analogous to c576_h19_oc12)
+3. Or body field constants that I cannot derive from the captures alone (the captures only have task descriptors, not the actual register writes)
+
+**Next research step:** read the actual `gem1_regdump.bin` for one of the spatial 3x3 shapes (if it exists for c72_h20_oc288) to extract the ground-truth body field EMIT statements. Or use rknn_runtime logs to find the actual register writes.
+
+### 12.4 NPU health verified post-revert
+
+`python3 examples/simple_add.py` PASS at 16:15. Worktree clean (c40_h40_oc160 and c72_h20_oc288 entries reverted via `git checkout examples/conv.py`).
+
