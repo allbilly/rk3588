@@ -29,6 +29,7 @@ RK_MAX_CONV_FLAT_STRIDE = 992
 UNPACK_C2 = FP16_ATOM_ELEMENTS // FP16_BYTES
 PC_CHAIN_TAIL_QWORDS = 4
 EXACT11_BYK_SHAPE = "b1_c160_h14_w14_oc320_wic160_k3x3_g1_s1_pvalid"
+C256_H2_OC64_EXACT11_SHAPE = "b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid"
 H40_SPATIAL_BY_Y_SHAPE = "b1_c160_h40_w40_oc320_wic160_k3x3_g1_s1_pvalid"
 EXACT11_BYK_AMOUNTS = (108, 104, 26, 104, 26, 104, 26, 104, 26, 104, 26)
 EXACT11_BYK_MASKS = (0x0d, 0x0d, 0x60, 0x0d, 0x60, 0x0d, 0x60, 0x0d, 0x60, 0x0d, 0x60)
@@ -63,6 +64,7 @@ PREFIX_BY_K_SHAPES = {
     "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid",
     "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1",
     "b1_c512_h7_w7_oc1024_wic512_k1x1_g1",
+    C256_H2_OC64_EXACT11_SHAPE,
 }
 POINTWISE_EXACT11_BYK_SHAPES = {
     "conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1",
@@ -182,7 +184,6 @@ POINTWISE_SETUP108_COMPACT_WEIGHT_SHAPES = {
     "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid",
 }
 CRASH_FENCED_SHAPES = {
-    "b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid",
     "b1_c256_h2_w2_oc546_wic256_k1x1_g1_s1_pvalid",
 }
 C256_H2_OC64_EXACT11_SHAPE = "b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid"
@@ -361,6 +362,7 @@ KT_TILE_SPLITS = {
     "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1": ((0, 352), (352, 336), (688, 336)),
     "b1_c512_h7_w7_oc1024_wic512_k1x1_g1":           ((0, 352), (352, 336), (688, 336)),
     "b1_c832_h7_w7_oc48_wic832_k1x1_g1":             ((0, 16), (16, 16), (32, 16)),
+    "b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid":   ((0, 32), (32, 16), (48, 16)),
 }
 CONV2_LOW_OVERRIDES = {
     # c160_h14 and c160_h7 fall through to the default logic below (0x0f0 / 0x0a0)
@@ -945,6 +947,11 @@ def _exact11_aux_regs(s, out_dma, aux_dma=None):
 
 def _exact11_task_regs(s, in_dma, wt_dma, out_dma):
     layout = exact_byk_legacy_layout_check(s)
+    if s["name"] == C256_H2_OC64_EXACT11_SHAPE:
+        rows = _c256_h2_oc64_exact11_task_regs(s, in_dma, wt_dma, out_dma)
+        if tuple(len(row) for row in rows) != layout["amounts"]:
+            raise RuntimeError("c256_h2_oc64 exact11 BY_K row amounts changed")
+        return rows
     if s["name"] == "b1_c832_h7_w7_oc48_wic832_k1x1_g1":
         setup0 = _exact11_body_regs(s, "setup", 0, s["out_c"], in_dma, wt_dma, out_dma, input_h=7, conv2_low=0x08)
         setup1 = patch_regs(
@@ -1698,6 +1705,53 @@ def dry_run_c256_h2_oc64_exact11(s):
     print("dst_offsets=" + ",".join("none" if value is None else hex(value) for value in dst_offsets))
     print("consts=cbuf0:0xb1,data_size1:0x003f0100,dma2:0x0ffffffc")
 
+def run_c256_h2_oc64_exact11_shape(s):
+    if s["name"] != C256_H2_OC64_EXACT11_SHAPE:
+        raise ValueError("c256_h2_oc64 exact11 run is scoped only to the RKNN-proven c256_h2_oc64 shape")
+    layout = exact_byk_legacy_layout_check(s)
+    p = _conv_params(s)
+    np.random.seed(42)
+    inp = np.random.uniform(-2, 2, (s["batch"], s["in_c"], s["in_h"], s["in_w"])).astype(np.float16)
+    wt = np.random.uniform(-2, 2, (s["out_c"], s["weight_in_c"], s["kh"], s["kw"])).astype(np.float16)
+    input_flat = pack_input(inp[0], p).view(np.uint16)
+    weight_flat = _pack_pointwise_wide(wt, s["out_c"], s["in_c"]).view(np.uint16)
+    out_count = _ceil_div(p["align_out_c"], UNPACK_C2) * p["out_width_stride"] * UNPACK_C2
+    output_bytes = out_count * np.dtype(np.float16).itemsize
+    regcmd_bytes = (layout["offsets"][-1] + layout["amounts"][-1]) * ctypes.sizeof(ctypes.c_uint64)
+    fd = os.open("/dev/dri/card1", os.O_RDWR)
+    task_map, task_mem = mem_allocate(fd, 4096, RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
+    regcmd_map, regcmd_mem = mem_allocate(fd, regcmd_alloc_bytes(regcmd_bytes), RKNPU_MEM_NON_CACHEABLE)
+    input_map, input_mem = mem_allocate(fd, 4 * 1024 * 1024, RKNPU_MEM_NON_CACHEABLE)
+    weight_map, weight_mem = mem_allocate(fd, 4 * 1024 * 1024, RKNPU_MEM_NON_CACHEABLE)
+    output_map, output_mem = mem_allocate(fd, max(4 * 1024 * 1024, output_bytes), RKNPU_MEM_NON_CACHEABLE)
+    try:
+        (ctypes.c_uint16 * len(input_flat)).from_buffer(input_map)[:] = input_flat.tolist()
+        (ctypes.c_uint16 * len(weight_flat)).from_buffer(weight_map)[:] = weight_flat.tolist()
+        ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_map.size())
+        task_regs = _c256_h2_oc64_exact11_task_regs(s, input_mem.dma_addr, weight_mem.dma_addr, output_mem.dma_addr)
+        write_exact11_byk_tasks(task_map, regcmd_map, regcmd_mem, task_regs, layout)
+        subcores = ((0, 1), (0, 1), (0, 1), (0, 0), (0, 0))
+        print(f"c256_h2_oc64_exact11_submit tasks={len(layout['amounts'])} submit_task_number=3 amounts=" + ";".join(str(v) for v in layout["amounts"]) +
+              " masks=" + ";".join(hex(v) for v in layout["masks"]) + " subcores=(0,1),(0,1),(0,1),(0,0),(0,0)")
+        if npu_submit(fd, task_mem.obj_addr, 3, core_mask=0, subcores=subcores) < 0:
+            raise RuntimeError("npu_submit failed")
+        out_raw = np.frombuffer(output_map, dtype=np.float16, count=out_count).copy()
+        post_submit_reset(fd)
+    finally:
+        close_allocations(fd, ((task_map, task_mem), (regcmd_map, regcmd_mem),
+                                (input_map, input_mem), (weight_map, weight_mem), (output_map, output_mem)))
+        os.close(fd)
+    got = unpack_output(out_raw, s["out_c"], p["out_h"], p["out_w"], p["out_width_stride"], UNPACK_C2).reshape(1, s["out_c"], p["out_h"], p["out_w"])
+    expected = compute_expected_vectorized(inp, wt, s)
+    max_diff = float(np.max(np.abs(got.astype(np.float32) - expected)))
+    ok = bool(np.allclose(got, expected, atol=0.12))
+    print(f"shape={s['name']} guarded=c256_h2_oc64_exact11 tasks={len(layout['amounts'])} submit_tasks=3 {'PASS' if ok else 'FAIL'} max_diff={max_diff:.4f}")
+    if not ok:
+        print("debug_c256_h2_oc64_exact11_oc=" + ";".join(
+            f"{start}:{float(np.max(np.abs(got[:, start:start + 16].astype(np.float32) - expected[:, start:start + 16]))):.4f}"
+            for start in range(0, s["out_c"], 16)))
+        raise AssertionError(f"output mismatch max_diff={max_diff:.4f}")
+
 def run_pointwise_exact11_chain_compact_weight_shape(s):
     if s["name"] not in POINTWISE_EXACT11_CHAIN_COMPACT_WEIGHT_SHAPES:
         raise ValueError("pointwise exact11 compact-weight chain is scoped only to RKNN-prefix proven shapes")
@@ -2271,6 +2325,7 @@ def main(argv=None):
     parser.add_argument("--allow-h160-setup3-submit", action="store_true", help="run the guarded h160 setup3 closure attempt")
     parser.add_argument("--allow-exact11-byk-submit", action="store_true", help="run the guarded exact-11 BY_K h14 attempt")
     parser.add_argument("--allow-pointwise-exact11-byk-submit", action="store_true", help="run the guarded pointwise exact-11 BY_K attempt")
+    parser.add_argument("--allow-c256-h2-oc64-exact11-submit", action="store_true", help="run the guarded c256_h2_oc64 exact-11 attempt")
     args = parser.parse_args(argv)
     if args.list:
         print("encoded shape syntax: [conv2d_]bN_cN_hN_wN_ocN_wicN_kHxW_gN[_sN][_pvalid]")
@@ -2284,6 +2339,9 @@ def main(argv=None):
         s = shape_from_name(args.shape)
         if args.dry_run_c256_h2_oc64_exact11:
             dry_run_c256_h2_oc64_exact11(s)
+            return 0
+        if s["name"] == C256_H2_OC64_EXACT11_SHAPE and args.allow_c256_h2_oc64_exact11_submit:
+            run_c256_h2_oc64_exact11_shape(s)
             return 0
         if s["name"] in CRASH_FENCED_SHAPES:
             raise ValueError("shape is crash-fenced after c256_h2 setup108 generalization reboot; capture exact RKNN GEM1/GEM2 closure before submit")

@@ -21,6 +21,7 @@ TASK_FIELDS = (
     "regcmd_addr",
 )
 QWORD_STRUCT = struct.Struct("<Q")
+REGCMD_TARGETS = {0x0041, 0x0081, 0x0101, 0x0201, 0x0801, 0x1001, 0x4001, 0x8001}
 
 
 class drm_gem_open(ctypes.Structure):
@@ -64,7 +65,29 @@ def parse_qword_window(spec):
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
-def dump_gem(fd, flink, qword_windows):
+def decode_qword(value):
+    return (value >> 48) & 0xffff, value & 0xffff, (value >> 16) & 0xffffffff
+
+
+def scan_regcmd_runs(data, min_run):
+    runs = []
+    current = []
+    for offset in range(0, len(data) - QWORD_STRUCT.size + 1, QWORD_STRUCT.size):
+        value = QWORD_STRUCT.unpack_from(data, offset)[0]
+        target, addr, reg_value = decode_qword(value)
+        is_regcmd = target in REGCMD_TARGETS and (addr or reg_value or target in (0x0041, 0x0081))
+        if is_regcmd:
+            current.append((offset, value))
+        else:
+            if len(current) >= min_run:
+                runs.append(current)
+            current = []
+    if len(current) >= min_run:
+        runs.append(current)
+    return runs
+
+
+def dump_gem(fd, flink, qword_windows, scan_regcmd=False, min_regcmd_run=8):
     gem = drm_gem_open(name=flink)
     fcntl.ioctl(fd, DRM_IOCTL_GEM_OPEN, gem)
     mapper = rknpu_mem_map(handle=gem.handle)
@@ -97,6 +120,18 @@ def dump_gem(fd, flink, qword_windows):
             qword_off = offset + idx * QWORD_STRUCT.size
             value = QWORD_STRUCT.unpack_from(data, qword_off)[0]
             print(f"  regcmd_qword[{idx}] off=0x{qword_off:x} value=0x{value:016x}")
+    if scan_regcmd:
+        runs = scan_regcmd_runs(data, min_regcmd_run)
+        print(f"  regcmd_like_runs={len(runs)} min_run={min_regcmd_run}")
+        for run_idx, run in enumerate(runs):
+            start = run[0][0]
+            print(f"  REGCMD_RUN[{run_idx}] off=0x{start:x} qwords={len(run)}")
+            for idx, (offset, value) in enumerate(run):
+                target, addr, reg_value = decode_qword(value)
+                print(
+                    f"  regcmd_qword[{idx}] off=0x{offset:x} value=0x{value:016x} "
+                    f"target=0x{target:04x} addr=0x{addr:04x} reg_value=0x{reg_value:08x}"
+                )
 
 
 def main():
@@ -104,12 +139,14 @@ def main():
     parser.add_argument("gems", nargs="*", type=int, default=[1, 2])
     parser.add_argument("--device", default="/dev/dri/card1")
     parser.add_argument("--qword-window", action="append", type=parse_qword_window, default=[])
+    parser.add_argument("--scan-regcmd", action="store_true")
+    parser.add_argument("--min-regcmd-run", type=int, default=8)
     args = parser.parse_args()
     fd = os.open(args.device, os.O_RDWR)
     try:
         for flink in args.gems:
             try:
-                dump_gem(fd, flink, args.qword_window)
+                dump_gem(fd, flink, args.qword_window, args.scan_regcmd, args.min_regcmd_run)
             except OSError as exc:
                 print(f"GEM {flink}: unavailable: {exc}")
     finally:
