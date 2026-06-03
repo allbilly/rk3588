@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 DUMP_DIR = Path("/home/orangepi/npu/ops_rknn/dump")
-SWEEP = Path("/tmp/opencode/conv_py_217_sweep_20260603_121116_summary.txt")
+SWEEP = Path("/home/orangepi/rk3588/sweep_results/conv_py_217_sweep_20260603_155357_summary.txt")
 fenced = []
 for line in SWEEP.read_text().splitlines():
     if line.startswith("FENCED "):
