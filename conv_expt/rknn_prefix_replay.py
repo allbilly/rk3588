@@ -925,6 +925,25 @@ def print_coverage_summary(summary_path):
         print(f"  replay_ready shape={shape} target={key} hint=by_k_exact11_metadata_with_setup_tail_rows")
 
 
+MANIFEST = {
+    "c256_h3_oc128_promoted_via_exact11_byk": {
+        "shape": "b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid",
+        "case": "b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid 1 256 3 3 128 1 1 1 c256_h3_oc128",
+        "note": "promoted via 11-task EXACT11 BY_K closure with body field overrides from c256_h3_oc24 sibling: CBUF0=0x0b1, DATA_SIZE1=0x003f0100, CVT_CON0=0x000b, DMA_CON2=0x0ffffffd. KT_TILE_SPLITS=((0, 48), (48, 48), (96, 32)) summing to 128. max_diff=0.0155 PASS, pre/post simple_add PASS. 16:35 this session.",
+    },
+    "c128_h3_oc256_1x1_promoted_via_exact11_byk": {
+        "shape": "b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid",
+        "case": "b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid 1 128 3 3 256 1 1 1 c128_h3_oc256_k1x1",
+        "note": "promoted via 11-task EXACT11 BY_K closure with body field constants from c256_h3_oc128 sibling: CBUF0=0x0b1, DATA_SIZE1=0x003f0080 (natural for in_c=128), CVT_CON0=0x000b, DMA_CON2=0x0ffffffd. KT_TILE_SPLITS=((0, 96), (96, 96), (192, 64)) summing to 256. max_diff=0.0154 PASS, pre/post simple_add PASS. 16:38 this session.",
+    },
+    "c128_h3_oc256_k3x3_promoted_via_exact11_byk": {
+        "shape": "b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid",
+        "case": "b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid 1 128 3 3 256 3 3 1 c128_h3_oc256_k3x3",
+        "note": "promoted via 11-task EXACT11 BY_K closure (spatial 3x3, in_h=3): body field constants from c128_h3_oc256_k1x1 sibling + CONV2_LOW=0x060 (in_h+kh=6, FEATURE_GRAINS=6). CBUF0=0x0b1, DATA_SIZE1=0x003f0080, CVT_CON0=0x000b, DMA_CON2=0x0ffffffd. KT_TILE_SPLITS=((0, 96), (96, 96), (192, 64)). max_diff=0.0310 PASS, pre/post simple_add PASS. 16:40 this session.",
+    },
+}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Print RKNN prefix replay manifest without submitting hardware")
     parser.add_argument("target", nargs="?", choices=sorted(TARGETS), help="target to describe")
