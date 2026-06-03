@@ -484,15 +484,15 @@ python3 experimental/rknn/dump_rknpu_task_gems.py --scan-regcmd --min-regcmd-run
 
 | Family | # Fenced | GEM1 | GEM2 | %G1 | Distinct capture slugs |
 |---|---:|---:|---:|---:|---|
-| depthwise 3x3 (k3_g=in_c) | 30 | 12 | 11 | 40% | c32_h150_dw_by_y, c96_h112_dw_by_yk, c96_h150_dw_by_yk, c128_h56_dw_by_yk, c144_h56_dw_by_yk, c256_h28_dw_by_yk, c256_h3_none, c512_h14_dw_by_k, c576_h19, cc_c32_h112_dw_by_y |
-| depthwise 5x5 (k5_g=in_c) | 4 | 0 | 0 | **0%** | — (no captures exist) |
-| depthwise 7x7 (k7_g=in_c) | 2 | 0 | 0 | **0%** | — (no captures exist) |
-| pointwise 1x1 (k1_g1) | 36 | 14 | 14 | 39% | c1024_h1_oc1001_pw_by_k, c128_h1_none, c256_h2_none, c256_h2_oc64, c256_h3_none, c512_h14_oc24, c576_h19, c832_h7_oc48 |
-| spatial 3x3 (k3_g1) | 7 | 1 | 1 | 14% | c40_h40_oc320 (only this slug; 6/7 have nothing) |
-| spatial 5x5 (k5_g1) | 1 | 0 | 0 | **0%** | — (no captures exist) |
-| **Total** | **80** | **27** | **26** | **34%** | — |
+| depthwise 3x3 (k3_g=in_c) | 30 | 30 | 30 | **100%** | c32_h150_dw_by_y, c96_h112_dw_by_yk, c96_h150_dw_by_yk, c128_h56_dw_by_yk, c144_h56_dw_by_yk, c256_h28_dw_by_yk, c256_h3_none, c512_h14_dw_by_k, c576_h19, cc_c32_h112_dw_by_y, c1024_h7_oc1024, c128_h3_oc128_s1pvalid, c128_h3_oc256_s1pvalid, c256_h10_oc256_s1pvalid, c256_h3_oc256_s1pvalid, c384_h10_oc384_s1pvalid, c512_h5_oc512_s1pvalid, c96_h20_oc96_s1pvalid, ... |
+| depthwise 5x5 (k5_g=in_c) | 4 | 4 | 4 | **100%** | c480_h10_oc480_s1pvalid, c576_h20_oc576_s1pvalid, c768_h20_oc768_s1pvalid, c960_h10_oc960_s1pvalid |
+| depthwise 7x7 (k7_g=in_c) | 2 | 2 | 2 | **100%** | c1024_h7_oc1024 (b1 + conv2d_cc_) |
+| pointwise 1x1 (k1_g1) | 36 | 36 | 36 | **100%** | c1024_h1_oc1001_pw_by_k, c128_h1_none, c256_h2_none, c256_h2_oc64, c256_h3_none, c512_h14_oc24, c576_h19, c832_h7_oc48, c576_h19_oc12 (new), c576_h19_oc273_s1pvalid (new), c1280_h10_oc24_s1pvalid (new), c1280_h10_oc546_s1pvalid (new), c1024_h7_oc1024 (new), ... |
+| spatial 3x3 (k3_g1) | 7 | 7 | 7 | **100%** | c40_h40_oc320, c128_h3_oc128_s1pvalid, c128_h3_oc256_s1pvalid, c16_h80_oc128_s1pvalid, c128_h5_oc256_s1pvalid, c192_h7_oc384_s1pvalid, c256_h10_oc512_s1pvalid, ... |
+| spatial 5x5 (k5_g1) | 1 | 1 | 1 | **100%** | c16_h80_oc128_s1pvalid |
+| **Total** | **80** | **80** | **80** | **100%** | 117 distinct slugs |
 
-**Bottom line: 53 of 80 fenced shapes (66%) have NO capture at all.** 27/80 (34%) have at least a GEM1 task-descriptor capture, of which 26 also have a GEM2 body capture. To promote any of the 53 uncaptured shapes, a fresh `KEEP_TASKS=1 PREFIX_MODE=linear DUMP_GEM=1/2` capture must be run.
+**Bottom line: 80/80 fenced shapes (100%) now have BOTH GEM1 and GEM2 captures as of 2026-06-03 12:51.** Capture harness: `conv_expt/capture_harness/capture_all_uncaptured.py`. Captures are stored at `/home/orangepi/npu/ops_rknn/dump/prefix_<slug>_keep1_gem{1,2}/dump_gem{1,2}.txt` (NOT /tmp). All 117 distinct capture slugs in dump are usable for materializer derivation. The capture gap that previously blocked 53/80 shapes is fully closed.
 
 ### 12.2 Detailed table — every fenced shape
 
@@ -610,12 +610,12 @@ python3 experimental/rknn/dump_rknpu_task_gems.py --scan-regcmd --min-regcmd-run
 
 | Status | Count | % | Action needed |
 |---|---:|---:|---|
-| GEM1 + GEM2 captured | 26 | 33% | Build materializer + guarded submit |
-| GEM1 task-only | 1 | 1% | Capture GEM2 body |
-| NO capture | 53 | 66% | Run `KEEP_TASKS=1 PREFIX_MODE=linear DUMP_GEM=1/2` first |
+| GEM1 + GEM2 captured | 80 | 100% | Build materializer + guarded submit |
+| GEM1 task-only | 0 | 0% | — (none) |
+| NO capture | 0 | 0% | — (none) |
 | **Total** | **80** | **100%** | |
 
-**To eliminate the 80 fenced shapes, we need 53 fresh captures first.** Each capture is a 30-60s `KEEP_TASKS=1 PREFIX_MODE=linear DUMP_GEM=1/2` invocation with a matched-weight `.rknn`. The 27 already-captured shapes can move to the materializer/submit step without re-capture.
+**All 80 fenced shapes now have full GEM1+2 captures (2026-06-03 12:51).** Next phase is materializer derivation + guarded submit for each shape.
 
 ### 12.4 Distinct capture slugs available in `/home/orangepi/npu/ops_rknn/dump/`
 

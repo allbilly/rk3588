@@ -125,7 +125,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--limit", type=int, default=0, help="only run the first N shapes (for smoke tests)")
-    parser.add_argument("--output-dir", type=Path, default=Path("/tmp/opencode"))
+    parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parent / "sweep_results")
     parser.add_argument("--shapes-file", type=Path, help="optional list of shape names to run")
     parser.add_argument("--skip-health", action="store_true", help="skip the pre/post simple_add.py health check")
     parser.add_argument("--stop-on-error", action="store_true")
