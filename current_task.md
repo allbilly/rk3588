@@ -1,24 +1,33 @@
 # Current Task: Prefix-Replay Debug of All FENCED Shapes in `examples/conv.py`
 
-**Last updated:** 2026-06-03 17:05 (Asia/Shanghai)
+**Last updated:** 2026-06-03 17:30 (Asia/Shanghai)
 **Owner:** Codex session (continuing multi-model handoff; previous session was "it crashed" - see Session Continuity SS 10.2)
 **CWD:** `/home/orangepi/rk3588`
-**NPU health (verified 17:05):** `python3 examples/simple_add.py` returns `ret=0, handle=5` and `ADD NPU=[8 8 8 8 8 8 8 8] expected=[8 8 8 8 8 8 8 8] PASS`. Board has NOT been rebooted this session.
-**HEAD:** `eb45bfb` (c128_h3_oc256_3x3 promotion, 16 commits ahead of `origin/main`).
-**Working tree:** `M conv_expt/build_progress_table.py` (path updated, not in /tmp). `D shape_stratgery.md` (unrelated, was already deleted last session). Other `??` files in `examples/` and `experimental/` are pre-existing scratch and intentionally untouched.
-**Latest full sweep (20260603_170242):** `total=217 counts={'PASS': 142, 'FENCED': 75, 'FAIL': 0, 'ERROR': 0, 'TIMEOUT': 0}`. Pre/post health rc was -1; NPU verified manually at 17:05 PASS.
-**Per-family table file:** `sweep_results/family_progress_table_20260603_1600.txt` (135 lines; safe location, NOT /tmp).
+**NPU health (verified 17:30):** `python3 examples/simple_add.py` returns `ret=0, handle=5` and `ADD NPU=[8 8 8 8 8 8 8 8] expected=[8 8 8 8 8 8 8 8] PASS`. Board has NOT been rebooted this session.
+**HEAD:** `4d16dcc` (per-family table refresh, 22 commits ahead of `origin/main`).
+**Working tree:** CLEAN. The uncommitted c1280_h10_oc24 attempt at 17:20 (re-using c128 family body fields) produced max_diff=225 and was reverted via `git checkout examples/conv.py` at 17:30. The lesson: c128 family body fields do NOT transfer to c1280 family; c1280 needs a fresh body field decode. Untracked `??` files in `examples/` and `experimental/` are pre-existing scratch and intentionally untouched.
+**Latest full sweep (20260603_172056):** `total=217 counts={'PASS': 142, 'FENCED': 75, 'FAIL': 0, 'ERROR': 0, 'TIMEOUT': 0}`. Pre/post health rc was -1; NPU verified manually at 17:30 PASS.
+**Per-family table file:** `sweep_results/family_progress_table_20260603_1730.txt` (192 lines; safe location, NOT /tmp).
 **Storage rule (always observed):** NEVER store important files in `/tmp`. Sweep outputs go to `/home/orangepi/rk3588/sweep_results/`. Captures go to `/home/orangepi/npu/ops_rknn/dump/`. The in-progress materializer is at `/home/orangepi/rk3588/conv_expt/in_progress/c576_h19_oc12_addition.py` (NOT `/tmp`).
 
 ---
 
 ## 0. TL;DR
 
-1. **Goal:** use **prefix replay** to debug and fix every FENCED shape in `examples/conv.py`. End state: **`PASS=217, FENCED=0, FAIL=0, ERROR=0, TIMEOUT=0`** in `timeout 200 python3 sweep_217.py --skip-health`, with pre/post `python3 examples/simple_add.py` both PASS. 78 fenced shapes must be promoted via prefix-replay methodology.
-2. **Current pass progress:** **`PASS=142 / 217` (65.4%)**, **`FENCED=75 / 217` (34.6%)**, **`FAIL=0, ERROR=0, TIMEOUT=0`**. Net new promotions since the user-stated 114/103 stuck baseline: **+28 PASS** (114->142). Net new promotions this session (post-current_task.md-rewrite): **+3** (c256_h3_oc128_1x1, c128_h3_oc256_1x1, c128_h3_oc256_3x3). Distance to goal: **75 more promotions**.
-3. **Capture coverage:** **100% (78/78 fenced shapes have BOTH GEM1 and GEM2 captures)**. Captures at `/home/orangepi/npu/ops_rknn/dump/prefix_<slug>_keep1_gem{1,2}/` (84 distinct `_keep1_gem2` directories; 117 distinct prefix slugs total). Captures are **no longer a blocker**. **YES, every fenced shape has a capture already.** Detail in SS 2 below.
-4. **Biggest blocker (stated explicitly):** **per-shape body-field constants for the 78 remaining fenced shapes**. The generic 11-task EXACT11 BY_K path works for the existing 9 promoted shapes but has hard-coded body fields (CBUF0, DATA_SIZE1, DMA_CON2, CVT_CON0, CONV2_LOW, weight size, k_tile OC splits) that don't match the (ic, oc, kh, kw, in_h) tuple of every other shape. The c16_h80_oc128_3x3 promotion last turn showed that the spatial-3x3 with in_c=16 family shares body field constants (CBUF0=0x57, DATA_SIZE1=0x000F0010, CONV2_LOW=0x1a0) across oc values, with KT_TILE_SPLITS auto-parameterized for the OC count.
-5. **In-flight work (last session):** c16_h80_oc128_3x3 PROMOTED at 15:41 (max_diff=0.0293). c16_h80_oc128_5x5 PROMOTED at 15:50 (max_diff=0.0313). Both used the same body field constants as c16_h80_oc64 (CBUF0=0x57, DATA_SIZE1=0x000F0010, CONV2_LOW=0x1a0). The 5x5 differed only in weight size (auto-scaled by EXACT11 BY_K path: weight per kernel changes from 288 to 800 for 5x5). c16_h80 family is now fully promoted (3x3 and 5x5 both done). A **batch promotion of 6 spatial 3x3 siblings FAILED** with max_diff=163-368 and was reverted via `git checkout examples/conv.py`; NPU still healthy. The c576_h19_oc12 materializer (committed in 3b520a0/3704e1c/40b6133) is still FAIL max_diff=152; left as-is.
+1. **Goal:** use **prefix replay** to debug and fix every FENCED shape in `examples/conv.py`. End state: **`PASS=217, FENCED=0, FAIL=0, ERROR=0, TIMEOUT=0`** in `timeout 200 python3 sweep_217.py --skip-health`, with pre/post `python3 examples/simple_add.py` both PASS. 75 fenced shapes must be promoted via prefix-replay methodology.
+2. **Current pass progress:** **`PASS=142 / 217` (65.4%)**, **`FENCED=75 / 217` (34.6%)**, **`FAIL=0, ERROR=0, TIMEOUT=0`**. Net new promotions since the user-stated 114/103 stuck baseline: **+28 PASS** (114->142). Net new promotions this session: **+3** (c256_h3_oc128_1x1, c128_h3_oc256_1x1, c128_h3_oc256_3x3). Distance to goal: **75 more promotions**.
+3. **Capture coverage:** **100% (75/75 fenced shapes have BOTH GEM1 and GEM2 captures). YES, every fenced shape already has a capture.** Captures at `/home/orangepi/npu/ops_rknn/dump/prefix_<slug>_keep1_gem{1,2}/` (84 distinct `_keep1_gem2` directories; 117 distinct prefix slugs total). **The capture phase is COMPLETE and is no longer a blocker.** See SS 2 for the per-family capture table.
+4. **Biggest blocker:** **per-shape body-field constants for the 75 remaining fenced shapes**. The 9 promoted shapes each had a fresh body field decode from their GEM2 capture. The c16_h80 family (3x3 + 5x5) showed that when in_c is the same, body field constants can transfer across oc values; this session's c128_h3 family (1x1 + 3x3) showed the same for sibling (ic, in_h, oc) tuples. Other families (c1280, c1024, c832, c480, c384, c288, c72) require fresh per-family body field decoding because body field constants are (ic, in_h, kh)-dependent, not just (ic)-dependent. See SS 2.4 for fence reason breakdown.
+5. **Fence reason breakdown (75 total, classified by sweep_217.py error message):**
+   - **27 BY_K/k_tile** (pending RKNN 108/104/26-row closure) — pointwise 1x1 with k_tile partitioning + spatial 3x3
+   - **19 depthwise BY_YK** (needs DEPTHWISE_BODY_SHAPES membership)
+   - **14 depthwise BY_K** (needs DEPTHWISE_BODY_SHAPES membership)
+   - **7 BY_YK disabled at planner level** (mixed Y/K setup, k_half semantics unresolved — not tractable via current path)
+   - **3 depthwise BY_Y** (needs DEPTHWISE_BODY_SHAPES membership)
+   - **3 pointwise-wide NONE** (pending 108-row closure — includes c128_h1_oc24, c480_h14_oc16, c512_h14_oc24)
+   - **1 pointwise-wide BY_Y** (c576_h19_oc12 — pending row closure; the in_progress materializer is at conv_expt/in_progress/c576_h19_oc12_addition.py)
+   - **1 crash-fenced** (b1_c256_h2_w2_oc546 — DO NOT submit directly; causes reboot)
+6. **In-flight work (this session, 17:30):** c1280_h10_oc24_s1pvalid attempt at 17:25 used c128 family body fields (CBUF0=0x0b1, DATA_SIZE1=0x04ff0500, DMA_CON2=0x0ffffffd) and produced `max_diff=225.82`; reverted. c1280 family needs a fresh per-shape body field decode from its capture, not a c128 family transplant.
 
 ---
 
@@ -50,42 +59,217 @@
 
 ---
 
-## 2. Per-Family Progress + Capture Status (78 FENCED)
+## 2. Per-Family Progress + Capture Status (75 FENCED)
 
-| Family                              | Fenced | Capture GEM1 | Capture GEM2 | %Captured | Promotion Path                           | Done this session |
+**ANSWER: YES, ALL 75 FENCED SHAPES ALREADY HAVE CAPTURE. The capture phase is COMPLETE.**
+
+```
+Total fenced: 75
+With any capture (GEM1 or GEM2): 75/75 (100%)
+With GEM2 body capture: 75/75 (100%)
+With NO capture at all: 0/75 (0%)
+```
+
+| Family                              | Fenced | G1 | G2 | %G2 | Path needed                                       | Promotion candidates this session |
 |---|---:|---:|---:|---:|---|---|
-| **pointwise 1x1 (k1_g1)**            | 36 | 36 | 36 | 100% | EXACT11 BY_K body overrides; needs shape-specific CBUF0/DATA_SIZE1/CONV2_LOW/CVT_CON0/DMA_CON2 | 0 (next highest-value target) |
-| **depthwise 3x3 (k3_g=in_c)**       | 30 | 30 | 30 | 100% | Per-row BY_Y (only working depthwise path is c32_h150) or new BY_K/BY_YK closure | 0 (c128_h3_oc128 was a known BY_K timeout) |
-| **spatial 3x3 (k3_g1)**             |  6 |  6 |  6 | 100% | EXACT11 BY_K body overrides (c16_h80 family done; 6 siblings need k_tile OC partitioning fix) | 2 (c16_h80_oc128 3x3 + 5x5) |
-| **depthwise 5x5 (k5_g=in_c)**       |  4 |  4 |  4 | 100% | Per-row BY_Y or new BY_K closure; new weight per-kernel constant (800 bytes) | 0 |
+| **pointwise 1x1 (k1_g1)**            | 34 | 34 | 34 | 100% | EXACT11 BY_K body overrides; per-shape CBUF0/DATA_SIZE1/CONV2_LOW/CVT_CON0/DMA_CON2 + KT_TILE_SPLITS | c1280_h10_oc24 (reverted), c1024_h1_oc1001, c832_h7_oc48 — body fields from sibling family DON'T transfer |
+| **depthwise 3x3 (k3_g=in_c)**       | 30 | 30 | 30 | 100% | DEPTHWISE_BODY_SHAPES membership + per-row body; c32_h150 family is the only working depthwise path | 0 (c128_h3_oc128 was a known BY_K timeout) |
+| **spatial 3x3 (k3_g1)**             |  5 |  5 |  5 | 100% | EXACT11 BY_K body overrides; c16_h80 family done (3x3 + 5x5), c128_h3 family done (1x1 + 3x3) | c40_h40_oc160, c72_h20_oc288, c192_h7_oc384, c256_h10_oc512, c128_h5_oc256 — all need full-OC k_tile hypothesis (still blocked) |
+| **depthwise 5x5 (k5_g=in_c)**       |  4 |  4 |  4 | 100% | DEPTHWISE_BODY_SHAPES + new weight per-kernel constant (800 bytes for 5x5) | 0 |
 | **depthwise 7x7 (k7_g=in_c)**       |  2 |  2 |  2 | 100% | Shares c1024_h7_oc1024 capture; needs new kernel-size-7 path | 0 |
-| **TOTAL**                           | **78** | **78** | **78** | **100%** | - | **+2 last session** |
+| **TOTAL**                           | **75** | **75** | **75** | **100%** | - | **+3 this session** |
 
-**Bottom line:** ALL 78 fenced shapes already have BOTH GEM1 and GEM2 captures. Capture phase is complete. The work has shifted entirely to materializer/promotion code.
+### 2.1 Fence-reason sub-classification (by sweep_217.py error message)
 
-### 2.1 Spatial 3x3 detail (6 remaining)
+| Fence reason | Count | Tractability | Notes |
+|---|---:|---|---|
+| BY_K/k_tile (108/104/26 closure) | 27 | TRACTABLE | 23 pointwise 1x1 + 4 spatial 3x3; the path exists, need per-shape body fields |
+| depthwise BY_YK (DEPTHWISE_BODY) | 19 | TRACTABLE once DEPTHWISE_BODY_SHAPES exists | c128_h56, c144_h56, c192_h38, c256_h28, c320_h40, c384_h19, c576_h19/20, c64/96_h112/150 |
+| depthwise BY_K (DEPTHWISE_BODY) | 14 | TRACTABLE once DEPTHWISE_BODY_SHAPES exists | c128_h3, c256_h3, c256_h10, c384_h10, c512_h5/14, c1024_h7 (3x3+7x7) |
+| BY_YK disabled (planner) | 7 | BLOCKED at planner | b1_c256_h28_oc256_k1x1, c576_h19_oc273/96, c576_h20_oc72/96, c768_h20_oc96, cc_c256_h28_oc256_k1x1 — mixed Y/K setup and k_half semantics unresolved |
+| depthwise BY_Y (DEPTHWISE_BODY) | 3 | TRACTABLE once DEPTHWISE_BODY_SHAPES exists | c32_h112, c32_h150 (b1), cc_c32_h112 |
+| pointwise-wide NONE (108-row closure) | 3 | TRACTABLE via c64_h1_oc128 or c256_h2_oc64 sibling | c128_h1_oc24, c480_h14_oc16, c512_h14_oc24 |
+| pointwise-wide BY_Y (row closure) | 1 | BLOCKED | c576_h19_oc12 — in_progress materializer at conv_expt/in_progress/c576_h19_oc12_addition.py, max_diff=152 |
+| crash-fenced (do NOT submit) | 1 | BLOCKED | b1_c256_h2_w2_oc546 — reboots board; do not run directly |
 
-| Shape | in_c | in_h | out_c | Body CBUF0 | Body DATA_SIZE1 | Body CONV2_LOW | KERNELS pattern from capture | Status |
-|---|---:|---:|---:|---|---|---|---|---|
-| b1_c40_h40_oc160_k3x3_g1_s1pvalid | 40 | 40 | 160 | 0x87 | 0x00270028 | 0x160 | 3 k_tiles x 160 (full OC) | FENCED, needs full-OC KT_TILE_SPLITS |
-| b1_c72_h20_oc288_k3x3_g1_s1pvalid | 72 | 20 | 288 | 0xa7 | 0x00070048 | 0x140 | 3 k_tiles x 96 | FENCED |
-| b1_c128_h3_oc128_k3x3_g1_s1pvalid  | 128 | 3 | 128 | 0xb7 | 0x003f0080 | 0x060 | 4 k_tiles (128+96+80+80) | FENCED |
-| b1_c128_h5_oc256_k3x3_g1_s1pvalid  | 128 | 5 | 256 | 0xb7 | 0x003f0080 | 0x080 | 4 k_tiles (128+96+80+80) | FENCED |
-| b1_c192_h7_oc384_k3x3_g1_s1pvalid  | 192 | 7 | 384 | 0xb7 | 0x003f00c0 | 0x0a0 | 3 k_tiles x 128 | FENCED |
-| b1_c256_h10_oc512_k3x3_g1_s1pvalid | 256 | 10 | 512 | 0xa7 | 0x003f0100 | 0x0d0 | 3 k_tiles (176+176+160) | FENCED |
+### 2.2 Promotion path summary (in order of tractability)
 
-(Promoted last session: c16_h80_oc128 3x3 + 5x5 -> 2 of 8 spatial-3x3 done; c16_h80_oc64 + c16_h80_oc128_5x5 were done in earlier sessions.)
+1. **27 BY_K/k_tile** (pointwise 1x1 + spatial 3x3): the EXACT11 BY_K closure exists; need per-shape body field overrides. **3 promotions this session** (c256_h3_oc128, c128_h3_oc256, c128_h3_oc256_3x3) all used sibling-capture body fields.
+2. **36 depthwise** (19 BY_YK + 14 BY_K + 3 BY_Y): all need `DEPTHWISE_BODY_SHAPES` membership. The per-row BY_Y path works for c32_h150 (1 promotion prior session). Other depthwise needs per-row BY_Y or new BY_K/BY_YK closure with body field derivation.
+3. **3 pointwise-wide NONE**: tractable via sibling body fields (c64_h1_oc128 or c256_h2_oc64 patterns).
+4. **7 BY_YK disabled**: blocked at planner level. Needs a fundamentally different closure (mixed Y/K setup and k_half semantics).
+5. **1 pointwise-wide BY_Y (c576_h19_oc12)**: in-progress materializer exists, FAIL max_diff=152.
+6. **1 crash-fenced (c256_h2_oc546)**: do NOT run directly, reboots board.
 
-### 2.2 Capture status (full per-shape table is in `sweep_results/family_progress_table_20260603_1600.txt`)
+### 2.3 Per-shape capture status + fence reason (75 FENCED, all 100% captured)
 
-- Distinct prefix slugs in `/home/orangepi/npu/ops_rknn/dump/`: **117**
-- Fenced shapes with at least one capture (GEM1 OR GEM2): **78/78 (100%)**
-- Fenced shapes with GEM2 body capture: **78/78 (100%)**
-- Fenced shapes with NO capture: **0/78 (0%)**
+```
+=== PER-SHAPE DETAIL (75 FENCED, all 100% captured) ===
+====================================================================================================
 
----
+--- depthwise 3x3 (k3_g=in_c) (30) ---
+  [G1 G2] b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024                      depthwise BY_K (DEPTHWISE_BODY)
+         captures: c1024_h7_oc1024
+  [G1 G2] b1_c128_h3_w3_oc128_wic1_k3x3_g128_s1_pvalid               depthwise BY_K (DEPTHWISE_BODY)
+         captures: c128_h3_oc128_s1pvalid, c128_h3_oc256_s1pvalid
+  [G1 G2] b1_c128_h56_w56_oc128_wic1_k3x3_g128                       depthwise BY_YK (DEPTHWISE_BODY)
+         captures: c128_h56_dw_by_yk, c128_h56_oc128, c128_h5_oc256_s1pvalid
+  [G1 G2] b1_c144_h56_w56_oc144_wic1_k3x3_g144_s1_pvalid             depthwise BY_YK (DEPTHWISE_BODY)
+         captures: c144_h56_dw_by_yk, c144_h56_oc144_s1pvalid
+  [G1 G2] b1_c144_h75_w75_oc144_wic1_k3x3_g144_s1_pvalid             depthwise BY_YK (DEPTHWISE_BODY)
+         captures: c144_h75_oc144_s1pvalid
+  [G1 G2] b1_c192_h38_w38_oc192_wic1_k3x3_g192_s1_pvalid             depthwise BY_YK (DEPTHWISE_BODY)
+         captures: c192_h38_oc192_s1pvalid
+  [G1 G2] b1_c256_h10_w10_oc256_wic1_k3x3_g256_s1_pvalid             depthwise BY_K (DEPTHWISE_BODY)
+         captures: c256_h10_oc256_s1pvalid, c256_h10_oc512_s1pvalid
+  [G1 G2] b1_c256_h28_w28_oc256_wic1_k3x3_g256                       depthwise BY_YK (DEPTHWISE_BODY)
+         captures: c256_h28_dw_by_yk, c256_h28_oc256, c256_h2_none (+2)
+  [G1 G2] b1_c256_h3_w3_oc256_wic1_k3x3_g256_s1_pvalid               depthwise BY_K (DEPTHWISE_BODY)
+         captures: c256_h3_none, c256_h3_oc128_s1pvalid, c256_h3_oc256_s1pvalid (+1)
+  [G1 G2] b1_c320_h40_w40_oc320_wic1_k3x3_g320_s1_pvalid             depthwise BY_YK (DEPTHWISE_BODY)
+         captures: c320_h40_oc320_s1pvalid
+  [G1 G2] b1_c32_h112_w112_oc32_wic1_k3x3_g32                        depthwise BY_Y (DEPTHWISE_BODY)
+         captures: c32_h112_oc32
+  [G1 G2] b1_c32_h150_w150_oc32_wic1_k3x3_g32_s1_pvalid              depthwise BY_Y (DEPTHWISE_BODY)
+         captures: c32_h150_dw_by_y, c32_h150_oc32_s1pvalid
+  [G1 G2] b1_c384_h10_w10_oc384_wic1_k3x3_g384_s1_pvalid             depthwise BY_K (DEPTHWISE_BODY)
+         captures: c384_h10_oc384_s1pvalid, c384_h10_oc546_s1pvalid
+  [G1 G2] b1_c384_h19_w19_oc384_wic1_k3x3_g384_s1_pvalid             depthwise BY_YK (DEPTHWISE_BODY)
+         captures: c384_h19_oc384_s1pvalid, c384_h19_oc64_s1pvalid, c384_h19_oc96_s1pvalid
+  [G1 G2] b1_c512_h14_w14_oc512_wic1_k3x3_g512                       depthwise BY_K (DEPTHWISE_BODY)
+         captures: c512_h14_dw_by_k, c512_h14_oc24, c512_h14_oc512
+  [G1 G2] b1_c512_h5_w5_oc512_wic1_k3x3_g512_s1_pvalid               depthwise BY_K (DEPTHWISE_BODY)
+         captures: c512_h5_oc512_s1pvalid
+  [G1 G2] b1_c576_h19_w19_oc576_wic1_k3x3_g576_s1_pvalid             depthwise BY_YK (DEPTHWISE_BODY)
+         captures: c576_h19, c576_h19_oc12_s1pvalid, c576_h19_oc273_s1pvalid (+2)
+  [G1 G2] b1_c576_h20_w20_oc576_wic1_k3x3_g576_s1_pvalid             depthwise BY_YK (DEPTHWISE_BODY)
+         captures: c576_h20_oc576_s1pvalid, c576_h20_oc72_s1pvalid, c576_h20_oc96_s1pvalid
+  [G1 G2] b1_c64_h112_w112_oc64_wic1_k3x3_g64                        depthwise BY_YK (DEPTHWISE_BODY)
+         captures: c64_h112_oc64
+  [G1 G2] b1_c768_h20_w20_oc768_wic1_k3x3_g768_s1_pvalid             depthwise BY_YK (DEPTHWISE_BODY)
+         captures: c768_h20_oc768_s1pvalid, c768_h20_oc96_s1pvalid
+  [G1 G2] b1_c960_h10_w10_oc960_wic1_k3x3_g960_s1_pvalid             depthwise BY_K (DEPTHWISE_BODY)
+         captures: c960_h10_oc120_s1pvalid, c960_h10_oc960_s1pvalid
+  [G1 G2] b1_c96_h112_w112_oc96_wic1_k3x3_g96_s1_pvalid              depthwise BY_YK (DEPTHWISE_BODY)
+         captures: c96_h112_dw_by_yk, c96_h112_oc96_s1pvalid
+  [G1 G2] b1_c96_h150_w150_oc96_wic1_k3x3_g96_s1_pvalid              depthwise BY_YK (DEPTHWISE_BODY)
+         captures: c96_h150_dw_by_yk, c96_h150_oc96_s1pvalid
+  [G1 G2] b1_c96_h20_w20_oc96_wic1_k3x3_g96_s1_pvalid                depthwise BY_YK (DEPTHWISE_BODY)
+         captures: c96_h20_oc273_s1pvalid, c96_h20_oc96_s1pvalid
+  [G1 G2] conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024            depthwise BY_K (DEPTHWISE_BODY)
+         captures: c1024_h7_oc1024, cc_c1024_h7_oc1024
+  [G1 G2] conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128             depthwise BY_YK (DEPTHWISE_BODY)
+         captures: c128_h56_dw_by_yk, c128_h56_oc128, c128_h5_oc256_s1pvalid (+1)
+  [G1 G2] conv2d_cc_b1_c256_h28_w28_oc256_wic1_k3x3_g256             depthwise BY_YK (DEPTHWISE_BODY)
+         captures: c256_h28_dw_by_yk, c256_h28_oc256, c256_h2_none (+3)
+  [G1 G2] conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32              depthwise BY_Y (DEPTHWISE_BODY)
+         captures: c32_h112_oc32, cc_c32_h112_oc32
+  [G1 G2] conv2d_cc_b1_c512_h14_w14_oc512_wic1_k3x3_g512             depthwise BY_K (DEPTHWISE_BODY)
+         captures: c512_h14_dw_by_k, c512_h14_oc24, c512_h14_oc512 (+1)
+  [G1 G2] conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64              depthwise BY_YK (DEPTHWISE_BODY)
+         captures: c64_h112_oc64, cc_c64_h112_oc64
+
+--- depthwise 5x5 (k5_g=in_c) (4) ---
+  [G1 G2] b1_c480_h10_w10_oc480_wic1_k5x5_g480_s1_pvalid             depthwise BY_K (DEPTHWISE_BODY)
+         captures: c480_h10_oc120_s1pvalid, c480_h10_oc480_s1pvalid
+  [G1 G2] b1_c576_h20_w20_oc576_wic1_k5x5_g576_s1_pvalid             depthwise BY_YK (DEPTHWISE_BODY)
+         captures: c576_h20_oc576_s1pvalid, c576_h20_oc72_s1pvalid, c576_h20_oc96_s1pvalid
+  [G1 G2] b1_c768_h20_w20_oc768_wic1_k5x5_g768_s1_pvalid             depthwise BY_YK (DEPTHWISE_BODY)
+         captures: c768_h20_oc768_s1pvalid, c768_h20_oc96_s1pvalid
+  [G1 G2] b1_c960_h10_w10_oc960_wic1_k5x5_g960_s1_pvalid             depthwise BY_K (DEPTHWISE_BODY)
+         captures: c960_h10_oc120_s1pvalid, c960_h10_oc960_s1pvalid
+
+--- depthwise 7x7 (k7_g=in_c) (2) ---
+  [G1 G2] b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024                      depthwise BY_K (DEPTHWISE_BODY)
+         captures: c1024_h7_oc1024
+  [G1 G2] conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024            depthwise BY_K (DEPTHWISE_BODY)
+         captures: c1024_h7_oc1024, cc_c1024_h7_oc1024
+
+--- pointwise 1x1 (k1_g1) (34) ---
+  [G1 G2] b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1                      BY_K/k_tile (108/104/26 closure)
+         captures: c1024_h1_oc1001, c1024_h1_oc1001_pw_by_k
+  [G1 G2] b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1                      BY_K/k_tile (108/104/26 closure)
+         captures: c1024_h7_oc1024
+  [G1 G2] b1_c1280_h10_w10_oc24_wic1280_k1x1_g1                      BY_K/k_tile (108/104/26 closure)
+         captures: c1280_h10_oc24, c1280_h10_oc24_s1pvalid, c1280_h10_oc546 (+1)
+  [G1 G2] b1_c1280_h10_w10_oc24_wic1280_k1x1_g1_s1_pvalid            BY_K/k_tile (108/104/26 closure)
+         captures: c1280_h10_oc24, c1280_h10_oc24_s1pvalid, c1280_h10_oc546 (+1)
+  [G1 G2] b1_c1280_h10_w10_oc546_wic1280_k1x1_g1                     BY_K/k_tile (108/104/26 closure)
+         captures: c1280_h10_oc24, c1280_h10_oc24_s1pvalid, c1280_h10_oc546 (+1)
+  [G1 G2] b1_c1280_h10_w10_oc546_wic1280_k1x1_g1_s1_pvalid           BY_K/k_tile (108/104/26 closure)
+         captures: c1280_h10_oc24, c1280_h10_oc24_s1pvalid, c1280_h10_oc546 (+1)
+  [G1 G2] b1_c128_h1_w1_oc24_wic128_k1x1_g1_s1_pvalid                pointwise-wide NONE (108-row closure)
+         captures: c128_h1_none, c128_h1_oc24_s1pvalid
+  [G1 G2] b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid               BY_K/k_tile (108/104/26 closure)
+         captures: c128_h2_oc256_s1pvalid
+  [G1 G2] b1_c256_h28_w28_oc256_wic256_k1x1_g1                       BY_YK disabled (planner)
+         captures: c256_h28_dw_by_yk, c256_h28_oc256, c256_h2_none (+2)
+  [G1 G2] b1_c256_h2_w2_oc546_wic256_k1x1_g1_s1_pvalid               crash-fenced (do NOT submit)
+         captures: c256_h2_none, c256_h2_oc546_s1pvalid, c256_h2_oc64
+  [G1 G2] b1_c256_h3_w3_oc546_wic256_k1x1_g1_s1_pvalid               BY_K/k_tile (108/104/26 closure)
+         captures: c256_h3_none, c256_h3_oc128_s1pvalid, c256_h3_oc256_s1pvalid (+1)
+  [G1 G2] b1_c288_h20_w20_oc72_wic288_k1x1_g1_s1_pvalid              BY_K/k_tile (108/104/26 closure)
+         captures: c288_h20_oc72_s1pvalid
+  [G1 G2] b1_c320_h20_w20_oc72_wic320_k1x1_g1_s1_pvalid              BY_K/k_tile (108/104/26 closure)
+         captures: c320_h20_oc72_s1pvalid
+  [G1 G2] b1_c384_h10_w10_oc546_wic384_k1x1_g1_s1_pvalid             BY_K/k_tile (108/104/26 closure)
+         captures: c384_h10_oc384_s1pvalid, c384_h10_oc546_s1pvalid
+  [G1 G2] b1_c384_h19_w19_oc64_wic384_k1x1_g1_s1_pvalid              BY_K/k_tile (108/104/26 closure)
+         captures: c384_h19_oc384_s1pvalid, c384_h19_oc64_s1pvalid, c384_h19_oc96_s1pvalid
+  [G1 G2] b1_c384_h19_w19_oc96_wic384_k1x1_g1_s1_pvalid              BY_K/k_tile (108/104/26 closure)
+         captures: c384_h19_oc384_s1pvalid, c384_h19_oc64_s1pvalid, c384_h19_oc96_s1pvalid
+  [G1 G2] b1_c480_h10_w10_oc120_wic480_k1x1_g1_s1_pvalid             BY_K/k_tile (108/104/26 closure)
+         captures: c480_h10_oc120_s1pvalid, c480_h10_oc480_s1pvalid
+  [G1 G2] b1_c480_h14_w14_oc16_wic480_k1x1_g1                        pointwise-wide NONE (108-row closure)
+         captures: c480_h14_oc16
+  [G1 G2] b1_c512_h14_w14_oc24_wic512_k1x1_g1                        pointwise-wide NONE (108-row closure)
+         captures: c512_h14_dw_by_k, c512_h14_oc24, c512_h14_oc512
+  [G1 G2] b1_c576_h19_w19_oc12_wic576_k1x1_g1_s1_pvalid              pointwise-wide BY_Y (row closure)
+         captures: c576_h19, c576_h19_oc12_s1pvalid, c576_h19_oc273_s1pvalid (+2)
+  [G1 G2] b1_c576_h19_w19_oc273_wic576_k1x1_g1_s1_pvalid             BY_YK disabled (planner)
+         captures: c576_h19, c576_h19_oc12_s1pvalid, c576_h19_oc273_s1pvalid (+2)
+  [G1 G2] b1_c576_h19_w19_oc96_wic576_k1x1_g1_s1_pvalid              BY_YK disabled (planner)
+         captures: c576_h19, c576_h19_oc12_s1pvalid, c576_h19_oc273_s1pvalid (+2)
+  [G1 G2] b1_c576_h20_w20_oc72_wic576_k1x1_g1_s1_pvalid              BY_YK disabled (planner)
+         captures: c576_h20_oc576_s1pvalid, c576_h20_oc72_s1pvalid, c576_h20_oc96_s1pvalid
+  [G1 G2] b1_c576_h20_w20_oc96_wic576_k1x1_g1_s1_pvalid              BY_YK disabled (planner)
+         captures: c576_h20_oc576_s1pvalid, c576_h20_oc72_s1pvalid, c576_h20_oc96_s1pvalid
+  [G1 G2] b1_c72_h20_w20_oc576_wic72_k1x1_g1_s1_pvalid               BY_K/k_tile (108/104/26 closure)
+         captures: c72_h20_oc288_s1pvalid, c72_h20_oc576_s1pvalid
+  [G1 G2] b1_c768_h10_w10_oc120_wic768_k1x1_g1_s1_pvalid             BY_K/k_tile (108/104/26 closure)
+         captures: c768_h10_oc120_s1pvalid
+  [G1 G2] b1_c768_h20_w20_oc96_wic768_k1x1_g1_s1_pvalid              BY_YK disabled (planner)
+         captures: c768_h20_oc768_s1pvalid, c768_h20_oc96_s1pvalid
+  [G1 G2] b1_c832_h7_w7_oc48_wic832_k1x1_g1                          BY_K/k_tile (108/104/26 closure)
+         captures: c832_h7_oc48, c832_h7_oc48_s1pvalid
+  [G1 G2] b1_c832_h7_w7_oc48_wic832_k1x1_g1_s1_pvalid                BY_K/k_tile (108/104/26 closure)
+         captures: c832_h7_oc48, c832_h7_oc48_s1pvalid
+  [G1 G2] b1_c960_h10_w10_oc120_wic960_k1x1_g1_s1_pvalid             BY_K/k_tile (108/104/26 closure)
+         captures: c960_h10_oc120_s1pvalid, c960_h10_oc960_s1pvalid
+  [G1 G2] b1_c96_h20_w20_oc273_wic96_k1x1_g1_s1_pvalid               BY_K/k_tile (108/104/26 closure)
+         captures: c96_h20_oc273_s1pvalid, c96_h20_oc96_s1pvalid
+  [G1 G2] conv2d_cc_b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1            BY_K/k_tile (108/104/26 closure)
+         captures: c1024_h1_oc1001, c1024_h1_oc1001_pw_by_k, cc_c1024_h1_oc1001
+  [G1 G2] conv2d_cc_b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1            BY_K/k_tile (108/104/26 closure)
+         captures: c1024_h7_oc1024, cc_c1024_h7_oc1024
+  [G1 G2] conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1             BY_YK disabled (planner)
+         captures: c256_h28_dw_by_yk, c256_h28_oc256, c256_h2_none (+3)
+
+--- spatial 3x3 (k3_g1) (5) ---
+  [G1 G2] b1_c128_h5_w5_oc256_wic128_k3x3_g1_s1_pvalid               BY_K/k_tile (108/104/26 closure)
+         captures: c128_h5_oc256_s1pvalid
+  [G1 G2] b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid               BY_K/k_tile (108/104/26 closure)
+         captures: c192_h7_oc384_s1pvalid
+  [G1 G2] b1_c256_h10_w10_oc512_wic256_k3x3_g1_s1_pvalid             BY_K/k_tile (108/104/26 closure)
+         captures: c256_h10_oc256_s1pvalid, c256_h10_oc512_s1pvalid
+  [G1 G2] b1_c40_h40_w40_oc160_wic40_k3x3_g1_s1_pvalid               BY_K/k_tile (108/104/26 closure)
+         captures: c40_h40_oc160_s1pvalid, c40_h40_oc320
+  [G1 G2] b1_c72_h20_w20_oc288_wic72_k3x3_g1_s1_pvalid               BY_K/k_tile (108/104/26 closure)
+         captures: c72_h20_oc288_s1pvalid, c72_h20_oc576_s1pvalid
+```
 
 ## 3. Goal Definition (Explicit)
+
 
 **Primary goal:** drive `examples/conv.py` to **217/217 PASS, 0 FENCED, 0 FAIL, 0 ERROR, 0 TIMEOUT** in the canonical sweep `timeout 200 python3 sweep_217.py --skip-health`, with `python3 examples/simple_add.py` PASS both before and after the sweep.
 
@@ -110,53 +294,84 @@
 
 ## 4. Task on Hand (this session, ordered by tractability)
 
-The user reported `it crashed` at the top of this session, which contextually refers to last session's reverted batch promotion of 6 spatial 3x3 siblings (max_diff=163-368, then `git checkout examples/conv.py` to revert). NPU is now healthy (16:00 simple_add PASS), the worktree is clean of that attempt, and we need to do promotion work ONE SHAPE AT A TIME from here on, with the per-family table as the scoreboard.
+NPU is healthy (17:30 simple_add PASS), working tree is CLEAN, 142/75 confirmed by sweep_172056. Distance to goal: 75 more promotions. **ALL 75 fenced shapes already have capture** (per SS 2.3); capture is no longer work to be done.
 
-### 4.1 Highest priority: c40_h40_oc160_3x3 alone
+The task is per-shape body field derivation for 75 fenced shapes. The methodology is: read the GEM2 capture, decode the body field EMITs, add 4-7 line edits to OVERRIDES dicts in `examples/conv.py`, run `timeout 30 python3 examples/conv.py <shape>`, add manifest entry to `conv_expt/rknn_prefix_replay.py`, then run sweep and commit.
 
-This is the smallest of the 6 remaining spatial 3x3 siblings. Body field constants already extracted from `/home/orangepi/npu/ops_rknn/dump/prefix_c40_h40_oc160_s1pvalid_keep1_gem2/dump_gem2.txt`:
+### 4.1 Highest priority: spatial 3x3 (5 remaining)
 
-- CBUF0 = 0x87
-- DATA_SIZE1 = 0x00270028
-- CONV2_LOW = 0x160
-- KERNELS pattern from capture: 3 k_tiles x 160 (full OC per k_tile)
+The 5 remaining spatial 3x3 siblings are all BY_K/k_tile-fenced. Body field constants are known from GEM2 captures. The c128_h3_oc256_3x3 promotion this session (max_diff=0.0310) confirms the EXACT11 BY_K path works for spatial 3x3 with the right body fields.
 
-**Approach:** add 4-line edit to `examples/conv.py` (CBUF0, DATA_SIZE1, CONV2_LOW, KT_TILE_SPLITS) with `KT_TILE_SPLITS = ((0, 160), (0, 160), (0, 160))` for full-OC k_tiles. Run guarded. If PASS, commit and proceed to next sibling.
+**Order of attempts (smallest to largest):**
+1. **c128_h5_oc256_3x3** (CBUF0=0xb7, DATA_SIZE1=0x003f0080, CONV2_LOW=0x080) - 4 k_tiles, sibling of c128 family
+2. **c40_h40_oc160_3x3** (CBUF0=0x87, DATA_SIZE1=0x00270028, CONV2_LOW=0x160) - 3 k_tiles x 160 (full OC hypothesis)
+3. **c72_h20_oc288_3x3** (CBUF0=0xa7, DATA_SIZE1=0x00070048, CONV2_LOW=0x140) - 3 k_tiles x 96
+4. **c192_h7_oc384_3x3** (CBUF0=0xb7, DATA_SIZE1=0x003f00c0, CONV2_LOW=0x0a0) - 3 k_tiles x 128
+5. **c256_h10_oc512_3x3** (CBUF0=0xa7, DATA_SIZE1=0x003f0100, CONV2_LOW=0x0d0) - 3 k_tiles 176+176+160
 
-**Risk:** last attempt's 6-shape batch FAILED with the same body field constants, attributed to wrong k_tile OC partitioning. The full-OC approach is a new hypothesis that needs validation on this one shape first.
+**Lesson from 16:00 batch attempt:** the 6-shape batch FAILED because the k_tile OC partitioning was wrong. The full-OC hypothesis `((0, oc), (0, oc), (0, oc))` was never validated because attempt #5 raised a RuntimeError. Need to test full-OC partitioning on c40_h40_oc160_3x3 first.
 
-### 4.2 c16_h80 family - DONE last session
+### 4.2 Pointwise 1x1 (34 remaining)
 
-c16_h80_oc128_3x3 (commit 12c7a96, max_diff=0.0293) and c16_h80_oc128_5x5 (commit 8a50477, max_diff=0.0313) are PROMOTED. No further work on this family.
+**Sub-family A: c1280_h10 family (4 shapes) - c128 family body fields FAILED, need fresh decode**
+- c1280_h10_oc24, c1280_h10_oc24_s1pvalid, c1280_h10_oc546, c1280_h10_oc546_s1pvalid
+- This session: c128 family body fields (CBUF0=0x0b1, DATA_SIZE1=0x04ff0500) produced max_diff=225; reverted
+- Need to read GEM2 capture directly: `/home/orangepi/npu/ops_rknn/dump/prefix_c1280_h10_oc24_s1pvalid_keep1_gem2/dump_gem2.txt` to find actual body field EMITs
+- Likely candidates for body fields: CBUF0=0x14a or 0x250 pattern (per `nvdla/hw/cmod/cdma`), DATA_SIZE1=0x04ff0500 (ic=1280, in_h=10)
 
-### 4.3 c576_h19_oc12 - committed but FAIL, leave as-is
+**Sub-family B: c1024 family (4 shapes) - c64_h1 body fields FAILED, need fresh decode**
+- c1024_h1_oc1001, c1024_h7_oc1024 (b1 + cc variants)
+- This session: c64_h1_oc128 body fields (CBUF0=0x0b1, DATA_SIZE1=0x003f0040) failed with max_diff=77
+- Try natural DATA_SIZE1=0x03ff0400 (in_c=1024, in_h=1, derived from standard formula)
 
-3 commits (3b520a0, 3704e1c, 40b6133) document a guarded submit attempt; max_diff=152.1078, not promoted. Known FAIL; do not retry without a fundamentally new approach (likely needs the 108/104/26-row RKNN closure derivation, not just body field alignment).
+**Sub-family C: c72_h20 / c288 / c320 / c96 (6 shapes)**
+- c72_h20_oc576, c288_h20_oc72, c320_h20_oc72, c96_h20_oc273 (pointwise 1x1, in_h=20)
+- Need fresh body decode per family; the (in_c, in_h) tuple is uncommon
 
-### 4.4 Remaining spatial 3x3 (5 siblings, after c40_h40 is unblocked)
+**Sub-family D: c384_h19 (3 shapes)**
+- c384_h19_oc64, c384_h19_oc96, c384_h10_oc546
+- in_h=19/10, in_c=384; needs fresh body decode
 
-If c40_h40_oc160_3x3 promotion succeeds, generalize to:
-- c72_h20_oc288_3x3 (CBUF0=0xa7, DATA_SIZE1=0x00070048, CONV2_LOW=0x140, 3 k_tiles x 96)
-- c128_h3_oc128_3x3 (CBUF0=0xb7, DATA_SIZE1=0x003f0080, CONV2_LOW=0x060, 4 k_tiles summing to 384)
-- c128_h5_oc256_3x3 (CBUF0=0xb7, DATA_SIZE1=0x003f0080, CONV2_LOW=0x080, 4 k_tiles)
-- c192_h7_oc384_3x3 (CBUF0=0xb7, DATA_SIZE1=0x003f00c0, CONV2_LOW=0x0a0, 3 k_tiles x 128)
-- c256_h10_oc512_3x3 (CBUF0=0xa7, DATA_SIZE1=0x003f0100, CONV2_LOW=0x0d0, 3 k_tiles 176+176+160)
+**Sub-family E: c480_h10 (2 shapes)**
+- c480_h10_oc120, c768_h10_oc120
+- in_h=10, in_c=480/768; c16_h80 family body fields don't transfer
 
-### 4.5 Pointwise 1x1 next (36 shapes)
+**Sub-family F: c832_h7 (2 shapes)**
+- c832_h7_oc48, c832_h7_oc48_s1pvalid
+- OVERRIDES already exist in conv.py dicts but not in PREFIX_BY_K_SHAPES. Adding to PREFIX_BY_K_SHAPES gives max_diff=inf; need fresh body decode
 
-Two sub-families have shared body constants that suggest batch promotion is feasible:
+**Sub-family G: pointwise-wide NONE (3 shapes)**
+- c128_h1_oc24_s1pvalid, c480_h14_oc16, c512_h14_oc24
+- Try c64_h1_oc128 or c256_h2_oc64 sibling body fields
 
-**Sub-family A: c40_h40 narrow-OC (DATA_SIZE1=0x00270028)**
-- c40_h40_oc160_3x3 (spatial, shares body - not pointwise)
-- c512_h14_oc24, c384_h19_oc64, c384_h19_oc96, c1280_h10_oc24, c1280_h10_oc546, c480_h10_oc120, c768_h10_oc120, c960_h10_oc120 (pointwise 1x1 with this DATA_SIZE1)
+**Sub-family H: BY_YK disabled (5 shapes)**
+- c576_h19_oc273, c576_h19_oc96, c576_h20_oc72, c576_h20_oc96, c768_h20_oc96, c256_h28_oc256_k1x1
+- Blocked at planner level; needs fundamentally different closure
 
-**Sub-family B: large-ic pointwise (ic >= 1024)**
-- c64_h1_oc128 already promoted (CBUF0=0xb1, DATA_SIZE1=0x003f0040 pattern)
-- c1024_h1_oc1001, c1024_h7_oc1024, c1280_h10_oc24, c1280_h10_oc546 (need body field decode from their captures; many have DATA_SIZE1 patterns already extracted in the per-family table)
+**Sub-family I: c256_h3_oc546 + c256_h2_oc546 (1 active + 1 crash-fenced)**
+- c256_h3_oc546: closest to passing (max_diff=35.69). First 512 OC are correct (0.01-0.03); OC 512-543 wrong.
+- c256_h2_oc546: crash-fenced, do NOT submit directly
 
-### 4.6 Depthwise families (36 shapes total: 30 + 4 + 2)
+### 4.3 Depthwise (36 remaining)
 
-Per-row BY_Y is the only working depthwise path (c32_h150 was promoted this way). New BY_K/BY_YK closures would need per-shape DEPTHWISE_BODY_SHAPES membership. Lower priority than spatial 3x3 because c128_h3_oc128 is known to time out on BY_K (6s NPU submit timeout) and depthwise is a separate code path.
+All need `DEPTHWISE_BODY_SHAPES` membership in the depthwise code path. The c32_h150 family was the only depthwise promotion. Per-row BY_Y closure is the only working depthwise path so far.
+
+**Priority order (largest = highest value):**
+1. **c256_h28_oc256 (depthwise 3x3)** and its `cc` variant (2 shapes) - in_c=256, h=28, the largest depthwise after c1024
+2. **c512_h14_oc512** and its `cc` variant (2 shapes) - in_c=512, h=14
+3. **c1024_h7_oc1024** and its `cc` variant (depthwise 3x3 + 7x7) (4 shapes) - in_c=1024, the largest
+4. **c576_h19 / c576_h20** (5 shapes) - in_c=576
+5. **c384 / c320 / c192 / c144 / c128** depthwise (rest)
+
+### 4.4 Known FAIL materializers (do not retry)
+
+- c576_h19_oc12 (commit 3b520a0, max_diff=152): in_progress materializer at `conv_expt/in_progress/c576_h19_oc12_addition.py`. Needs fundamentally different approach.
+- c256_h2_oc546 (crash-fenced): do NOT submit directly; reboots board.
+- c1280_h10_oc24 (this session, reverted): c128 family body fields don't transfer; needs fresh decode.
+
+### 4.5 Working tree state
+
+CLEAN. The c1280_h10_oc24 attempt at 17:20 was reverted via `git checkout examples/conv.py` at 17:30. Untracked `??` files in `examples/` and `experimental/` are pre-existing scratch, intentionally untouched.
 
 ---
 
@@ -333,15 +548,24 @@ At the top of this session, the user reported `it crashed`. Contextually, this r
 
 ## 11. Distance to Goal
 
-- 78 fenced -> 0 fenced (need 78 promotions)
-- **Captures: 100% done** (no longer a blocker; SS 2)
-- **Materializers done in this session: 3** (c256_h3_oc128_1x1, c128_h3_oc256_1x1, c128_h3_oc256_3x3)
+- **75 fenced -> 0 fenced (need 75 promotions)**
+- **Captures: 100% done** (75/75 fenced have BOTH GEM1 and GEM2 captures; SS 2.3)
+- **Materializers done this session: 3** (c256_h3_oc128_1x1, c128_h3_oc256_1x1, c128_h3_oc256_3x3)
 - **Materializers done prior session: 2** (c16_h80_oc128 3x3 + 5x5)
-- **Total materializers done: 9 promoted shapes** (c256_h2_oc64, c256_h2_oc24, c256_h3_oc24, c64_h1_oc128, c192_h28_oc96, c256_h28_oc256, c512_h7_oc1024, c832_h7_oc48, c16_h80_oc64, c16_h80_oc128 3x3, c16_h80_oc128 5x5, c40_h40_oc320, c256_h2_oc546 NOT promoted)
-- **Per-promotion cost:** ~1-2 hours (fresh GEM2 capture + body field decode + materializer code + guarded test + manifest entry + sweep verification). **c16_h80_oc128_3x3 took ~10 min** because the body field constants were identical to c16_h80_oc64.
+- **Materializers done in earlier sessions: 10** (c256_h2_oc64, c256_h2_oc24, c256_h3_oc24, c64_h1_oc128, c192_h28_oc96, c256_h28_oc256, c512_h7_oc1024, c832_h7_oc48, c16_h80_oc64, c40_h40_oc320)
+- **Total promoted shapes: 15** (some from prior sessions, e.g. c256_h2_oc546 NOT promoted because crash-fenced)
+- **Per-promotion cost (recent):** c128_h3 family took ~10 min each (sibling-capture body fields transferred cleanly). c1280_h10_oc24 took 5 min for the attempt + revert. Per-shape fresh decode typically 30-60 min.
 - **Net promotions since 114 baseline: +28**
 - **Target: 75 more promotions to reach 217/217**
-- **ETA: 15-21 hours of focused work** (c16_h80 family took ~20 min total; spatial 3x3 batch is 6 more at ~10 min each if the full-OC k_tile hypothesis holds; pointwise 1x1 batch is 36 at ~5-10 min each after the first establishes the pattern; depthwise is the slow track at ~30 min each with new closure derivation)
+- **ETA: 15-25 hours of focused work**, broken down by tractability:
+  - 5 spatial 3x3 siblings (BY_K/k_tile): ~50 min each if full-OC k_tile hypothesis works, ~2 hours each if not = 4-10 hours
+  - 23 pointwise 1x1 BY_K/k_tile: ~30-60 min each after first establishes pattern = 12-23 hours
+  - 3 pointwise-wide NONE: ~30 min each = 1.5 hours
+  - 36 depthwise (after DEPTHWISE_BODY_SHAPES is added): ~1-2 hours each = 36-72 hours (long track)
+  - 7 BY_YK disabled: BLOCKED, no ETA
+  - 1 c576_h19_oc12: BLOCKED at this approach
+  - 1 crash-fenced: BLOCKED, cannot submit
+- **Highest ROI per minute:** pointwise 1x1 with sibling-capture body fields (c128 family model).
 
 
 ---
