@@ -1,0 +1,10 @@
+{
+  "slug": "fresh_c256_h3",
+  "dump_dir": "/home/orangepi/npu/ops_rknn/dump/prefix_fresh_c256_h3_keep1_gem2",
+  "task_count": 0,
+  "amounts": [],
+  "masks": [],
+  "regcmd_addrs": [],
+  "body_row_count": 0,
+  "body_rows": {}
+}

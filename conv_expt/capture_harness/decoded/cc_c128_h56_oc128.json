@@ -1,0 +1,10 @@
+{
+  "slug": "cc_c128_h56_oc128",
+  "dump_dir": "/home/orangepi/npu/ops_rknn/dump/prefix_cc_c128_h56_oc128_keep1_gem2",
+  "task_count": 0,
+  "amounts": [],
+  "masks": [],
+  "regcmd_addrs": [],
+  "body_row_count": 0,
+  "body_rows": {}
+}

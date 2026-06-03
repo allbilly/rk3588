@@ -1,0 +1,10 @@
+{
+  "slug": "c32_h150_dw_by_y",
+  "dump_dir": "/home/orangepi/npu/ops_rknn/dump/prefix_c32_h150_dw_by_y_keep1_gem2",
+  "task_count": 0,
+  "amounts": [],
+  "masks": [],
+  "regcmd_addrs": [],
+  "body_row_count": 0,
+  "body_rows": {}
+}

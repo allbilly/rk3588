@@ -1,0 +1,10 @@
+{
+  "slug": "c1024_h1_oc1001_pw_by_k",
+  "dump_dir": "/home/orangepi/npu/ops_rknn/dump/prefix_c1024_h1_oc1001_pw_by_k_keep1_gem2",
+  "task_count": 0,
+  "amounts": [],
+  "masks": [],
+  "regcmd_addrs": [],
+  "body_row_count": 0,
+  "body_rows": {}
+}

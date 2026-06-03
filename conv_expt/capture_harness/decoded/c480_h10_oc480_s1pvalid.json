@@ -1,0 +1,10 @@
+{
+  "slug": "c480_h10_oc480_s1pvalid",
+  "dump_dir": "/home/orangepi/npu/ops_rknn/dump/prefix_c480_h10_oc480_s1pvalid_keep1_gem2",
+  "task_count": 0,
+  "amounts": [],
+  "masks": [],
+  "regcmd_addrs": [],
+  "body_row_count": 0,
+  "body_rows": {}
+}

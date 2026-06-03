@@ -29,9 +29,7 @@ RK_MAX_CONV_FLAT_STRIDE = 992
 UNPACK_C2 = FP16_ATOM_ELEMENTS // FP16_BYTES
 PC_CHAIN_TAIL_QWORDS = 4
 EXACT11_BYK_SHAPE = "b1_c160_h14_w14_oc320_wic160_k3x3_g1_s1_pvalid"
-C128_H2_OC256_EXACT11_SHAPE = "b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid"
 C256_H2_OC64_EXACT11_SHAPE = "b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid"
-C480_H14_OC16_EXACT11_SHAPE = "b1_c480_h14_w14_oc16_wic480_k1x1_g1"
 H40_SPATIAL_BY_Y_SHAPE = "b1_c160_h40_w40_oc320_wic160_k3x3_g1_s1_pvalid"
 EXACT11_BYK_AMOUNTS = (108, 104, 26, 104, 26, 104, 26, 104, 26, 104, 26)
 EXACT11_BYK_MASKS = (0x0d, 0x0d, 0x60, 0x0d, 0x60, 0x0d, 0x60, 0x0d, 0x60, 0x0d, 0x60)
@@ -62,20 +60,11 @@ PREFIX_BY_K_SHAPES = {
     EXACT11_BYK_SHAPE,
     "b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid",
     "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid",
-    "b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid",
-    "b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid",
-    "b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid",
-    "b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid",
-    "b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid",
     "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid",
     "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid",
     "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1",
     "b1_c512_h7_w7_oc1024_wic512_k1x1_g1",
     C256_H2_OC64_EXACT11_SHAPE,
-    C480_H14_OC16_EXACT11_SHAPE,
-    "b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid",
-    "b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid",
-    "b1_c256_h10_w10_oc512_wic256_k3x3_g1_s1_pvalid",
 }
 POINTWISE_EXACT11_BYK_SHAPES = {
     "conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1",
@@ -272,7 +261,6 @@ KNOWN_BAD_SPATIAL_SETUP_SHAPES = {
     # c16_h80_oc128 (5x5) still fenced (different kernel)
     "b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid",
     "b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid",
-    "b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid",
 }
 DEPTHWISE_BODY_SHAPES = set()  # emptied: single-task rewrite needs more capture work; leave shapes fenced for now
 DEPTHWISE_SETUP108_SHAPES = set()
@@ -296,58 +284,34 @@ CBUF0_OVERRIDES = {
     "b1_c160_h14_w14_oc320_wic160_k3x3_g1_s1_pvalid": 0x0a2,
     "b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid": 0x0a2,
     "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid": 0x057,
-    "b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid": 0x057,
-    "b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid": 0x057,
     # 1x1 pointwise family: cbuf0=0xb1 (per live rknn_runtime c64_h1_oc128 capture)
     "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid": 0x0b1,
     "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid": 0x02a,
     "b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid": 0x0b1,
     "b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid": 0x0b1,
-    "b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid": 0x0b1,
-    "b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid": 0x0b1,
-    "b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid": 0x0b1,
-    "b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid": 0x0b1,
     "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid": 0x084,
-    "b1_c256_h10_w10_oc512_wic256_k3x3_g1_s1_pvalid": 0xa2,
-    "b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid": 0xb1,
     "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x0a2,
     "b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x0a2,
     "b1_c832_h7_w7_oc48_wic832_k1x1_g1": 0x093,
-    # c480_h14_oc16: weight_bank=6, data_bank=6 (per live c480_h14_oc16 GEM2)
-    C480_H14_OC16_EXACT11_SHAPE: 0x066,
 }
 DATA_SIZE1_OVERRIDES = {
     "b1_c160_h14_w14_oc320_wic160_k3x3_g1_s1_pvalid": 0x1f00a0,
     "b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid": 0x1f00a0,
     # c16_h80_oc64: natural formula gives 0x000F0010 (different from c160's 0x1f00a0)
     "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid": 0x000F0010,
-    "b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid": 0x000F0010,
-    "b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid": 0x000F0010,
     "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid":   0x003f0040,
     "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid": 0x003f00c0,
     "b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid":   0x003f0100,
     "b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid":   0x003f0100,
-    "b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid":   0x003f0100,
-    "b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid":   0x003f0080,
-    "b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid":   0x003f0080,
-    "b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid":   0x003f0080,
     "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid":  0x00270028,
-    "b1_c256_h10_w10_oc512_wic256_k3x3_g1_s1_pvalid":  0x3f0100,
-    "b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid":  0x3f00c0,
     "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x003f0200,
     "b1_c512_h7_w7_oc1024_wic512_k1x1_g1":            0x003f0200,
     "b1_c832_h7_w7_oc48_wic832_k1x1_g1":              0x003f0340,
-    # c480_h14_oc16: in_c_real=31, in_c=480 (per live c480_h14_oc16 GEM2)
-    C480_H14_OC16_EXACT11_SHAPE: 0x001f01e0,
-    # c128_h1_oc24: in_c_real=63, in_c=128 (per live c128_h1_oc24 GEM2)
-    C128_H1_OC24_3SETUP_SHAPE: 0x003f0080,
 }
 CBUF1_OVERRIDES = {
     # c160_h14 and c160_h7 fall through to make_regs default (_cbuf_entries)
     "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid": 0x032,
     "b1_c832_h7_w7_oc48_wic832_k1x1_g1": 0x0b6,
-    # c128_h1_oc24: DATA_ENTRIES=4 (per live c128_h1_oc24 GEM2)
-    C128_H1_OC24_3SETUP_SHAPE: 0x004,
 }
 WEIGHT_SIZE0_OVERRIDES = {
     # 1x1 pointwise c64_h1_oc128: per-family weight sizes from live capture
@@ -368,17 +332,10 @@ CVT_CON0_OVERRIDES = {
     "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid": 0x000b,
     "b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid": 0x000b,
     "b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid": 0x000b,
-    "b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid": 0x000b,
-    "b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid": 0x000b,
-    "b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid": 0x000b,
-    "b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid": 0x000b,
     "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid": 0x000b,
-    "b1_c256_h10_w10_oc512_wic256_k3x3_g1_s1_pvalid": 0x000b,
-    "b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid": 0x000b,
     "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x000b,
     "b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x000b,
     "b1_c832_h7_w7_oc48_wic832_k1x1_g1": 0x000b,
-    C128_H1_OC24_3SETUP_SHAPE: 0x000b,
 }
 
 DEPTHWISE_OVERRIDES = {
@@ -404,17 +361,10 @@ DMA_CON2_OVERRIDES = {
     "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid": 0x02a0,
     "b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid": 0x0ffffffc,
     "b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid": 0x0ffffffd,
-    "b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid": 0x0ffffffd,
-    "b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid": 0x0ffffffd,
-    "b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid": 0x0ffffffd,
-    "b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid": 0x0ffffffc,
     "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid": 0x05a0,
-    "b1_c256_h10_w10_oc512_wic256_k3x3_g1_s1_pvalid": 0x3c,
-    "b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid": 0x15,
     "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x0015,
     "b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x0015,
     "b1_c832_h7_w7_oc48_wic832_k1x1_g1": 0x0015,
-    C128_H1_OC24_3SETUP_SHAPE: 0x0ffffffd,
 }
 KT_FAMILY_BITS_OVERRIDES = {
 }
@@ -424,10 +374,6 @@ KT_FAMILY_BITS_OVERRIDES = {
 # The K_SPLITS dict overrides the default for shapes where the default is wrong (e.g. oc=128 needs (0, 32), (32, 64), (64, 32))
 KT_TILE_SPLITS = {
     "b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid": ((0, 48), (48, 48), (96, 32)),
-    "b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid": ((0, 48), (48, 48), (96, 32)),
-    "b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid": ((0, 96), (96, 96), (192, 64)),
-    "b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid": ((0, 96), (96, 96), (192, 64)),
-    "b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid":  ((0, 96), (96, 80), (176, 80)),
     # 1x1 pointwise: 3 k_tiles (per live c64_h1_oc128 capture)
     # Note: first k_tile covers 64 OC (overlaps with k_half)
     "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid":   ((0, 64), (48, 48), (96, 32)),
@@ -436,9 +382,6 @@ KT_TILE_SPLITS = {
     "b1_c512_h7_w7_oc1024_wic512_k1x1_g1":           ((0, 352), (352, 336), (688, 336)),
     "b1_c832_h7_w7_oc48_wic832_k1x1_g1":             ((0, 16), (16, 16), (32, 16)),
     "b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid":   ((0, 32), (32, 16), (48, 16)),
-    "b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid":  ((0, 96), (96, 80), (176, 80)),
-    # c480_h14_oc16: 5 k_tiles summing to 16 (4+3+3+3+3), no k_half
-    C480_H14_OC16_EXACT11_SHAPE: ((0, 4), (4, 3), (7, 3), (10, 3), (13, 3)),
     # 12-task c576_h19_oc12: 1 k_half + 5 k_tiles (k_splits 4+3+2+1+2=12), 5 aux rows
     C576_H19_OC12_EXACT12_SHAPE: ((0, 4), (4, 3), (7, 2), (9, 1), (10, 2)),
 }
@@ -446,18 +389,12 @@ CONV2_LOW_OVERRIDES = {
     # c160_h14 and c160_h7 fall through to the default logic below (0x0f0 / 0x0a0)
     # c16_h80_oc64 spatial 3x3 with in_h=80 uses conv2_low=0x1a0 (per live RKNN capture)
     "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid": 0x1a0,
-    "b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid": 0x1a0,
-    "b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid": 0x1a0,
     # 1x1 pointwise family: conv2_low=0x20 (per live c64_h1_oc128 capture)
     "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid": 0x020,
     "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid": 0x090,
     "b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid": 0x030,
     "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid": 0x160,
-    "b1_c256_h10_w10_oc512_wic256_k3x3_g1_s1_pvalid": 0xd0,
-    "b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid": 0xa0,
     "b1_c832_h7_w7_oc48_wic832_k1x1_g1": 0x008,
-    "b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid": 0x060,
-    "b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid": 0x008,
 }
 # 1x1 with h*w=1: per-family DST_BASE offsets (per c64_h1_oc128 live capture)
 # Each k_half/k_tile writes oc_start * 2 bytes (per fp16, c2-packed) into output
@@ -1036,133 +973,6 @@ def _exact11_task_regs(s, in_dma, wt_dma, out_dma):
         if tuple(len(row) for row in rows) != layout["amounts"]:
             raise RuntimeError("c256_h2_oc64 exact11 BY_K row amounts changed")
         return rows
-    if s["name"] == C128_H2_OC256_EXACT11_SHAPE:
-        rows = _c128_h2_oc256_exact11_task_regs(s, in_dma, wt_dma, out_dma)
-        if tuple(len(row) for row in rows) != layout["amounts"]:
-            raise RuntimeError("c128_h2_oc256 exact11 BY_K row amounts changed")
-        return rows
-    if s["name"] == C480_H14_OC16_EXACT11_SHAPE:
-        # 11-task no-khalf closure: 1 setup + 5 k_tiles + 5 aux (matches EXACT11_BYK_AMOUNTS)
-        # All tasks write weight_size0=full (uniform cbuf, dump shows uniform value across all
-        # 6 setup+5k_tile rows). Body field constants per live GEM2 capture.
-        cbuf0 = 0x066
-        data_size1 = 0x001f01e0
-        dma2 = 0x008c
-        full_weight = s["out_c"] * s["in_c"] * FP16_BYTES
-        def row_setup():
-            regs = _exact11_body_regs(s, "setup", 0, s["out_c"], in_dma, wt_dma, out_dma)
-            return patch_regs(regs, {
-                (reg.CNA, reg.CNA_DATA_SIZE1): data_size1,
-                (reg.CNA, reg.CNA_CBUF_CON0): cbuf0,
-                (reg.CNA, reg.CNA_CVT_CON0): 0x000b,
-                (reg.CNA, reg.CNA_DMA_CON2): dma2,
-                (reg.CNA, reg.CNA_WEIGHT_SIZE0): full_weight,
-                (reg.CNA, reg.CNA_WEIGHT_SIZE1): full_weight >> 8,
-                (reg.CNA, reg.CNA_WEIGHT_SIZE2): (s["kw"] << 24) | (s["kh"] << 16) | s["out_c"],
-                (reg.CORE, reg.CORE_DATAOUT_SIZE_1): s["out_c"] - 1,
-                (reg.DPU, reg.DATA_CUBE_CHANNEL): ((s["out_c"] - 1) << 16) | (s["out_c"] - 1),
-                (reg.DPU, reg.WDMA_SIZE_0): s["out_c"] - 1,
-            })
-        def row_ktile(oc_start, oc_count):
-            regs = _exact11_body_regs(s, "k_tile", oc_start, oc_count, in_dma, wt_dma, out_dma)
-            return patch_regs(regs, {
-                (reg.CNA, reg.CNA_DATA_SIZE1): data_size1,
-                (reg.CNA, reg.CNA_CBUF_CON0): cbuf0,
-                (reg.CNA, reg.CNA_CVT_CON0): 0x000b,
-                (reg.CNA, reg.CNA_DMA_CON2): dma2,
-                (reg.CNA, reg.CNA_WEIGHT_SIZE0): full_weight,
-                (reg.CNA, reg.CNA_WEIGHT_SIZE1): full_weight >> 8,
-                (reg.CNA, reg.CNA_WEIGHT_SIZE2): (s["kw"] << 24) | (s["kh"] << 16) | s["out_c"],
-                (reg.CORE, reg.CORE_DATAOUT_SIZE_1): oc_count - 1,
-                (reg.DPU, reg.DATA_CUBE_CHANNEL): ((oc_count - 1) << 16) | (oc_count - 1),
-                (reg.DPU, reg.WDMA_SIZE_0): oc_count - 1,
-            })
-        rows = [row_setup()]
-        splits = exact_byk_splits(s)
-        last_oc_start = splits[-1][0]
-        for oc_start, oc_count in splits:
-            rows.append(row_ktile(oc_start, oc_count))
-            if oc_start != last_oc_start:
-                rows.append(_exact11_aux_regs(s, out_dma))
-        rows.append(_exact11_aux_regs(s, out_dma))
-        if tuple(len(row) for row in rows) != layout["amounts"]:
-            raise RuntimeError(f"{s['name']} exact11 BY_K row amounts changed")
-        return rows
-    if s["name"] == C480_H14_OC16_EXACT11_SHAPE:
-        # 11-task no-khalf closure: 1 setup + 5 k_tiles + 5 aux (matches EXACT11_BYK_AMOUNTS)
-        # All tasks write weight_size0=full (uniform cbuf, dump shows uniform value across all
-        # 6 setup+5k_tile rows). Body field constants per live GEM2 capture.
-        cbuf0 = 0x066
-        data_size1 = 0x001f01e0
-        dma2 = 0x008c
-        full_weight = s["out_c"] * s["in_c"] * FP16_BYTES
-        def row_setup():
-            regs = _exact11_body_regs(s, "setup", 0, s["out_c"], in_dma, wt_dma, out_dma)
-            return patch_regs(regs, {
-                (reg.CNA, reg.CNA_DATA_SIZE1): data_size1,
-                (reg.CNA, reg.CNA_CBUF_CON0): cbuf0,
-                (reg.CNA, reg.CNA_CVT_CON0): 0x000b,
-                (reg.CNA, reg.CNA_DMA_CON2): dma2,
-                (reg.CNA, reg.CNA_WEIGHT_SIZE0): full_weight,
-                (reg.CNA, reg.CNA_WEIGHT_SIZE1): full_weight >> 8,
-                (reg.CNA, reg.CNA_WEIGHT_SIZE2): (s["kw"] << 24) | (s["kh"] << 16) | s["out_c"],
-                (reg.CORE, reg.CORE_DATAOUT_SIZE_1): s["out_c"] - 1,
-                (reg.DPU, reg.DATA_CUBE_CHANNEL): ((s["out_c"] - 1) << 16) | (s["out_c"] - 1),
-                (reg.DPU, reg.WDMA_SIZE_0): s["out_c"] - 1,
-            })
-        def row_ktile(oc_start, oc_count):
-            regs = _exact11_body_regs(s, "k_tile", oc_start, oc_count, in_dma, wt_dma, out_dma)
-            return patch_regs(regs, {
-                (reg.CNA, reg.CNA_DATA_SIZE1): data_size1,
-                (reg.CNA, reg.CNA_CBUF_CON0): cbuf0,
-                (reg.CNA, reg.CNA_CVT_CON0): 0x000b,
-                (reg.CNA, reg.CNA_DMA_CON2): dma2,
-                (reg.CNA, reg.CNA_WEIGHT_SIZE0): full_weight,
-                (reg.CNA, reg.CNA_WEIGHT_SIZE1): full_weight >> 8,
-                (reg.CNA, reg.CNA_WEIGHT_SIZE2): (s["kw"] << 24) | (s["kh"] << 16) | s["out_c"],
-                (reg.CORE, reg.CORE_DATAOUT_SIZE_1): oc_count - 1,
-                (reg.DPU, reg.DATA_CUBE_CHANNEL): ((oc_count - 1) << 16) | (oc_count - 1),
-                (reg.DPU, reg.WDMA_SIZE_0): oc_count - 1,
-            })
-        rows = [row_setup()]
-        splits = exact_byk_splits(s)
-        last_oc_start = splits[-1][0]
-        for oc_start, oc_count in splits:
-            rows.append(row_ktile(oc_start, oc_count))
-            if oc_start != last_oc_start:
-                rows.append(_exact11_aux_regs(s, out_dma))
-        rows.append(_exact11_aux_regs(s, out_dma))
-        if tuple(len(row) for row in rows) != layout["amounts"]:
-            raise RuntimeError(f"{s['name']} exact11 BY_K row amounts changed")
-        return rows
-    if s["name"] == C128_H1_OC24_3SETUP_SHAPE:
-        # 3-setup chain: 3 IDENTICAL setup rows of 108q each, all with the SAME body fields
-        # (shared cbuf, dump shows only 1 set of body field writes for all 3 tasks).
-        # The rknn runtime submits this exact 3-task pattern (max_error=0.0086 when run).
-        # Body fields from prefix_c128_h1_oc24_s1pvalid_keep1_gem2:
-        # CBUF0=0x0b1, DATA_SIZE1=0x3f0080, CBUF1=0x04, CVT_CON0=0x0b, DMA_CON2=0x0ffffffd.
-        full_weight = s["out_c"] * s["in_c"] * FP16_BYTES
-        def row_setup():
-            regs = _exact11_body_regs(s, "setup", 0, s["out_c"], in_dma, wt_dma, out_dma)
-            return patch_regs(regs, {
-                (reg.CNA, reg.CNA_DATA_SIZE1): 0x003f0080,
-                (reg.CNA, reg.CNA_CBUF_CON0): 0x0b1,
-                (reg.CNA, reg.CNA_CBUF_CON1): 0x004,
-                (reg.CNA, reg.CNA_CVT_CON0): 0x000b,
-                (reg.CNA, reg.CNA_DMA_CON2): 0x0ffffffd,
-                (reg.CNA, reg.CNA_WEIGHT_SIZE0): full_weight,
-                (reg.CNA, reg.CNA_WEIGHT_SIZE1): full_weight >> 8,
-                (reg.CNA, reg.CNA_WEIGHT_SIZE2): (s["kw"] << 24) | (s["kh"] << 16) | s["out_c"],
-                (reg.CNA, reg.CNA_CONV_CON2): 0x20,  # FEATURE_GRAINS=2 per GEM2
-                (reg.CORE, reg.CORE_DATAOUT_SIZE_1): s["out_c"] - 1,
-                (reg.DPU, reg.DATA_CUBE_CHANNEL): ((s["out_c"] - 1) << 16) | (s["out_c"] - 1),
-                (reg.DPU, reg.WDMA_SIZE_0): s["out_c"] - 1,
-            })
-        # All 3 tasks are identical (rknn uses shared cbuf + 3 PC-chain submissions)
-        rows = [row_setup(), row_setup(), row_setup()]
-        if tuple(len(row) for row in rows) != layout["amounts"]:
-            raise RuntimeError(f"{s['name']} 3-setup row amounts changed")
-        return rows
     if s["name"] == "b1_c832_h7_w7_oc48_wic832_k1x1_g1":
         setup0 = _exact11_body_regs(s, "setup", 0, s["out_c"], in_dma, wt_dma, out_dma, input_h=7, conv2_low=0x08)
         setup1 = patch_regs(
@@ -1544,16 +1354,6 @@ def exact_byk_tail_value(cls, layout, idx):
     return 0
 
 def exact_byk_legacy_layout_check(s):
-    if s["name"] == C128_H1_OC24_3SETUP_SHAPE:
-        # 3-setup chain: 3 IDENTICAL setup rows of 108q (per live c128_h1_oc24 GEM1
-        # shows all 3 tasks pointing to the same regcmd_addr with same 108q body).
-        return {
-            "roles": ("setup_body", "setup_body", "setup_body"),
-            "amounts": (108, 108, 108),
-            "masks": (0x0d, 0x0d, 0x0d),
-            "pc_amounts": (0, 0, 0),
-            "offsets": (0, 112, 224),
-        }
     layout = exact_byk_layout(s)
     if len(exact_byk_splits(s)) == 3:
         assert layout["amounts"] == EXACT11_BYK_AMOUNTS
@@ -1565,53 +1365,7 @@ def exact_byk_legacy_layout_check(s):
         # 12-task layout: 1 setup + 1 k_half (both 108q) + 5 k_tile (104q) + 5 aux (26q)
         # Build the layout manually (1-k_half + 5-k_tile structure, not 2-k_half default)
         return c576_h19_oc12_exact12_layout()
-    elif s["name"] == C480_H14_OC16_EXACT11_SHAPE:
-        # 11-task no-khalf layout: 1 setup + 5 k_tiles (104q) + 5 aux (26q) interleaved
-        # Roles/amounts match EXACT11_BYK_AMOUNTS (the materializer in _exact11_task_regs
-        # emits 1 setup + 5 k_tiles + 5 aux with no k_half rows).
-        return no_khalf_5tile_layout(((0, 4), (4, 3), (7, 3), (10, 3), (13, 3)))
     return layout
-
-
-def no_khalf_5tile_layout(splits):
-    """Generic 11-task no-khalf layout: 1 setup + 5 k_tiles + 5 aux (no k_half rows)."""
-    roles = ["setup_body"]
-    aux_idx = 0
-    for idx, _split in enumerate(splits):
-        roles.append(f"k_tile_body{idx}")
-        if idx + 1 < len(splits):
-            roles.append(f"aux{aux_idx}")
-            aux_idx += 1
-    roles.append(f"aux{aux_idx}")
-    roles = ["setup_body"]
-    aux_idx = 0
-    for idx, _split in enumerate(splits):
-        roles.append(f"k_tile_body{idx}")
-        if idx + 1 < len(splits):
-            roles.append(f"aux{aux_idx}")
-            aux_idx += 1
-    roles.append(f"aux{aux_idx}")
-    amounts = tuple(EXACT_BYK_SETUP_AMOUNT if role == "setup_body"
-                    else EXACT_BYK_AUX_AMOUNT if role.startswith("aux")
-                    else EXACT_BYK_BODY_AMOUNT for role in roles)
-    masks = tuple(0x60 if role.startswith("aux") else 0x0d for role in roles)
-    pc_amounts = tuple(0 if role.startswith("aux") or role == "setup_body"
-                       else 0x2000e for role in roles[:-1])
-    offsets = []
-    qoff = 0
-    for idx, amount in enumerate(amounts):
-        offsets.append(qoff)
-        if idx + 1 == len(amounts):
-            break
-        tail_qwords = 4 if idx == 0 else 6 if roles[idx].startswith("aux") else 8
-        qoff += _align_up(amount + tail_qwords, 8)
-    return {
-        "roles": tuple(roles),
-        "amounts": amounts,
-        "masks": masks,
-        "pc_amounts": pc_amounts,
-        "offsets": tuple(offsets),
-    }
 
 
 def c576_h19_oc12_exact12_layout():
@@ -1965,44 +1719,6 @@ def _c256_h2_oc64_exact11_task_regs(s, in_dma, wt_dma, out_dma):
     ]
     if tuple(len(row_regs) for row_regs in rows) != EXACT11_BYK_AMOUNTS:
         raise RuntimeError("c256_h2_oc64 exact11 row amounts changed")
-    return rows
-
-def _c128_h2_oc256_exact11_task_regs(s, in_dma, wt_dma, out_dma):
-    if s["name"] != C128_H2_OC256_EXACT11_SHAPE:
-        raise ValueError("c128_h2_oc256 exact11 rows are scoped only to the c128_h2_oc256 shape")
-    half = _align_up(s["out_c"] // 2, 16)
-
-    def row(family, oc_start, oc_count, weight_size0):
-        regs = _exact11_body_regs(s, family, oc_start, oc_count, in_dma, wt_dma, out_dma, input_h=2, conv2_low=0x30)
-        return patch_regs(regs, {
-            (reg.CNA, reg.CNA_DATA_SIZE1): 0x003f0080,
-            (reg.CNA, reg.CNA_CBUF_CON0): 0x01b,
-            (reg.CNA, reg.CNA_CVT_CON0): 0x000b,
-            (reg.CNA, reg.CNA_DMA_CON2): 0x0ffffffc,
-            (reg.CNA, reg.CNA_WEIGHT_SIZE0): weight_size0,
-            (reg.CNA, reg.CNA_WEIGHT_SIZE1): weight_size0 >> 8,
-            (reg.CNA, reg.CNA_WEIGHT_SIZE2): (s["kw"] << 24) | (s["kh"] << 16) | oc_count,
-            (reg.CORE, reg.CORE_DATAOUT_SIZE_1): oc_count - 1,
-            (reg.DPU, reg.DATA_CUBE_CHANNEL): ((oc_count - 1) << 16) | (oc_count - 1),
-            (reg.DPU, reg.WDMA_SIZE_0): oc_count - 1,
-        })
-
-    full_weight = s["out_c"] * s["in_c"] * FP16_BYTES
-    aux_dma = wt_dma + full_weight
-    rows = [
-        row("setup", 0, s["out_c"], full_weight),
-        row("k_half", 0, half, half * s["in_c"] * FP16_BYTES), _exact11_aux_regs(s, out_dma, aux_dma),
-        row("k_half", half, s["out_c"] - half, (s["out_c"] - half) * s["in_c"] * FP16_BYTES), _exact11_aux_regs(s, out_dma, aux_dma),
-    ]
-    splits = exact_byk_splits(s)
-    last_oc_start = splits[-1][0]
-    for oc_start, oc_count in splits:
-        rows.append(row("k_tile", oc_start, oc_count, oc_count * s["in_c"] * FP16_BYTES))
-        if oc_start != last_oc_start:
-            rows.append(_exact11_aux_regs(s, out_dma, aux_dma))
-    rows.append(_exact11_aux_regs(s, out_dma, aux_dma))
-    if tuple(len(row_regs) for row_regs in rows) != EXACT11_BYK_AMOUNTS:
-        raise RuntimeError("c128_h2_oc256 exact11 row amounts changed")
     return rows
 
 def dry_run_c256_h2_oc64_exact11(s):

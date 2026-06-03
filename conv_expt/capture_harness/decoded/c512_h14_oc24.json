@@ -1,0 +1,10 @@
+{
+  "slug": "c512_h14_oc24",
+  "dump_dir": "/home/orangepi/npu/ops_rknn/dump/prefix_c512_h14_oc24_keep1_gem2",
+  "task_count": 0,
+  "amounts": [],
+  "masks": [],
+  "regcmd_addrs": [],
+  "body_row_count": 0,
+  "body_rows": {}
+}

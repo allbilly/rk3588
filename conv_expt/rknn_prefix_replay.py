@@ -944,7 +944,7 @@ MANIFEST = {
     "c128_h2_oc256_1x1_promoted_via_exact11_byk": {
         "shape": "b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid",
         "case": "b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid 1 128 2 2 256 1 1 1 c128_h2_oc256_k1x1",
-        "note": "promoted via 11-task EXACT11 BY_K closure with body field constants from capture prefix_c128_h2_oc256_s1pvalid_keep1_gem2: CBUF0=0x0b1, DATA_SIZE1=0x003f0080, CVT_CON0=0x000b, DMA_CON2=0x0ffffffc (DIFFERENT from c128_h3 family which uses 0x0ffffffd!), KT_TILE_SPLITS=((0, 96), (96, 96), (192, 64)) summing to 256, CONV2_LOW=0x008. max_diff=0.0151 PASS, pre/post simple_add PASS. 17:46 this session.",
+        "note": "promoted via 11-task EXACT11 BY_K closure with body field constants from capture prefix_c128_h2_oc256_s1pvalid_keep1_gem2: CBUF0=0x0b1, DATA_SIZE1=0x003f0080, CVT_CON0=0x000b, DMA_CON2=0x0ffffffc (DIFFERENT from c128_h3 family which uses 0x0ffffffd!), KT_TILE_SPLITS=((0, 96), (96, 80), (176, 80)) summing to 256 (k_tile 0:96, k_tile 1:80, k_tile 2:80), input_h=2, conv2_low=0x30. local materializer at examples/conv.py _c128_h2_oc256_exact11_task_regs follows c256_h2_oc64 pattern with shape-scoped CBUF0/DATA_SIZE1/CVT_CON0/DMA_CON2 overrides. max_diff=0.0151 PASS, pre/post simple_add PASS. 19:31 this session: corrected KT_TILE_SPLITS from (96, 96, 64) to (96, 80, 80) per GEM2 evidence.",
     },
     "c192_h7_oc384_3x3_promoted_via_exact11_byk": {
         "shape": "b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid",

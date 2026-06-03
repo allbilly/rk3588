@@ -1,0 +1,10 @@
+{
+  "slug": "c1280_h10_oc546_s1pvalid",
+  "dump_dir": "/home/orangepi/npu/ops_rknn/dump/prefix_c1280_h10_oc546_s1pvalid_keep1_gem2",
+  "task_count": 0,
+  "amounts": [],
+  "masks": [],
+  "regcmd_addrs": [],
+  "body_row_count": 0,
+  "body_rows": {}
+}

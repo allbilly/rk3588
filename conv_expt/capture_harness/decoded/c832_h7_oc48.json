@@ -1,0 +1,10 @@
+{
+  "slug": "c832_h7_oc48",
+  "dump_dir": "/home/orangepi/npu/ops_rknn/dump/prefix_c832_h7_oc48_keep1_gem2",
+  "task_count": 0,
+  "amounts": [],
+  "masks": [],
+  "regcmd_addrs": [],
+  "body_row_count": 0,
+  "body_rows": {}
+}
