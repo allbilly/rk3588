@@ -31,10 +31,10 @@ Sample slugs:
   c256_h10_oc256_s1pvalid
   c256_h10_oc512_s1pvalid
 
-Total fenced: 80
-With any capture (GEM1 or GEM2): 80/80 (100%)
-With GEM2 body capture: 80/80 (100%)
-With NO capture at all: 0/80 (0%)
+Total fenced: 78
+With any capture (GEM1 or GEM2): 78/78 (100%)
+With GEM2 body capture: 78/78 (100%)
+With NO capture at all: 0/78 (0%)
 
 ====================================================================================================
 Family                                     #  GEM1  GEM2   %G1  Distinct capture slugs
@@ -43,8 +43,7 @@ depthwise 3x3 (k3_g=in_c)                 30    30    30  100%  c1024_h7_oc1024,
 depthwise 5x5 (k5_g=in_c)                  4     4     4  100%  c480_h10_oc120_s1pvalid, c480_h10_oc480_s1pvalid, c576_h20_oc576_s1pvalid, c576_h20_oc72_s1pvalid ...
 depthwise 7x7 (k7_g=in_c)                  2     2     2  100%  c1024_h7_oc1024, cc_c1024_h7_oc1024
 pointwise 1x1 (k1_g1)                     36    36    36  100%  c1024_h1_oc1001, c1024_h1_oc1001_pw_by_k, c1024_h7_oc1024, c1280_h10_oc24 ...
-spatial 3x3 (k3_g1)                        7     7     7  100%  c128_h3_oc128_s1pvalid, c128_h3_oc256_s1pvalid, c128_h5_oc256_s1pvalid, c16_h80_oc128_s1pvalid ...
-spatial 5x5 (k5_g1)                        1     1     1  100%  c16_h80_oc128_s1pvalid
+spatial 3x3 (k3_g1)                        6     6     6  100%  c128_h3_oc128_s1pvalid, c128_h3_oc256_s1pvalid, c128_h5_oc256_s1pvalid, c192_h7_oc384_s1pvalid ...
 ====================================================================================================
 
 DETAILED — per shape (sorted by family)
@@ -130,10 +129,7 @@ Shape                                                          G1  G2   Capture 
 --- spatial 3x3 (k3_g1) ---
   b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid                 Y   Y    c128_h3_oc128_s1pvalid, c128_h3_oc256_s1pvalid
   b1_c128_h5_w5_oc256_wic128_k3x3_g1_s1_pvalid                 Y   Y    c128_h5_oc256_s1pvalid
-  b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid                 Y   Y    c16_h80_oc128_s1pvalid
   b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid                 Y   Y    c192_h7_oc384_s1pvalid
   b1_c256_h10_w10_oc512_wic256_k3x3_g1_s1_pvalid               Y   Y    c256_h10_oc256_s1pvalid, c256_h10_oc512_s1pvalid
   b1_c40_h40_w40_oc160_wic40_k3x3_g1_s1_pvalid                 Y   Y    c40_h40_oc160_s1pvalid, c40_h40_oc320
   b1_c72_h20_w20_oc288_wic72_k3x3_g1_s1_pvalid                 Y   Y    c72_h20_oc288_s1pvalid, c72_h20_oc576_s1pvalid
---- spatial 5x5 (k5_g1) ---
-  b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid                 Y   Y    c16_h80_oc128_s1pvalid

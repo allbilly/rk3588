@@ -61,6 +61,7 @@ PREFIX_BY_K_SHAPES = {
     "b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid",
     "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid",
     "b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid",
+    "b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid",
     "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid",
     "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid",
     "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1",
@@ -262,6 +263,7 @@ KNOWN_BAD_SPATIAL_SETUP_SHAPES = {
     # c16_h80_oc128 (5x5) still fenced (different kernel)
     "b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid",
     "b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid",
+    "b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid",
 }
 DEPTHWISE_BODY_SHAPES = set()  # emptied: single-task rewrite needs more capture work; leave shapes fenced for now
 DEPTHWISE_SETUP108_SHAPES = set()
@@ -286,6 +288,7 @@ CBUF0_OVERRIDES = {
     "b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid": 0x0a2,
     "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid": 0x057,
     "b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid": 0x057,
+    "b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid": 0x057,
     # 1x1 pointwise family: cbuf0=0xb1 (per live rknn_runtime c64_h1_oc128 capture)
     "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid": 0x0b1,
     "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid": 0x02a,
@@ -302,6 +305,7 @@ DATA_SIZE1_OVERRIDES = {
     # c16_h80_oc64: natural formula gives 0x000F0010 (different from c160's 0x1f00a0)
     "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid": 0x000F0010,
     "b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid": 0x000F0010,
+    "b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid": 0x000F0010,
     "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid":   0x003f0040,
     "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid": 0x003f00c0,
     "b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid":   0x003f0100,
@@ -393,6 +397,7 @@ CONV2_LOW_OVERRIDES = {
     # c16_h80_oc64 spatial 3x3 with in_h=80 uses conv2_low=0x1a0 (per live RKNN capture)
     "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid": 0x1a0,
     "b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid": 0x1a0,
+    "b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid": 0x1a0,
     # 1x1 pointwise family: conv2_low=0x20 (per live c64_h1_oc128 capture)
     "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid": 0x020,
     "b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid": 0x090,
