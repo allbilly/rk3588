@@ -70,6 +70,7 @@ PREFIX_BY_K_SHAPES = {
     "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1",
     "b1_c512_h7_w7_oc1024_wic512_k1x1_g1",
     C256_H2_OC64_EXACT11_SHAPE,
+    "b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid",
 }
 POINTWISE_EXACT11_BYK_SHAPES = {
     "conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1",
@@ -300,6 +301,7 @@ CBUF0_OVERRIDES = {
     "b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid": 0x0b1,
     "b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid": 0x0b1,
     "b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid": 0x0b1,
+    "b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid": 0x0b1,
     "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid": 0x084,
     "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x0a2,
     "b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x0a2,
@@ -319,6 +321,7 @@ DATA_SIZE1_OVERRIDES = {
     "b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid":   0x003f0100,
     "b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid":   0x003f0080,
     "b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid":   0x003f0080,
+    "b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid":   0x003f0080,
     "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid":  0x00270028,
     "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x003f0200,
     "b1_c512_h7_w7_oc1024_wic512_k1x1_g1":            0x003f0200,
@@ -351,6 +354,7 @@ CVT_CON0_OVERRIDES = {
     "b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid": 0x000b,
     "b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid": 0x000b,
     "b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid": 0x000b,
+    "b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid": 0x000b,
     "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid": 0x000b,
     "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x000b,
     "b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x000b,
@@ -383,6 +387,7 @@ DMA_CON2_OVERRIDES = {
     "b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid": 0x0ffffffd,
     "b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid": 0x0ffffffd,
     "b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid": 0x0ffffffd,
+    "b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid": 0x0ffffffc,
     "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid": 0x05a0,
     "conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x0015,
     "b1_c512_h7_w7_oc1024_wic512_k1x1_g1": 0x0015,
@@ -399,6 +404,7 @@ KT_TILE_SPLITS = {
     "b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid": ((0, 48), (48, 48), (96, 32)),
     "b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid": ((0, 96), (96, 96), (192, 64)),
     "b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid": ((0, 96), (96, 96), (192, 64)),
+    "b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid": ((0, 96), (96, 96), (192, 64)),
     # 1x1 pointwise: 3 k_tiles (per live c64_h1_oc128 capture)
     # Note: first k_tile covers 64 OC (overlaps with k_half)
     "b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid":   ((0, 64), (48, 48), (96, 32)),
@@ -423,6 +429,7 @@ CONV2_LOW_OVERRIDES = {
     "b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid": 0x160,
     "b1_c832_h7_w7_oc48_wic832_k1x1_g1": 0x008,
     "b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid": 0x060,
+    "b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid": 0x008,
 }
 # 1x1 with h*w=1: per-family DST_BASE offsets (per c64_h1_oc128 live capture)
 # Each k_half/k_tile writes oc_start * 2 bytes (per fp16, c2-packed) into output
