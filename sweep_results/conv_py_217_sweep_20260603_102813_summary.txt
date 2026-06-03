@@ -1,0 +1,4 @@
+timestamp=20260603_102813
+total=1 counts={'FENCED': 1}
+pre_health_rc=0 post_health_rc=0
+FENCED b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid

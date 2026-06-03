@@ -1,0 +1,1 @@
+FENCED   b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid :: error: shape is crash-fenced after c256_h2 setup108 generalization reboot; capture exact RKNN GEM1/GEM2 closure before submit

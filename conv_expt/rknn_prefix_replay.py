@@ -208,6 +208,12 @@ TARGETS = {
         "case": "conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1 1 3 224 224 32 3 3 1 c3_h224_spatial_by_y",
         "emit": None,
     },
+    "b1_c3_h224_spatial_by_y": {
+        "shape": "b1_c3_h224_w224_oc32_wic3_k3x3_g1",
+        "case": "b1_c3_h224_w224_oc32_wic3_k3x3_g1 1 3 224 224 32 3 3 1 b1_c3_h224_spatial_by_y",
+        "emit": None,
+        "note": "promoted after one-off local prefix-derived windows replay passed: 5 y_tile rows (in_h=64/64/64/64/64, y_start=0/62/124/186/248), max_diff=0.0151, post simple_add PASS; sibling conv2d_cc_ variant shares the same y_tile pattern, gated by run_prefix_derived_spatial_shape",
+    },
     "c8_h160_spatial_by_y": {
         "shape": "b1_c8_h160_w160_oc16_wic8_k3x3_g1_s1_pvalid",
         "case": "b1_c8_h160_w160_oc16_wic8_k3x3_g1_s1_pvalid 1 8 160 160 16 3 3 1 c8_h160_spatial_by_y",
@@ -237,6 +243,12 @@ TARGETS = {
         "case": "conv2d_b1_c64_h56_w56_oc24_wic64_k1x1_g1 1 64 56 56 24 1 1 1 c64_h56_pw_by_y",
         "emit": None,
         "note": "promoted after one-off local tile replay passed: 2 one-task submits, max_diff=0.0155, post simple_add PASS",
+    },
+    "c96_h20_oc12_pw_by_y": {
+        "shape": "b1_c96_h20_w20_oc12_wic96_k1x1_g1_s1_pvalid",
+        "case": "b1_c96_h20_w20_oc12_wic96_k1x1_g1_s1_pvalid 1 96 20 20 12 1 1 1 c96_h20_oc12_pw_by_y",
+        "emit": None,
+        "note": "promoted after one-off local tile replay passed: 1 one-task submit, max_diff=0.0156, post simple_add PASS; path is pointwise-wide BY_Y with 1 y_tile row, gated by run_local_tile_replay_shape",
     },
     "c128_h56_pw_by_y": {
         "shape": "conv2d_b1_c128_h56_w56_oc24_wic128_k1x1_g1",
@@ -355,6 +367,18 @@ TARGETS = {
         "shape": "conv2d_b1_c4_h5_w5_oc4_wic2_k3x3_g2",
         "case": "conv2d_b1_c4_h5_w5_oc4_wic2_k3x3_g2 1 4 5 5 4 3 3 2 g2_c4_h5_oc4_spatial_serial",
         "emit": None,
+    },
+    "g2_c4_h1_w1_oc2_serial": {
+        "shape": "conv2d_b1_c4_h1_w1_oc2_wic2_k1x1_g2",
+        "case": "conv2d_b1_c4_h1_w1_oc2_wic2_k1x1_g2 1 4 1 1 2 1 1 2 g2_c4_h1_w1_oc2_serial",
+        "emit": None,
+        "note": "promoted after one-off local grouped_serial replay with post-submit reset passed: 2 one-task submits, max_diff=0.0004, post simple_add PASS; path is grouped pointwise 1x1 serial, gated by run_grouped_serial_shape",
+    },
+    "g2_c4_h1_w1_oc4_serial": {
+        "shape": "b1_c4_h1_w1_oc4_wic2_k1x1_g2",
+        "case": "b1_c4_h1_w1_oc4_wic2_k1x1_g2 1 4 1 1 4 1 1 2 g2_c4_h1_w1_oc4_serial",
+        "emit": None,
+        "note": "promoted after one-off local grouped_serial replay with post-submit reset passed: 2 one-task submits, max_diff=0.0006, post simple_add PASS; sibling conv2d_4x4_1x1_1x1_g2 shares the same path, gated by run_grouped_serial_shape",
     },
     "g2_c4_h5_oc8_spatial_serial": {
         "shape": "conv2d_b1_c4_h5_w5_oc8_wic2_k3x3_g2",

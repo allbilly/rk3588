@@ -1,0 +1,456 @@
+Processing 80 shapes (offset=0)
+[1/80] conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32 (slug=cc_c32_h112_oc32)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32
+  [capture gem=1] slug=cc_c32_h112_oc32 timeout=120s
+  [capture gem=1] OK dt=2.2s size=17942B
+  [capture gem=2] slug=cc_c32_h112_oc32 timeout=120s
+  [capture gem=2] OK dt=2.3s size=304639B
+[2/80] conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64 (slug=cc_c64_h112_oc64)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64
+  [capture gem=1] slug=cc_c64_h112_oc64 timeout=120s
+  [capture gem=1] OK dt=5.1s size=26919B
+  [capture gem=2] slug=cc_c64_h112_oc64 timeout=120s
+  [capture gem=2] OK dt=4.9s size=418660B
+[3/80] conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128 (slug=cc_c128_h56_oc128)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128
+  [capture gem=1] slug=cc_c128_h56_oc128 timeout=120s
+  [capture gem=1] OK dt=2.9s size=19160B
+  [capture gem=2] slug=cc_c128_h56_oc128 timeout=120s
+  [capture gem=2] OK dt=3.0s size=326873B
+[4/80] conv2d_cc_b1_c256_h28_w28_oc256_wic1_k3x3_g256 (slug=cc_c256_h28_oc256)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_conv2d_cc_b1_c256_h28_w28_oc256_wic1_k3x3_g256
+  [capture gem=1] slug=cc_c256_h28_oc256 timeout=120s
+  [capture gem=1] OK dt=1.3s size=14620B
+  [capture gem=2] slug=cc_c256_h28_oc256 timeout=120s
+  [capture gem=2] OK dt=1.3s size=315663B
+[5/80] conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1 (slug=cc_c256_h28_oc256)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1
+  [capture gem=1] dump_gem1.txt exists (14620B), skipping
+  [capture gem=2] dump_gem2.txt exists (315663B), skipping
+[6/80] conv2d_cc_b1_c512_h14_w14_oc512_wic1_k3x3_g512 (slug=cc_c512_h14_oc512)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_conv2d_cc_b1_c512_h14_w14_oc512_wic1_k3x3_g512
+  [capture gem=1] slug=cc_c512_h14_oc512 timeout=120s
+  [capture gem=1] OK dt=1.1s size=13575B
+  [capture gem=2] slug=cc_c512_h14_oc512 timeout=120s
+  [capture gem=2] OK dt=1.2s size=378579B
+[7/80] conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024 (slug=cc_c1024_h7_oc1024)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024
+  [capture gem=1] slug=cc_c1024_h7_oc1024 timeout=120s
+  [capture gem=1] OK dt=0.9s size=13751B
+  [capture gem=2] slug=cc_c1024_h7_oc1024 timeout=120s
+  [capture gem=2] OK dt=1.0s size=551658B
+[8/80] conv2d_cc_b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1 (slug=cc_c1024_h7_oc1024)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_conv2d_cc_b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1
+  [capture gem=1] dump_gem1.txt exists (13751B), skipping
+  [capture gem=2] dump_gem2.txt exists (551658B), skipping
+[9/80] conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024 (slug=cc_c1024_h7_oc1024)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024
+  [capture gem=1] dump_gem1.txt exists (13751B), skipping
+  [capture gem=2] dump_gem2.txt exists (551658B), skipping
+[10/80] conv2d_cc_b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1 (slug=cc_c1024_h1_oc1001)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_conv2d_cc_b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1
+  [capture gem=1] slug=cc_c1024_h1_oc1001 timeout=120s
+  [capture gem=1] OK dt=0.8s size=13751B
+  [capture gem=2] slug=cc_c1024_h1_oc1001 timeout=120s
+  [capture gem=2] OK dt=12.5s size=36103457B
+  [health] simple_add.py check
+  [health] rc=0 PASS
+[11/80] b1_c480_h14_w14_oc16_wic480_k1x1_g1 (slug=c480_h14_oc16)
+  [capture gem=1] slug=c480_h14_oc16 timeout=120s
+  [capture gem=1] OK dt=0.7s size=13575B
+  [capture gem=2] slug=c480_h14_oc16 timeout=120s
+  [capture gem=2] OK dt=0.9s size=503288B
+[12/80] b1_c512_h14_w14_oc24_wic512_k1x1_g1 (slug=c512_h14_oc24)
+  [capture gem=1] dump_gem1.txt exists (13674B), skipping
+  [capture gem=2] dump_gem2.txt exists (691400B), skipping
+[13/80] b1_c832_h7_w7_oc48_wic832_k1x1_g1 (slug=c832_h7_oc48)
+  [capture gem=1] dump_gem1.txt exists (13717B), skipping
+  [capture gem=2] dump_gem2.txt exists (1590785B), skipping
+[14/80] b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1 (slug=c1024_h7_oc1024)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1
+  [capture gem=1] slug=c1024_h7_oc1024 timeout=120s
+  [capture gem=1] OK dt=2.2s size=13689B
+  [capture gem=2] slug=c1024_h7_oc1024 timeout=120s
+  [capture gem=2] OK dt=14.4s size=36912466B
+[15/80] b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1 (slug=c1024_h1_oc1001)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1
+  [capture gem=1] slug=c1024_h1_oc1001 timeout=120s
+  [capture gem=1] OK dt=0.8s size=13751B
+  [capture gem=2] slug=c1024_h1_oc1001 timeout=120s
+  [capture gem=2] OK dt=12.6s size=36112074B
+[16/80] b1_c1280_h10_w10_oc24_wic1280_k1x1_g1 (slug=c1280_h10_oc24)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c1280_h10_w10_oc24_wic1280_k1x1_g1
+  [capture gem=1] slug=c1280_h10_oc24 timeout=120s
+  [capture gem=1] OK dt=0.8s size=13689B
+  [capture gem=2] slug=c1280_h10_oc24 timeout=120s
+  [capture gem=2] OK dt=1.2s size=1316210B
+[17/80] b1_c1280_h10_w10_oc546_wic1280_k1x1_g1 (slug=c1280_h10_oc546)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c1280_h10_w10_oc546_wic1280_k1x1_g1
+  [capture gem=1] slug=c1280_h10_oc546 timeout=120s
+  [capture gem=1] OK dt=2.6s size=13575B
+  [capture gem=2] slug=c1280_h10_oc546 timeout=120s
+  [capture gem=2] OK dt=10.7s size=24705143B
+[18/80] b1_c32_h112_w112_oc32_wic1_k3x3_g32 (slug=c32_h112_oc32)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c32_h112_w112_oc32_wic1_k3x3_g32
+  [capture gem=1] slug=c32_h112_oc32 timeout=120s
+  [capture gem=1] OK dt=2.2s size=17942B
+  [capture gem=2] slug=c32_h112_oc32 timeout=120s
+  [capture gem=2] OK dt=2.3s size=280408B
+[19/80] b1_c64_h112_w112_oc64_wic1_k3x3_g64 (slug=c64_h112_oc64)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c64_h112_w112_oc64_wic1_k3x3_g64
+  [capture gem=1] slug=c64_h112_oc64 timeout=120s
+  [capture gem=1] OK dt=4.8s size=26919B
+  [capture gem=2] slug=c64_h112_oc64 timeout=120s
+  [capture gem=2] OK dt=5.0s size=421318B
+[20/80] b1_c128_h56_w56_oc128_wic1_k3x3_g128 (slug=c128_h56_oc128)
+  [capture gem=1] slug=c128_h56_oc128 timeout=120s
+  [capture gem=1] OK dt=2.9s size=19160B
+  [capture gem=2] slug=c128_h56_oc128 timeout=120s
+  [capture gem=2] OK dt=3.0s size=317524B
+  [health] simple_add.py check
+  [health] rc=0 PASS
+[21/80] b1_c256_h28_w28_oc256_wic1_k3x3_g256 (slug=c256_h28_oc256)
+  [capture gem=1] slug=c256_h28_oc256 timeout=120s
+  [capture gem=1] OK dt=1.4s size=14620B
+  [capture gem=2] slug=c256_h28_oc256 timeout=120s
+  [capture gem=2] OK dt=1.4s size=320895B
+[22/80] b1_c512_h14_w14_oc512_wic1_k3x3_g512 (slug=c512_h14_oc512)
+  [capture gem=1] slug=c512_h14_oc512 timeout=120s
+  [capture gem=1] OK dt=1.1s size=13575B
+  [capture gem=2] slug=c512_h14_oc512 timeout=120s
+  [capture gem=2] OK dt=1.2s size=364789B
+[23/80] b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024 (slug=c1024_h7_oc1024)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024
+  [capture gem=1] dump_gem1.txt exists (13689B), skipping
+  [capture gem=2] dump_gem2.txt exists (36912466B), skipping
+[24/80] b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024 (slug=c1024_h7_oc1024)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024
+  [capture gem=1] dump_gem1.txt exists (13689B), skipping
+  [capture gem=2] dump_gem2.txt exists (36912466B), skipping
+[25/80] b1_c256_h28_w28_oc256_wic256_k1x1_g1 (slug=c256_h28_oc256)
+  [capture gem=1] dump_gem1.txt exists (14620B), skipping
+  [capture gem=2] dump_gem2.txt exists (320895B), skipping
+[26/80] b1_c96_h112_w112_oc96_wic1_k3x3_g96_s1_pvalid (slug=c96_h112_oc96_s1pvalid)
+  [capture gem=1] slug=c96_h112_oc96_s1pvalid timeout=120s
+  [capture gem=1] OK dt=7.8s size=35620B
+  [capture gem=2] slug=c96_h112_oc96_s1pvalid timeout=120s
+  [capture gem=2] OK dt=8.0s size=571274B
+[27/80] b1_c144_h56_w56_oc144_wic1_k3x3_g144_s1_pvalid (slug=c144_h56_oc144_s1pvalid)
+  [capture gem=1] slug=c144_h56_oc144_s1pvalid timeout=120s
+  [capture gem=1] OK dt=3.2s size=20139B
+  [capture gem=2] slug=c144_h56_oc144_s1pvalid timeout=120s
+  [capture gem=2] OK dt=3.4s size=344226B
+[28/80] b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid (slug=c192_h7_oc384_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid
+  [capture gem=1] slug=c192_h7_oc384_s1pvalid timeout=120s
+  [capture gem=1] OK dt=1.0s size=13689B
+  [capture gem=2] slug=c192_h7_oc384_s1pvalid timeout=120s
+  [capture gem=2] OK dt=8.7s size=23441243B
+[29/80] b1_c832_h7_w7_oc48_wic832_k1x1_g1_s1_pvalid (slug=c832_h7_oc48_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c832_h7_w7_oc48_wic832_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c832_h7_oc48_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.7s size=13751B
+  [capture gem=2] slug=c832_h7_oc48_s1pvalid timeout=120s
+  [capture gem=2] OK dt=1.3s size=1577388B
+[30/80] b1_c32_h150_w150_oc32_wic1_k3x3_g32_s1_pvalid (slug=c32_h150_oc32_s1pvalid)
+  [capture gem=1] slug=c32_h150_oc32_s1pvalid timeout=120s
+  [capture gem=1] OK dt=4.2s size=25643B
+  [capture gem=2] slug=c32_h150_oc32_s1pvalid timeout=120s
+  [capture gem=2] OK dt=4.4s size=432919B
+  [health] simple_add.py check
+  [health] rc=0 PASS
+[31/80] b1_c96_h150_w150_oc96_wic1_k3x3_g96_s1_pvalid (slug=c96_h150_oc96_s1pvalid)
+  [capture gem=1] slug=c96_h150_oc96_s1pvalid timeout=120s
+  [capture gem=1] OK dt=14.4s size=57543B
+  [capture gem=2] slug=c96_h150_oc96_s1pvalid timeout=120s
+  [capture gem=2] OK dt=14.6s size=908966B
+[32/80] b1_c144_h75_w75_oc144_wic1_k3x3_g144_s1_pvalid (slug=c144_h75_oc144_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c144_h75_w75_oc144_wic1_k3x3_g144_s1_pvalid
+  [capture gem=1] slug=c144_h75_oc144_s1pvalid timeout=120s
+  [capture gem=1] OK dt=5.4s size=25693B
+  [capture gem=2] slug=c144_h75_oc144_s1pvalid timeout=120s
+  [capture gem=2] OK dt=5.7s size=451575B
+[33/80] b1_c192_h38_w38_oc192_wic1_k3x3_g192_s1_pvalid (slug=c192_h38_oc192_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c192_h38_w38_oc192_wic1_k3x3_g192_s1_pvalid
+  [capture gem=1] slug=c192_h38_oc192_s1pvalid timeout=120s
+  [capture gem=1] OK dt=2.0s size=14685B
+  [capture gem=2] slug=c192_h38_oc192_s1pvalid timeout=120s
+  [capture gem=2] OK dt=2.0s size=293933B
+[34/80] b1_c384_h19_w19_oc384_wic1_k3x3_g384_s1_pvalid (slug=c384_h19_oc384_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c384_h19_w19_oc384_wic1_k3x3_g384_s1_pvalid
+  [capture gem=1] slug=c384_h19_oc384_s1pvalid timeout=120s
+  [capture gem=1] OK dt=1.1s size=13545B
+  [capture gem=2] slug=c384_h19_oc384_s1pvalid timeout=120s
+  [capture gem=2] OK dt=1.2s size=332084B
+[35/80] b1_c384_h19_w19_oc64_wic384_k1x1_g1_s1_pvalid (slug=c384_h19_oc64_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c384_h19_w19_oc64_wic384_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c384_h19_oc64_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.9s size=13689B
+  [capture gem=2] slug=c384_h19_oc64_s1pvalid timeout=120s
+  [capture gem=2] OK dt=1.3s size=1059369B
+[36/80] b1_c384_h19_w19_oc96_wic384_k1x1_g1_s1_pvalid (slug=c384_h19_oc96_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c384_h19_w19_oc96_wic384_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c384_h19_oc96_s1pvalid timeout=120s
+  [capture gem=1] OK dt=1.1s size=13689B
+  [capture gem=2] slug=c384_h19_oc96_s1pvalid timeout=120s
+  [capture gem=2] OK dt=1.5s size=1489639B
+[37/80] b1_c576_h19_w19_oc576_wic1_k3x3_g576_s1_pvalid (slug=c576_h19_oc576_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c576_h19_w19_oc576_wic1_k3x3_g576_s1_pvalid
+  [capture gem=1] slug=c576_h19_oc576_s1pvalid timeout=120s
+  [capture gem=1] OK dt=1.9s size=14650B
+  [capture gem=2] slug=c576_h19_oc576_s1pvalid timeout=120s
+  [capture gem=2] OK dt=2.0s size=428823B
+[38/80] b1_c576_h19_w19_oc96_wic576_k1x1_g1_s1_pvalid (slug=c576_h19_oc96_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c576_h19_w19_oc96_wic576_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c576_h19_oc96_s1pvalid timeout=120s
+  [capture gem=1] OK dt=1.3s size=20142B
+  [capture gem=2] slug=c576_h19_oc96_s1pvalid timeout=120s
+  [capture gem=2] OK dt=2.3s size=2403710B
+[39/80] b1_c576_h19_w19_oc12_wic576_k1x1_g1_s1_pvalid (slug=c576_h19_oc12_s1pvalid)
+  [capture gem=1] slug=c576_h19_oc12_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.8s size=14620B
+  [capture gem=2] slug=c576_h19_oc12_s1pvalid timeout=120s
+  [capture gem=2] OK dt=0.9s size=501832B
+[40/80] b1_c576_h19_w19_oc273_wic576_k1x1_g1_s1_pvalid (slug=c576_h19_oc273_s1pvalid)
+  [capture gem=1] dump_gem1.txt exists (73070B), skipping
+  [capture gem=2] dump_gem2.txt exists (6924702B), skipping
+  [health] simple_add.py check
+  [health] rc=1 FAIL
+[41/80] b1_c960_h10_w10_oc960_wic1_k3x3_g960_s1_pvalid (slug=c960_h10_oc960_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c960_h10_w10_oc960_wic1_k3x3_g960_s1_pvalid
+  [capture gem=1] slug=c960_h10_oc960_s1pvalid timeout=120s
+  [capture gem=1] OK dt=1.3s size=13686B
+  [capture gem=2] slug=c960_h10_oc960_s1pvalid timeout=120s
+  [capture gem=2] OK dt=1.4s size=525864B
+[42/80] b1_c1280_h10_w10_oc24_wic1280_k1x1_g1_s1_pvalid (slug=c1280_h10_oc24_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c1280_h10_w10_oc24_wic1280_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c1280_h10_oc24_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.7s size=13689B
+  [capture gem=2] slug=c1280_h10_oc24_s1pvalid timeout=120s
+  [capture gem=2] OK dt=1.1s size=1308854B
+[43/80] b1_c1280_h10_w10_oc546_wic1280_k1x1_g1_s1_pvalid (slug=c1280_h10_oc546_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c1280_h10_w10_oc546_wic1280_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c1280_h10_oc546_s1pvalid timeout=120s
+  [capture gem=1] OK dt=2.6s size=13575B
+  [capture gem=2] slug=c1280_h10_oc546_s1pvalid timeout=120s
+  [capture gem=2] OK dt=10.8s size=24705464B
+[44/80] b1_c256_h10_w10_oc512_wic256_k3x3_g1_s1_pvalid (slug=c256_h10_oc512_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c256_h10_w10_oc512_wic256_k3x3_g1_s1_pvalid
+  [capture gem=1] slug=c256_h10_oc512_s1pvalid timeout=120s
+  [capture gem=1] OK dt=2.0s size=13689B
+  [capture gem=2] slug=c256_h10_oc512_s1pvalid timeout=120s
+  [capture gem=2] OK dt=15.9s size=41559479B
+[45/80] b1_c128_h5_w5_oc256_wic128_k3x3_g1_s1_pvalid (slug=c128_h5_oc256_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c128_h5_w5_oc256_wic128_k3x3_g1_s1_pvalid
+  [capture gem=1] slug=c128_h5_oc256_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.8s size=13689B
+  [capture gem=2] slug=c128_h5_oc256_s1pvalid timeout=120s
+  [capture gem=2] OK dt=4.1s size=10552310B
+[46/80] b1_c256_h3_w3_oc546_wic256_k1x1_g1_s1_pvalid (slug=c256_h3_oc546_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c256_h3_w3_oc546_wic256_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c256_h3_oc546_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.7s size=13575B
+  [capture gem=2] slug=c256_h3_oc546_s1pvalid timeout=120s
+  [capture gem=2] OK dt=2.3s size=5090494B
+[47/80] b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid (slug=c256_h3_oc128_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c256_h3_oc128_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.7s size=13689B
+  [capture gem=2] slug=c256_h3_oc128_s1pvalid timeout=120s
+  [capture gem=2] OK dt=1.1s size=1343078B
+[48/80] b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid (slug=c128_h3_oc256_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid
+  [capture gem=1] slug=c128_h3_oc256_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.7s size=13689B
+  [capture gem=2] slug=c128_h3_oc256_s1pvalid timeout=120s
+  [capture gem=2] OK dt=4.2s size=10550357B
+[49/80] b1_c256_h2_w2_oc546_wic256_k1x1_g1_s1_pvalid (slug=c256_h2_oc546_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c256_h2_w2_oc546_wic256_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c256_h2_oc546_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.7s size=13575B
+  [capture gem=2] slug=c256_h2_oc546_s1pvalid timeout=120s
+  [capture gem=2] OK dt=2.3s size=5080217B
+[50/80] b1_c128_h1_w1_oc24_wic128_k1x1_g1_s1_pvalid (slug=c128_h1_oc24_s1pvalid)
+  [capture gem=1] slug=c128_h1_oc24_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.6s size=4946B
+  [capture gem=2] slug=c128_h1_oc24_s1pvalid timeout=120s
+  [capture gem=2] OK dt=0.7s size=162065B
+  [health] simple_add.py check
+  [health] rc=0 PASS
+[51/80] b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid (slug=c16_h80_oc128_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid
+  [capture gem=1] slug=c16_h80_oc128_s1pvalid timeout=120s
+  [capture gem=1] OK dt=2.5s size=13689B
+  [capture gem=2] slug=c16_h80_oc128_s1pvalid timeout=120s
+  [capture gem=2] OK dt=2.7s size=894658B
+[52/80] b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid (slug=c16_h80_oc128_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid
+  [capture gem=1] dump_gem1.txt exists (13689B), skipping
+  [capture gem=2] dump_gem2.txt exists (894658B), skipping
+[53/80] b1_c40_h40_w40_oc160_wic40_k3x3_g1_s1_pvalid (slug=c40_h40_oc160_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c40_h40_w40_oc160_wic40_k3x3_g1_s1_pvalid
+  [capture gem=1] slug=c40_h40_oc160_s1pvalid timeout=120s
+  [capture gem=1] OK dt=2.0s size=13545B
+  [capture gem=2] slug=c40_h40_oc160_s1pvalid timeout=120s
+  [capture gem=2] OK dt=2.9s size=2263569B
+[54/80] b1_c320_h40_w40_oc320_wic1_k3x3_g320_s1_pvalid (slug=c320_h40_oc320_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c320_h40_w40_oc320_wic1_k3x3_g320_s1_pvalid
+  [capture gem=1] slug=c320_h40_oc320_s1pvalid timeout=120s
+  [capture gem=1] OK dt=4.1s size=22339B
+  [capture gem=2] slug=c320_h40_oc320_s1pvalid timeout=120s
+  [capture gem=2] OK dt=4.3s size=479706B
+[55/80] b1_c320_h20_w20_oc72_wic320_k1x1_g1_s1_pvalid (slug=c320_h20_oc72_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c320_h20_w20_oc72_wic320_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c320_h20_oc72_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.9s size=13575B
+  [capture gem=2] slug=c320_h20_oc72_s1pvalid timeout=120s
+  [capture gem=2] OK dt=1.2s size=1038178B
+[56/80] b1_c72_h20_w20_oc576_wic72_k1x1_g1_s1_pvalid (slug=c72_h20_oc576_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c72_h20_w20_oc576_wic72_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c72_h20_oc576_s1pvalid timeout=120s
+  [capture gem=1] OK dt=1.2s size=13575B
+  [capture gem=2] slug=c72_h20_oc576_s1pvalid timeout=120s
+  [capture gem=2] OK dt=1.6s size=1663679B
+[57/80] b1_c576_h20_w20_oc576_wic1_k3x3_g576_s1_pvalid (slug=c576_h20_oc576_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c576_h20_w20_oc576_wic1_k3x3_g576_s1_pvalid
+  [capture gem=1] slug=c576_h20_oc576_s1pvalid timeout=120s
+  [capture gem=1] OK dt=2.0s size=14650B
+  [capture gem=2] slug=c576_h20_oc576_s1pvalid timeout=120s
+  [capture gem=2] OK dt=2.2s size=417089B
+[58/80] b1_c576_h20_w20_oc72_wic576_k1x1_g1_s1_pvalid (slug=c576_h20_oc72_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c576_h20_w20_oc72_wic576_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c576_h20_oc72_s1pvalid timeout=120s
+  [capture gem=1] OK dt=1.3s size=14650B
+  [capture gem=2] slug=c576_h20_oc72_s1pvalid timeout=120s
+  [capture gem=2] OK dt=1.9s size=1701105B
+[59/80] b1_c72_h20_w20_oc288_wic72_k3x3_g1_s1_pvalid (slug=c72_h20_oc288_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c72_h20_w20_oc288_wic72_k3x3_g1_s1_pvalid
+  [capture gem=1] slug=c72_h20_oc288_s1pvalid timeout=120s
+  [capture gem=1] OK dt=1.6s size=13545B
+  [capture gem=2] slug=c72_h20_oc288_s1pvalid timeout=120s
+  [capture gem=2] OK dt=3.8s size=6751616B
+[60/80] b1_c288_h20_w20_oc72_wic288_k1x1_g1_s1_pvalid (slug=c288_h20_oc72_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c288_h20_w20_oc72_wic288_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c288_h20_oc72_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.9s size=13545B
+  [capture gem=2] slug=c288_h20_oc72_s1pvalid timeout=120s
+  [capture gem=2] OK dt=1.2s size=998162B
+  [health] simple_add.py check
+  [health] rc=1 FAIL
+[61/80] b1_c576_h20_w20_oc576_wic1_k5x5_g576_s1_pvalid (slug=c576_h20_oc576_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c576_h20_w20_oc576_wic1_k5x5_g576_s1_pvalid
+  [capture gem=1] dump_gem1.txt exists (14650B), skipping
+  [capture gem=2] dump_gem2.txt exists (417089B), skipping
+[62/80] b1_c576_h20_w20_oc96_wic576_k1x1_g1_s1_pvalid (slug=c576_h20_oc96_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c576_h20_w20_oc96_wic576_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c576_h20_oc96_s1pvalid timeout=120s
+  [capture gem=1] OK dt=1.4s size=20142B
+  [capture gem=2] slug=c576_h20_oc96_s1pvalid timeout=120s
+  [capture gem=2] OK dt=2.4s size=2321444B
+[63/80] b1_c768_h20_w20_oc768_wic1_k5x5_g768_s1_pvalid (slug=c768_h20_oc768_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c768_h20_w20_oc768_wic1_k5x5_g768_s1_pvalid
+  [capture gem=1] slug=c768_h20_oc768_s1pvalid timeout=120s
+  [capture gem=1] OK dt=2.8s size=16855B
+  [capture gem=2] slug=c768_h20_oc768_s1pvalid timeout=120s
+  [capture gem=2] OK dt=3.1s size=939563B
+[64/80] b1_c768_h20_w20_oc96_wic768_k1x1_g1_s1_pvalid (slug=c768_h20_oc96_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c768_h20_w20_oc96_wic768_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c768_h20_oc96_s1pvalid timeout=120s
+  [capture gem=1] OK dt=1.6s size=26769B
+  [capture gem=2] slug=c768_h20_oc96_s1pvalid timeout=120s
+  [capture gem=2] OK dt=2.6s size=3067222B
+[65/80] b1_c768_h20_w20_oc768_wic1_k3x3_g768_s1_pvalid (slug=c768_h20_oc768_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c768_h20_w20_oc768_wic1_k3x3_g768_s1_pvalid
+  [capture gem=1] dump_gem1.txt exists (16855B), skipping
+  [capture gem=2] dump_gem2.txt exists (939563B), skipping
+[66/80] b1_c768_h10_w10_oc120_wic768_k1x1_g1_s1_pvalid (slug=c768_h10_oc120_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c768_h10_w10_oc120_wic768_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c768_h10_oc120_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.9s size=13607B
+  [capture gem=2] slug=c768_h10_oc120_s1pvalid timeout=120s
+  [capture gem=2] OK dt=2.2s size=3457294B
+[67/80] b1_c960_h10_w10_oc120_wic960_k1x1_g1_s1_pvalid (slug=c960_h10_oc120_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c960_h10_w10_oc120_wic960_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c960_h10_oc120_s1pvalid timeout=120s
+  [capture gem=1] OK dt=1.1s size=13545B
+  [capture gem=2] slug=c960_h10_oc120_s1pvalid timeout=120s
+  [capture gem=2] OK dt=2.3s size=4323825B
+[68/80] b1_c480_h10_w10_oc480_wic1_k5x5_g480_s1_pvalid (slug=c480_h10_oc480_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c480_h10_w10_oc480_wic1_k5x5_g480_s1_pvalid
+  [capture gem=1] slug=c480_h10_oc480_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.8s size=13574B
+  [capture gem=2] slug=c480_h10_oc480_s1pvalid timeout=120s
+  [capture gem=2] OK dt=0.9s size=678004B
+[69/80] b1_c480_h10_w10_oc120_wic480_k1x1_g1_s1_pvalid (slug=c480_h10_oc120_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c480_h10_w10_oc120_wic480_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c480_h10_oc120_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.8s size=13618B
+  [capture gem=2] slug=c480_h10_oc120_s1pvalid timeout=120s
+  [capture gem=2] OK dt=1.6s size=2231643B
+[70/80] b1_c960_h10_w10_oc960_wic1_k5x5_g960_s1_pvalid (slug=c960_h10_oc960_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c960_h10_w10_oc960_wic1_k5x5_g960_s1_pvalid
+  [capture gem=1] dump_gem1.txt exists (13686B), skipping
+  [capture gem=2] dump_gem2.txt exists (525864B), skipping
+  [health] simple_add.py check
+  [health] rc=0 PASS
+[71/80] b1_c256_h10_w10_oc256_wic1_k3x3_g256_s1_pvalid (slug=c256_h10_oc256_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c256_h10_w10_oc256_wic1_k3x3_g256_s1_pvalid
+  [capture gem=1] slug=c256_h10_oc256_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.7s size=13618B
+  [capture gem=2] slug=c256_h10_oc256_s1pvalid timeout=120s
+  [capture gem=2] OK dt=0.8s size=288903B
+[72/80] b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid (slug=c128_h3_oc256_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid
+  [capture gem=1] dump_gem1.txt exists (13689B), skipping
+  [capture gem=2] dump_gem2.txt exists (10550357B), skipping
+[73/80] b1_c128_h3_w3_oc128_wic1_k3x3_g128_s1_pvalid (slug=c128_h3_oc128_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c128_h3_w3_oc128_wic1_k3x3_g128_s1_pvalid
+  [capture gem=1] slug=c128_h3_oc128_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.6s size=4760B
+  [capture gem=2] slug=c128_h3_oc128_s1pvalid timeout=120s
+  [capture gem=2] OK dt=0.6s size=81623B
+[74/80] b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid (slug=c128_h2_oc256_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c128_h2_oc256_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.6s size=13607B
+  [capture gem=2] slug=c128_h2_oc256_s1pvalid timeout=120s
+  [capture gem=2] OK dt=1.1s size=1345821B
+[75/80] b1_c96_h20_w20_oc96_wic1_k3x3_g96_s1_pvalid (slug=c96_h20_oc96_s1pvalid)
+  [capture gem=1] slug=c96_h20_oc96_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.7s size=13545B
+  [capture gem=2] slug=c96_h20_oc96_s1pvalid timeout=120s
+  [capture gem=2] OK dt=0.8s size=246195B
+[76/80] b1_c384_h10_w10_oc384_wic1_k3x3_g384_s1_pvalid (slug=c384_h10_oc384_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c384_h10_w10_oc384_wic1_k3x3_g384_s1_pvalid
+  [capture gem=1] slug=c384_h10_oc384_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.7s size=13545B
+  [capture gem=2] slug=c384_h10_oc384_s1pvalid timeout=120s
+  [capture gem=2] OK dt=0.8s size=330265B
+[77/80] b1_c512_h5_w5_oc512_wic1_k3x3_g512_s1_pvalid (slug=c512_h5_oc512_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c512_h5_w5_oc512_wic1_k3x3_g512_s1_pvalid
+  [capture gem=1] slug=c512_h5_oc512_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.7s size=13545B
+  [capture gem=2] slug=c512_h5_oc512_s1pvalid timeout=120s
+  [capture gem=2] OK dt=0.8s size=347926B
+[78/80] b1_c256_h3_w3_oc256_wic1_k3x3_g256_s1_pvalid (slug=c256_h3_oc256_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c256_h3_w3_oc256_wic1_k3x3_g256_s1_pvalid
+  [capture gem=1] slug=c256_h3_oc256_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.6s size=4760B
+  [capture gem=2] slug=c256_h3_oc256_s1pvalid timeout=120s
+  [capture gem=2] OK dt=0.6s size=133607B
+[79/80] b1_c96_h20_w20_oc273_wic96_k1x1_g1_s1_pvalid (slug=c96_h20_oc273_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c96_h20_w20_oc273_wic96_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c96_h20_oc273_s1pvalid timeout=120s
+  [capture gem=1] OK dt=0.9s size=13792B
+  [capture gem=2] slug=c96_h20_oc273_s1pvalid timeout=120s
+  [capture gem=2] OK dt=1.3s size=1158589B
+[80/80] b1_c384_h10_w10_oc546_wic384_k1x1_g1_s1_pvalid (slug=c384_h10_oc546_s1pvalid)
+  [build] python3 /home/orangepi/npu/ops_rknn/gen_conv2d_models.py --custom --batch 1... --name match_b1_c384_h10_w10_oc546_wic384_k1x1_g1_s1_pvalid
+  [capture gem=1] slug=c384_h10_oc546_s1pvalid timeout=120s
+  [capture gem=1] OK dt=1.2s size=13569B
+  [capture gem=2] slug=c384_h10_oc546_s1pvalid timeout=120s
+  [capture gem=2] OK dt=3.7s size=7584499B
+  [health] simple_add.py check
+  [health] rc=0 PASS
+
+Done: success=160 fail=0
