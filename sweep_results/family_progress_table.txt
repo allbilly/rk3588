@@ -1,0 +1,139 @@
+Distinct prefix slugs in dump: 117
+Sample slugs:
+  c1024_h1_oc1001
+  c1024_h1_oc1001_pw_by_k
+  c1024_h7_oc1024
+  c1280_h10_oc24
+  c1280_h10_oc24_s1pvalid
+  c1280_h10_oc546
+  c1280_h10_oc546_s1pvalid
+  c128_h1_none
+  c128_h1_oc24_s1pvalid
+  c128_h2_oc256_s1pvalid
+  c128_h3_oc128_s1pvalid
+  c128_h3_oc256_s1pvalid
+  c128_h56_dw_by_yk
+  c128_h56_oc128
+  c128_h5_oc256_s1pvalid
+  c144_h28
+  c144_h28_subcores2
+  c144_h28_subcores3
+  c144_h56_dw_by_yk
+  c144_h56_oc144_s1pvalid
+  c144_h75_oc144_s1pvalid
+  c16_h80_oc128_s1pvalid
+  c192_h28
+  c192_h28_oc96
+  c192_h28_subcores2
+  c192_h28_subcores3
+  c192_h38_oc192_s1pvalid
+  c192_h7_oc384_s1pvalid
+  c256_h10_oc256_s1pvalid
+  c256_h10_oc512_s1pvalid
+
+Total fenced: 80
+With any capture (GEM1 or GEM2): 80/80 (100%)
+With GEM2 body capture: 80/80 (100%)
+With NO capture at all: 0/80 (0%)
+
+====================================================================================================
+Family                                     #  GEM1  GEM2   %G1  Distinct capture slugs
+====================================================================================================
+depthwise 3x3 (k3_g=in_c)                 30    30    30  100%  c1024_h7_oc1024, c128_h3_oc128_s1pvalid, c128_h3_oc256_s1pvalid, c128_h56_dw_by_yk ...
+depthwise 5x5 (k5_g=in_c)                  4     4     4  100%  c480_h10_oc120_s1pvalid, c480_h10_oc480_s1pvalid, c576_h20_oc576_s1pvalid, c576_h20_oc72_s1pvalid ...
+depthwise 7x7 (k7_g=in_c)                  2     2     2  100%  c1024_h7_oc1024, cc_c1024_h7_oc1024
+pointwise 1x1 (k1_g1)                     36    36    36  100%  c1024_h1_oc1001, c1024_h1_oc1001_pw_by_k, c1024_h7_oc1024, c1280_h10_oc24 ...
+spatial 3x3 (k3_g1)                        7     7     7  100%  c128_h3_oc128_s1pvalid, c128_h3_oc256_s1pvalid, c128_h5_oc256_s1pvalid, c16_h80_oc128_s1pvalid ...
+spatial 5x5 (k5_g1)                        1     1     1  100%  c16_h80_oc128_s1pvalid
+====================================================================================================
+
+DETAILED — per shape (sorted by family)
+====================================================================================================
+Shape                                                          G1  G2   Capture slugs
+----------------------------------------------------------------------------------------------------
+--- depthwise 3x3 (k3_g=in_c) ---
+  b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024                        Y   Y    c1024_h7_oc1024
+  b1_c128_h3_w3_oc128_wic1_k3x3_g128_s1_pvalid                 Y   Y    c128_h3_oc128_s1pvalid, c128_h3_oc256_s1pvalid
+  b1_c128_h56_w56_oc128_wic1_k3x3_g128                         Y   Y    c128_h56_dw_by_yk, c128_h56_oc128, c128_h5_oc256_s1pvalid
+  b1_c144_h56_w56_oc144_wic1_k3x3_g144_s1_pvalid               Y   Y    c144_h56_dw_by_yk, c144_h56_oc144_s1pvalid
+  b1_c144_h75_w75_oc144_wic1_k3x3_g144_s1_pvalid               Y   Y    c144_h75_oc144_s1pvalid
+  b1_c192_h38_w38_oc192_wic1_k3x3_g192_s1_pvalid               Y   Y    c192_h38_oc192_s1pvalid
+  b1_c256_h10_w10_oc256_wic1_k3x3_g256_s1_pvalid               Y   Y    c256_h10_oc256_s1pvalid, c256_h10_oc512_s1pvalid
+  b1_c256_h28_w28_oc256_wic1_k3x3_g256                         Y   Y    c256_h28_dw_by_yk, c256_h28_oc256, c256_h2_none, c256_h2_oc546_s1pvalid, c256_h2_oc64
+  b1_c256_h3_w3_oc256_wic1_k3x3_g256_s1_pvalid                 Y   Y    c256_h3_none, c256_h3_oc128_s1pvalid, c256_h3_oc256_s1pvalid, c256_h3_oc546_s1pvalid
+  b1_c320_h40_w40_oc320_wic1_k3x3_g320_s1_pvalid               Y   Y    c320_h40_oc320_s1pvalid
+  b1_c32_h112_w112_oc32_wic1_k3x3_g32                          Y   Y    c32_h112_oc32
+  b1_c32_h150_w150_oc32_wic1_k3x3_g32_s1_pvalid                Y   Y    c32_h150_dw_by_y, c32_h150_oc32_s1pvalid
+  b1_c384_h10_w10_oc384_wic1_k3x3_g384_s1_pvalid               Y   Y    c384_h10_oc384_s1pvalid, c384_h10_oc546_s1pvalid
+  b1_c384_h19_w19_oc384_wic1_k3x3_g384_s1_pvalid               Y   Y    c384_h19_oc384_s1pvalid, c384_h19_oc64_s1pvalid, c384_h19_oc96_s1pvalid
+  b1_c512_h14_w14_oc512_wic1_k3x3_g512                         Y   Y    c512_h14_dw_by_k, c512_h14_oc24, c512_h14_oc512
+  b1_c512_h5_w5_oc512_wic1_k3x3_g512_s1_pvalid                 Y   Y    c512_h5_oc512_s1pvalid
+  b1_c576_h19_w19_oc576_wic1_k3x3_g576_s1_pvalid               Y   Y    c576_h19, c576_h19_oc12_s1pvalid, c576_h19_oc273_s1pvalid, c576_h19_oc576_s1pvalid, c576_h19_oc96_s1pvalid
+  b1_c576_h20_w20_oc576_wic1_k3x3_g576_s1_pvalid               Y   Y    c576_h20_oc576_s1pvalid, c576_h20_oc72_s1pvalid, c576_h20_oc96_s1pvalid
+  b1_c64_h112_w112_oc64_wic1_k3x3_g64                          Y   Y    c64_h112_oc64
+  b1_c768_h20_w20_oc768_wic1_k3x3_g768_s1_pvalid               Y   Y    c768_h20_oc768_s1pvalid, c768_h20_oc96_s1pvalid
+  b1_c960_h10_w10_oc960_wic1_k3x3_g960_s1_pvalid               Y   Y    c960_h10_oc120_s1pvalid, c960_h10_oc960_s1pvalid
+  b1_c96_h112_w112_oc96_wic1_k3x3_g96_s1_pvalid                Y   Y    c96_h112_dw_by_yk, c96_h112_oc96_s1pvalid
+  b1_c96_h150_w150_oc96_wic1_k3x3_g96_s1_pvalid                Y   Y    c96_h150_dw_by_yk, c96_h150_oc96_s1pvalid
+  b1_c96_h20_w20_oc96_wic1_k3x3_g96_s1_pvalid                  Y   Y    c96_h20_oc273_s1pvalid, c96_h20_oc96_s1pvalid
+  conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024              Y   Y    c1024_h7_oc1024, cc_c1024_h7_oc1024
+  conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128               Y   Y    c128_h56_dw_by_yk, c128_h56_oc128, c128_h5_oc256_s1pvalid, cc_c128_h56_oc128
+  conv2d_cc_b1_c256_h28_w28_oc256_wic1_k3x3_g256               Y   Y    c256_h28_dw_by_yk, c256_h28_oc256, c256_h2_none, c256_h2_oc546_s1pvalid, c256_h2_oc64, cc_c256_h28_oc256
+  conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32                Y   Y    c32_h112_oc32, cc_c32_h112_oc32
+  conv2d_cc_b1_c512_h14_w14_oc512_wic1_k3x3_g512               Y   Y    c512_h14_dw_by_k, c512_h14_oc24, c512_h14_oc512, cc_c512_h14_oc512
+  conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64                Y   Y    c64_h112_oc64, cc_c64_h112_oc64
+--- depthwise 5x5 (k5_g=in_c) ---
+  b1_c480_h10_w10_oc480_wic1_k5x5_g480_s1_pvalid               Y   Y    c480_h10_oc120_s1pvalid, c480_h10_oc480_s1pvalid
+  b1_c576_h20_w20_oc576_wic1_k5x5_g576_s1_pvalid               Y   Y    c576_h20_oc576_s1pvalid, c576_h20_oc72_s1pvalid, c576_h20_oc96_s1pvalid
+  b1_c768_h20_w20_oc768_wic1_k5x5_g768_s1_pvalid               Y   Y    c768_h20_oc768_s1pvalid, c768_h20_oc96_s1pvalid
+  b1_c960_h10_w10_oc960_wic1_k5x5_g960_s1_pvalid               Y   Y    c960_h10_oc120_s1pvalid, c960_h10_oc960_s1pvalid
+--- depthwise 7x7 (k7_g=in_c) ---
+  b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024                        Y   Y    c1024_h7_oc1024
+  conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024              Y   Y    c1024_h7_oc1024, cc_c1024_h7_oc1024
+--- pointwise 1x1 (k1_g1) ---
+  b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1                        Y   Y    c1024_h1_oc1001, c1024_h1_oc1001_pw_by_k
+  b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1                        Y   Y    c1024_h7_oc1024
+  b1_c1280_h10_w10_oc24_wic1280_k1x1_g1                        Y   Y    c1280_h10_oc24, c1280_h10_oc24_s1pvalid, c1280_h10_oc546, c1280_h10_oc546_s1pvalid
+  b1_c1280_h10_w10_oc24_wic1280_k1x1_g1_s1_pvalid              Y   Y    c1280_h10_oc24, c1280_h10_oc24_s1pvalid, c1280_h10_oc546, c1280_h10_oc546_s1pvalid
+  b1_c1280_h10_w10_oc546_wic1280_k1x1_g1                       Y   Y    c1280_h10_oc24, c1280_h10_oc24_s1pvalid, c1280_h10_oc546, c1280_h10_oc546_s1pvalid
+  b1_c1280_h10_w10_oc546_wic1280_k1x1_g1_s1_pvalid             Y   Y    c1280_h10_oc24, c1280_h10_oc24_s1pvalid, c1280_h10_oc546, c1280_h10_oc546_s1pvalid
+  b1_c128_h1_w1_oc24_wic128_k1x1_g1_s1_pvalid                  Y   Y    c128_h1_none, c128_h1_oc24_s1pvalid
+  b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid                 Y   Y    c128_h2_oc256_s1pvalid
+  b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid                 Y   Y    c128_h3_oc128_s1pvalid, c128_h3_oc256_s1pvalid
+  b1_c256_h28_w28_oc256_wic256_k1x1_g1                         Y   Y    c256_h28_dw_by_yk, c256_h28_oc256, c256_h2_none, c256_h2_oc546_s1pvalid, c256_h2_oc64
+  b1_c256_h2_w2_oc546_wic256_k1x1_g1_s1_pvalid                 Y   Y    c256_h2_none, c256_h2_oc546_s1pvalid, c256_h2_oc64
+  b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid                 Y   Y    c256_h3_none, c256_h3_oc128_s1pvalid, c256_h3_oc256_s1pvalid, c256_h3_oc546_s1pvalid
+  b1_c256_h3_w3_oc546_wic256_k1x1_g1_s1_pvalid                 Y   Y    c256_h3_none, c256_h3_oc128_s1pvalid, c256_h3_oc256_s1pvalid, c256_h3_oc546_s1pvalid
+  b1_c288_h20_w20_oc72_wic288_k1x1_g1_s1_pvalid                Y   Y    c288_h20_oc72_s1pvalid
+  b1_c320_h20_w20_oc72_wic320_k1x1_g1_s1_pvalid                Y   Y    c320_h20_oc72_s1pvalid
+  b1_c384_h10_w10_oc546_wic384_k1x1_g1_s1_pvalid               Y   Y    c384_h10_oc384_s1pvalid, c384_h10_oc546_s1pvalid
+  b1_c384_h19_w19_oc64_wic384_k1x1_g1_s1_pvalid                Y   Y    c384_h19_oc384_s1pvalid, c384_h19_oc64_s1pvalid, c384_h19_oc96_s1pvalid
+  b1_c384_h19_w19_oc96_wic384_k1x1_g1_s1_pvalid                Y   Y    c384_h19_oc384_s1pvalid, c384_h19_oc64_s1pvalid, c384_h19_oc96_s1pvalid
+  b1_c480_h10_w10_oc120_wic480_k1x1_g1_s1_pvalid               Y   Y    c480_h10_oc120_s1pvalid, c480_h10_oc480_s1pvalid
+  b1_c480_h14_w14_oc16_wic480_k1x1_g1                          Y   Y    c480_h14_oc16
+  b1_c512_h14_w14_oc24_wic512_k1x1_g1                          Y   Y    c512_h14_dw_by_k, c512_h14_oc24, c512_h14_oc512
+  b1_c576_h19_w19_oc12_wic576_k1x1_g1_s1_pvalid                Y   Y    c576_h19, c576_h19_oc12_s1pvalid, c576_h19_oc273_s1pvalid, c576_h19_oc576_s1pvalid, c576_h19_oc96_s1pvalid
+  b1_c576_h19_w19_oc273_wic576_k1x1_g1_s1_pvalid               Y   Y    c576_h19, c576_h19_oc12_s1pvalid, c576_h19_oc273_s1pvalid, c576_h19_oc576_s1pvalid, c576_h19_oc96_s1pvalid
+  b1_c576_h19_w19_oc96_wic576_k1x1_g1_s1_pvalid                Y   Y    c576_h19, c576_h19_oc12_s1pvalid, c576_h19_oc273_s1pvalid, c576_h19_oc576_s1pvalid, c576_h19_oc96_s1pvalid
+  b1_c576_h20_w20_oc72_wic576_k1x1_g1_s1_pvalid                Y   Y    c576_h20_oc576_s1pvalid, c576_h20_oc72_s1pvalid, c576_h20_oc96_s1pvalid
+  b1_c576_h20_w20_oc96_wic576_k1x1_g1_s1_pvalid                Y   Y    c576_h20_oc576_s1pvalid, c576_h20_oc72_s1pvalid, c576_h20_oc96_s1pvalid
+  b1_c72_h20_w20_oc576_wic72_k1x1_g1_s1_pvalid                 Y   Y    c72_h20_oc288_s1pvalid, c72_h20_oc576_s1pvalid
+  b1_c768_h10_w10_oc120_wic768_k1x1_g1_s1_pvalid               Y   Y    c768_h10_oc120_s1pvalid
+  b1_c768_h20_w20_oc96_wic768_k1x1_g1_s1_pvalid                Y   Y    c768_h20_oc768_s1pvalid, c768_h20_oc96_s1pvalid
+  b1_c832_h7_w7_oc48_wic832_k1x1_g1                            Y   Y    c832_h7_oc48, c832_h7_oc48_s1pvalid
+  b1_c832_h7_w7_oc48_wic832_k1x1_g1_s1_pvalid                  Y   Y    c832_h7_oc48, c832_h7_oc48_s1pvalid
+  b1_c960_h10_w10_oc120_wic960_k1x1_g1_s1_pvalid               Y   Y    c960_h10_oc120_s1pvalid, c960_h10_oc960_s1pvalid
+  b1_c96_h20_w20_oc273_wic96_k1x1_g1_s1_pvalid                 Y   Y    c96_h20_oc273_s1pvalid, c96_h20_oc96_s1pvalid
+  conv2d_cc_b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1              Y   Y    c1024_h1_oc1001, c1024_h1_oc1001_pw_by_k, cc_c1024_h1_oc1001
+  conv2d_cc_b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1              Y   Y    c1024_h7_oc1024, cc_c1024_h7_oc1024
+  conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1               Y   Y    c256_h28_dw_by_yk, c256_h28_oc256, c256_h2_none, c256_h2_oc546_s1pvalid, c256_h2_oc64, cc_c256_h28_oc256
+--- spatial 3x3 (k3_g1) ---
+  b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid                 Y   Y    c128_h3_oc128_s1pvalid, c128_h3_oc256_s1pvalid
+  b1_c128_h5_w5_oc256_wic128_k3x3_g1_s1_pvalid                 Y   Y    c128_h5_oc256_s1pvalid
+  b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid                 Y   Y    c16_h80_oc128_s1pvalid
+  b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid                 Y   Y    c192_h7_oc384_s1pvalid
+  b1_c256_h10_w10_oc512_wic256_k3x3_g1_s1_pvalid               Y   Y    c256_h10_oc256_s1pvalid, c256_h10_oc512_s1pvalid
+  b1_c40_h40_w40_oc160_wic40_k3x3_g1_s1_pvalid                 Y   Y    c40_h40_oc160_s1pvalid, c40_h40_oc320
+  b1_c72_h20_w20_oc288_wic72_k3x3_g1_s1_pvalid                 Y   Y    c72_h20_oc288_s1pvalid, c72_h20_oc576_s1pvalid
+--- spatial 5x5 (k5_g1) ---
+  b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid                 Y   Y    c16_h80_oc128_s1pvalid

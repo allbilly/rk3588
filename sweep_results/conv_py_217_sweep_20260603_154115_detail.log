@@ -1,0 +1,2 @@
+PASS     b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid :: exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid guarded=exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0293

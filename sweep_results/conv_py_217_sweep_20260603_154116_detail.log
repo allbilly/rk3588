@@ -1,0 +1,249 @@
+PASS     conv2d_1x6_1x1_4x4 :: shape=b1_c1_h4_w4_oc6_wic1_k1x1_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp32 PASS max_diff=0.0000
+PASS     conv2d_3x3_1x1_4x4 :: shape=b1_c3_h4_w4_oc3_wic3_k1x1_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp32 PASS max_diff=0.0000
+PASS     conv2d_4x2_1x1_4x4 :: shape=b1_c4_h4_w4_oc2_wic4_k1x1_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp32 PASS max_diff=0.0000
+PASS     conv2d_b1_c4_h9_w9_oc4_wic4_k1x1_g1 :: shape=conv2d_b1_c4_h9_w9_oc4_wic4_k1x1_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp32 PASS max_diff=0.0000
+PASS     conv2d_b1_c3_h52_w52_oc6_wic3_k1x1_g1 :: shape=conv2d_b1_c3_h52_w52_oc6_wic3_k1x1_g1 split=BY_Y family=y_tile tasks=3 submit_tasks=3 regs=47;47;47 hw_out=fp16 PASS max_diff=0.0037
+PASS     conv2d_b1_c96_h56_w56_oc24_wic96_k1x1_g1 :: shape=conv2d_b1_c96_h56_w56_oc24_wic96_k1x1_g1 local_tile_replay tiles=2 hw_out=fp16 PASS max_diff=0.0156
+PASS     conv2d_b1_c144_h56_w56_oc24_wic144_k1x1_g1 :: shape=conv2d_b1_c144_h56_w56_oc24_wic144_k1x1_g1 local_tile_replay tiles=3 hw_out=fp16 PASS max_diff=0.0263
+PASS     conv2d_b1_c144_h28_w28_oc32_wic144_k1x1_g1 :: shape=conv2d_b1_c144_h28_w28_oc32_wic144_k1x1_g1 local_tile_replay tiles=2 hw_out=fp16 PASS max_diff=0.0283
+PASS     conv2d_b1_c192_h28_w28_oc32_wic192_k1x1_g1 :: shape=conv2d_b1_c192_h28_w28_oc32_wic192_k1x1_g1 local_tile_replay tiles=2 hw_out=fp16 PASS max_diff=0.0286
+PASS     conv2d_b1_c192_h28_w28_oc16_wic192_k1x1_g1 :: shape=conv2d_b1_c192_h28_w28_oc16_wic192_k1x1_g1 local_tile_replay tiles=2 hw_out=fp16 PASS max_diff=0.0286
+PASS     conv2d_b1_c256_h28_w28_oc32_wic256_k1x1_g1 :: shape=conv2d_b1_c256_h28_w28_oc32_wic256_k1x1_g1 chained_y tiles=2 hw_out=fp16 PASS max_diff=0.0307
+PASS     conv2d_16x16_1x1_8x8 :: shape=b1_c16_h8_w8_oc16_wic16_k1x1_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp32 PASS max_diff=0.0000
+PASS     conv2d_b1_c16_h32_w32_oc16_wic16_k1x1_g1 :: shape=conv2d_b1_c16_h32_w32_oc16_wic16_k1x1_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0077
+PASS     conv2d_b1_c4_h9_w9_oc4_wic4_k3x3_g1 :: shape=conv2d_b1_c4_h9_w9_oc4_wic4_k3x3_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0074
+PASS     conv2d_b1_c16_h18_w18_oc16_wic16_k3x3_g1 :: shape=conv2d_b1_c16_h18_w18_oc16_wic16_k3x3_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0154
+PASS     conv2d_b2_c4_h9_w9_oc4_wic4_k3x3_g1 :: shape=conv2d_b2_c4_h9_w9_oc4_wic4_k3x3_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0076
+PASS     conv2d_b1_c1_h5_w7_oc6_wic1_k3x3_g1 :: shape=conv2d_b1_c1_h5_w7_oc6_wic1_k3x3_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0030
+PASS     conv2d_b1_c3_h11_w28_oc3_wic1_k3x3_g3 :: shape=conv2d_b1_c3_h11_w28_oc3_wic1_k3x3_g3 grouped_serial submits=3 PASS max_diff=0.0038
+PASS     conv2d_3x6_1x3_5x5 :: shape=b1_c3_h5_w5_oc6_wic3_k1x3_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0039
+PASS     conv2d_b1_c3_h5_w7_oc6_wic1_k3x3_g3 :: shape=conv2d_b1_c3_h5_w7_oc6_wic1_k3x3_g3 grouped_serial submits=3 PASS max_diff=0.0023
+PASS     conv2d_b1_c3_h5_w7_oc6_wic3_k2x1_g1 :: shape=conv2d_b1_c3_h5_w7_oc6_wic3_k2x1_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0036
+PASS     conv2d_b1_c3_h5_w7_oc6_wic3_k2x3_g1 :: shape=conv2d_b1_c3_h5_w7_oc6_wic3_k2x3_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0038
+PASS     conv2d_b1_c3_h5_w7_oc6_wic3_k2x5_g1 :: shape=conv2d_b1_c3_h5_w7_oc6_wic3_k2x5_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0053
+PASS     conv2d_b1_c3_h5_w7_oc6_wic3_k3x1_g1 :: shape=conv2d_b1_c3_h5_w7_oc6_wic3_k3x1_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0025
+PASS     conv2d_b1_c3_h5_w7_oc6_wic3_k3x3_g1 :: shape=conv2d_b1_c3_h5_w7_oc6_wic3_k3x3_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0057
+PASS     conv2d_b1_c3_h5_w7_oc6_wic3_k3x5_g1 :: shape=conv2d_b1_c3_h5_w7_oc6_wic3_k3x5_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0045
+PASS     conv2d_1x6_2x1_5x7 :: shape=b1_c1_h5_w7_oc6_wic1_k2x1_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0009
+PASS     conv2d_1x6_2x3_5x7 :: shape=b1_c1_h5_w7_oc6_wic1_k2x3_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0038
+PASS     conv2d_1x6_3x1_5x7_b :: shape=b1_c1_h5_w7_oc6_wic1_k3x1_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0017
+PASS     conv2d_1x6_3x5_5x7 :: shape=b1_c1_h5_w7_oc6_wic1_k3x5_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0036
+PASS     conv2d_b1_c4_h1_w1_oc2_wic2_k1x1_g2 :: shape=conv2d_b1_c4_h1_w1_oc2_wic2_k1x1_g2 grouped_serial submits=2 PASS max_diff=0.0004
+PASS     conv2d_4x4_1x1_1x1_g2 :: shape=b1_c4_h1_w1_oc4_wic2_k1x1_g2 grouped_serial submits=2 PASS max_diff=0.0006
+PASS     conv2d_b1_c32_h32_w32_oc32_wic1_k1x1_g32 :: shape=conv2d_b1_c32_h32_w32_oc32_wic1_k1x1_g32 grouped_serial submits=32 PASS max_diff=0.0010
+PASS     conv2d_b1_c15_h5_w5_oc35_wic3_k3x3_g5 :: shape=conv2d_b1_c15_h5_w5_oc35_wic3_k3x3_g5 grouped_serial submits=5 PASS max_diff=0.0072
+PASS     conv2d_b2_c3_h11_w28_oc3_wic1_k3x3_g3 :: shape=conv2d_b2_c3_h11_w28_oc3_wic1_k3x3_g3 grouped_serial submits=6 PASS max_diff=0.0038
+PASS     conv2d_b4_c15_h5_w5_oc35_wic3_k3x3_g5 :: shape=conv2d_b4_c15_h5_w5_oc35_wic3_k3x3_g5 grouped_serial submits=20 PASS max_diff=0.0075
+PASS     conv2d_b1_c4_h5_w5_oc4_wic2_k3x3_g2 :: shape=conv2d_b1_c4_h5_w5_oc4_wic2_k3x3_g2 grouped_serial submits=2 PASS max_diff=0.0032
+PASS     conv2d_b1_c4_h5_w5_oc8_wic2_k3x3_g2 :: shape=conv2d_b1_c4_h5_w5_oc8_wic2_k3x3_g2 grouped_serial submits=2 PASS max_diff=0.0066
+PASS     conv2d_b1_c4_h5_w5_oc12_wic2_k3x3_g2 :: shape=conv2d_b1_c4_h5_w5_oc12_wic2_k3x3_g2 grouped_serial submits=2 PASS max_diff=0.0066
+PASS     conv2d_b1_c6_h5_w5_oc6_wic2_k3x3_g3 :: shape=conv2d_b1_c6_h5_w5_oc6_wic2_k3x3_g3 grouped_serial submits=3 PASS max_diff=0.0038
+PASS     conv2d_b1_c6_h5_w5_oc12_wic2_k3x3_g3 :: shape=conv2d_b1_c6_h5_w5_oc12_wic2_k3x3_g3 grouped_serial submits=3 PASS max_diff=0.0039
+PASS     conv2d_b1_c6_h5_w5_oc18_wic2_k3x3_g3 :: shape=conv2d_b1_c6_h5_w5_oc18_wic2_k3x3_g3 grouped_serial submits=3 PASS max_diff=0.0039
+PASS     conv2d_b1_c15_h5_w5_oc20_wic3_k3x3_g5 :: shape=conv2d_b1_c15_h5_w5_oc20_wic3_k3x3_g5 grouped_serial submits=5 PASS max_diff=0.0055
+PASS     conv2d_b1_c15_h5_w5_oc25_wic3_k3x3_g5 :: shape=conv2d_b1_c15_h5_w5_oc25_wic3_k3x3_g5 grouped_serial submits=5 PASS max_diff=0.0043
+PASS     conv2d_b1_c15_h5_w5_oc30_wic3_k3x3_g5 :: shape=conv2d_b1_c15_h5_w5_oc30_wic3_k3x3_g5 grouped_serial submits=5 PASS max_diff=0.0066
+PASS     conv2d_b1_c15_h5_w5_oc40_wic3_k3x3_g5 :: shape=conv2d_b1_c15_h5_w5_oc40_wic3_k3x3_g5 grouped_serial submits=5 PASS max_diff=0.0072
+PASS     conv2d_2x2_1x1_4x4 :: shape=b1_c2_h4_w4_oc2_wic2_k1x1_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp32 PASS max_diff=0.0000
+PASS     conv2d_8x8_1x1_5x5 :: shape=b1_c8_h5_w5_oc8_wic8_k1x1_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp32 PASS max_diff=0.0000
+PASS     conv2d_10x20_3x3_9x9 :: shape=b1_c10_h9_w9_oc20_wic10_k3x3_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0091
+PASS     conv2d_16x16_3x3_9x9 :: shape=b1_c16_h9_w9_oc16_wic16_k3x3_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0155
+PASS     conv2d_2x4_3x3_6x6 :: shape=b1_c2_h6_w6_oc4_wic2_k3x3_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0035
+PASS     conv2d_2x4_2x2_5x5 :: shape=b1_c2_h5_w5_oc4_wic2_k2x2_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0028
+PASS     conv2d_1x32_5x5_10x10 :: shape=b1_c1_h10_w10_oc32_wic1_k5x5_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0075
+PASS     conv2d_8x4_4x4_10x10 :: shape=b1_c8_h10_w10_oc4_wic8_k4x4_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0133
+PASS     conv2d_cc_b1_c3_h224_w224_oc32_wic3_k3x3_g1 :: shape=b1_c3_h224_w224_oc32_wic3_k3x3_g1 local_tile_replay tiles=5 hw_out=fp16 PASS max_diff=0.0151
+FENCED   conv2d_cc_b1_c32_h112_w112_oc32_wic1_k3x3_g32 :: error: depthwise BY_Y closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+PASS     conv2d_cc_b1_c32_h112_w112_oc64_wic32_k1x1_g1 :: shape=b1_c32_h112_w112_oc64_wic32_k1x1_g1 local_tile_replay tiles=8 hw_out=fp16 PASS max_diff=0.0146
+FENCED   conv2d_cc_b1_c64_h112_w112_oc64_wic1_k3x3_g64 :: error: depthwise BY_YK closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+PASS     conv2d_cc_b1_c64_h56_w56_oc128_wic64_k1x1_g1 :: shape=b1_c64_h56_w56_oc128_wic64_k1x1_g1 local_tile_replay tiles=8 hw_out=fp16 PASS max_diff=0.0156
+FENCED   conv2d_cc_b1_c128_h56_w56_oc128_wic1_k3x3_g128 :: error: depthwise BY_YK closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+PASS     conv2d_cc_b1_c128_h56_w56_oc128_wic128_k1x1_g1 :: shape=b1_c128_h56_w56_oc128_wic128_k1x1_g1 local_tile_replay tiles=12 hw_out=fp16 PASS max_diff=0.0312
+PASS     conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1 :: pointwise_exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c128_h28_w28_oc256_wic128_k1x1_g1 guarded=pointwise_exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0156
+FENCED   conv2d_cc_b1_c256_h28_w28_oc256_wic1_k3x3_g256 :: error: depthwise BY_YK closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   conv2d_cc_b1_c256_h28_w28_oc256_wic256_k1x1_g1 :: error: BY_YK is disabled before allocation; mixed Y/K setup and k_half semantics are unresolved
+PASS     conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1 :: pointwise_exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c256_h14_w14_oc512_wic256_k1x1_g1 guarded=pointwise_exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0311
+FENCED   conv2d_cc_b1_c512_h14_w14_oc512_wic1_k3x3_g512 :: error: depthwise BY_K closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+PASS     conv2d_cc_b1_c512_h14_w14_oc512_wic512_k1x1_g1 :: pointwise_exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c512_h14_w14_oc512_wic512_k1x1_g1 guarded=pointwise_exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0312
+PASS     conv2d_cc_b1_c512_h7_w7_oc1024_wic512_k1x1_g1 :: exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c512_h7_w7_oc1024_wic512_k1x1_g1 guarded=exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0312
+FENCED   conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024 :: error: depthwise BY_K closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   conv2d_cc_b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1 :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   conv2d_cc_b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024 :: error: depthwise BY_K closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   conv2d_cc_b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1 :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+PASS     conv1d_bs1_as_conv2d :: shape=b1_c1_h1_w11_oc6_wic1_k1x1_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp32 PASS max_diff=0.0000
+PASS     conv1d_bs8_as_conv2d :: shape=b8_c1_h1_w11_oc6_wic1_k1x1_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp32 PASS max_diff=0.0000
+PASS     conv1d_bs1_612_as_conv2d :: shape=b1_c1_h1_w11_oc6_wic1_k1x2_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0018
+PASS     conv1d_bs1_615_as_conv2d :: shape=b1_c1_h1_w11_oc6_wic1_k1x5_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0037
+PASS     conv1d_bs1_1311_631_as_conv2d :: shape=b1_c3_h1_w11_oc6_wic3_k1x1_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp32 PASS max_diff=0.0000
+PASS     conv1d_bs1_1311_632_as_conv2d :: shape=b1_c3_h1_w11_oc6_wic3_k1x2_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0019
+PASS     conv1d_bs1_1311_635_as_conv2d :: shape=b1_c3_h1_w11_oc6_wic3_k1x5_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0037
+PASS     conv1d_bs1_1311_615_g3_as_conv2d :: shape=b1_c3_h1_w11_oc6_wic1_k1x5_g3 grouped_serial submits=3 PASS max_diff=0.0021
+PASS     conv1d_bs8_8111_611_as_conv2d :: shape=b8_c1_h1_w11_oc6_wic1_k1x1_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp32 PASS max_diff=0.0000
+PASS     conv1d_bs8_8111_612_a_as_conv2d :: shape=b8_c1_h1_w11_oc6_wic1_k1x2_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0016
+PASS     conv1d_bs8_8111_612_b_as_conv2d :: shape=b8_c1_h1_w11_oc6_wic1_k1x2_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0016
+PASS     conv1d_bs8_8111_615_as_conv2d :: shape=b8_c1_h1_w11_oc6_wic1_k1x5_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0031
+PASS     conv1d_bs8_8311_631_as_conv2d :: shape=b8_c3_h1_w11_oc6_wic3_k1x1_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp32 PASS max_diff=0.0000
+PASS     conv1d_bs8_8311_632_as_conv2d :: shape=b8_c3_h1_w11_oc6_wic3_k1x2_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0017
+PASS     conv1d_bs8_8311_635_a_as_conv2d :: shape=b8_c3_h1_w11_oc6_wic3_k1x5_g1 split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0039
+PASS     conv1d_bs8_8311_635_g3_as_conv2d :: shape=b8_c3_h1_w11_oc6_wic1_k1x5_g3 grouped_serial submits=24 PASS max_diff=0.0020
+PASS     1x3_54x54_k1 :: shape=b1_c3_h54_w54_oc6_wic3_k1x1_g1 split=BY_Y family=y_tile tasks=3 submit_tasks=3 regs=47;47;47 hw_out=fp16 PASS max_diff=0.0038
+PASS     1x3_56x56_k1 :: shape=b1_c3_h56_w56_oc6_wic3_k1x1_g1 split=BY_Y family=y_tile tasks=4 submit_tasks=4 regs=47;47;47;47 hw_out=fp16 PASS max_diff=0.0020
+PASS     1x3_58x58_k1 :: shape=b1_c3_h58_w58_oc6_wic3_k1x1_g1 split=BY_Y family=y_tile tasks=4 submit_tasks=4 regs=47;47;47;47 hw_out=fp16 PASS max_diff=0.0023
+PASS     1x3_60x60_k1 :: shape=b1_c3_h60_w60_oc6_wic3_k1x1_g1 split=BY_Y family=y_tile tasks=4 submit_tasks=4 regs=47;47;47;47 hw_out=fp16 PASS max_diff=0.0038
+PASS     1x3_62x62_k1 :: shape=b1_c3_h62_w62_oc6_wic3_k1x1_g1 split=BY_Y family=y_tile tasks=4 submit_tasks=4 regs=47;47;47;47 hw_out=fp16 PASS max_diff=0.0020
+PASS     1x3_64x64_k1 :: shape=b1_c3_h64_w64_oc6_wic3_k1x1_g1 split=BY_Y family=y_tile tasks=5 submit_tasks=5 regs=47;47;47;47;47 hw_out=fp16 PASS max_diff=0.0020
+PASS     1x3_66x66_k1 :: shape=b1_c3_h66_w66_oc6_wic3_k1x1_g1 split=BY_Y family=y_tile tasks=5 submit_tasks=5 regs=47;47;47;47;47 hw_out=fp16 PASS max_diff=0.0020
+PASS     1x3_68x68_k1 :: shape=b1_c3_h68_w68_oc6_wic3_k1x1_g1 split=BY_Y family=y_tile tasks=5 submit_tasks=5 regs=47;47;47;47;47 hw_out=fp16 PASS max_diff=0.0020
+PASS     1x3_70x70_k1 :: shape=b1_c3_h70_w70_oc6_wic3_k1x1_g1 split=BY_Y family=y_tile tasks=5 submit_tasks=5 regs=47;47;47;47;47 hw_out=fp16 PASS max_diff=0.0037
+PASS     1x3_72x72_k1 :: shape=b1_c3_h72_w72_oc6_wic3_k1x1_g1 split=BY_Y family=y_tile tasks=6 submit_tasks=6 regs=47;47;47;47;47;47 hw_out=fp16 PASS max_diff=0.0031
+PASS     b1_c256_h14_w14_oc512_wic256_k1x1_g1 :: pointwise_exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c256_h14_w14_oc512_wic256_k1x1_g1 guarded=pointwise_exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0311
+PASS     b1_c384_h14_w14_oc96_wic384_k1x1_g1 :: pointwise_exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c384_h14_w14_oc96_wic384_k1x1_g1 guarded=pointwise_exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0312
+PASS     b1_c480_h14_w14_oc96_wic480_k1x1_g1 :: pointwise_exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c480_h14_w14_oc96_wic480_k1x1_g1 guarded=pointwise_exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0312
+FENCED   b1_c480_h14_w14_oc16_wic480_k1x1_g1 :: error: pointwise-wide NONE is fenced pending RKNN 108-row closure; no allocation or submit attempted
+PASS     b1_c512_h14_w14_oc112_wic512_k1x1_g1 :: pointwise_exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c512_h14_w14_oc112_wic512_k1x1_g1 guarded=pointwise_exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0312
+FENCED   b1_c512_h14_w14_oc24_wic512_k1x1_g1 :: error: pointwise-wide NONE is fenced pending RKNN 108-row closure; no allocation or submit attempted
+PASS     b1_c512_h14_w14_oc32_wic512_k1x1_g1 :: pointwise_exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c512_h14_w14_oc32_wic512_k1x1_g1 guarded=pointwise_exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0312
+PASS     b1_c512_h14_w14_oc512_wic512_k1x1_g1 :: pointwise_exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c512_h14_w14_oc512_wic512_k1x1_g1 guarded=pointwise_exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0312
+PASS     b1_c512_h7_w7_oc1024_wic512_k1x1_g1 :: exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c512_h7_w7_oc1024_wic512_k1x1_g1 guarded=exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0312
+PASS     b1_c528_h14_w14_oc256_wic528_k1x1_g1 :: pointwise_exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c528_h14_w14_oc256_wic528_k1x1_g1 guarded=pointwise_exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0312
+PASS     b1_c528_h14_w14_oc160_wic528_k1x1_g1 :: pointwise_exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c528_h14_w14_oc160_wic528_k1x1_g1 guarded=pointwise_exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0311
+PASS     b1_c528_h14_w14_oc32_wic528_k1x1_g1 :: pointwise_exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c528_h14_w14_oc32_wic528_k1x1_g1 guarded=pointwise_exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0311
+PASS     b1_c528_h14_w14_oc128_wic528_k1x1_g1 :: pointwise_exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c528_h14_w14_oc128_wic528_k1x1_g1 guarded=pointwise_exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0311
+PASS     b1_c576_h14_w14_oc96_wic576_k1x1_g1 :: pointwise_exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c576_h14_w14_oc96_wic576_k1x1_g1 guarded=pointwise_exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0312
+FENCED   b1_c832_h7_w7_oc48_wic832_k1x1_g1 :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c1024_h7_w7_oc1024_wic1024_k1x1_g1 :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c1024_h1_w1_oc1001_wic1024_k1x1_g1 :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c1280_h10_w10_oc24_wic1280_k1x1_g1 :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c1280_h10_w10_oc546_wic1280_k1x1_g1 :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c32_h112_w112_oc32_wic1_k3x3_g32 :: error: depthwise BY_Y closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c64_h112_w112_oc64_wic1_k3x3_g64 :: error: depthwise BY_YK closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c128_h56_w56_oc128_wic1_k3x3_g128 :: error: depthwise BY_YK closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c256_h28_w28_oc256_wic1_k3x3_g256 :: error: depthwise BY_YK closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c512_h14_w14_oc512_wic1_k3x3_g512 :: error: depthwise BY_K closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c1024_h7_w7_oc1024_wic1_k3x3_g1024 :: error: depthwise BY_K closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c1024_h7_w7_oc1024_wic1_k7x7_g1024 :: error: depthwise BY_K closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+PASS     b1_c32_h112_w112_oc16_wic32_k1x1_g1 :: shape=b1_c32_h112_w112_oc16_wic32_k1x1_g1 split=BY_Y family=y_tile tasks=4 submit_tasks=4 regs=47;47;47;47 hw_out=fp16 PASS max_diff=0.0146
+PASS     b1_c32_h112_w112_oc64_wic32_k1x1_g1 :: shape=b1_c32_h112_w112_oc64_wic32_k1x1_g1 local_tile_replay tiles=8 hw_out=fp16 PASS max_diff=0.0146
+PASS     b1_c64_h56_w56_oc128_wic64_k1x1_g1 :: shape=b1_c64_h56_w56_oc128_wic64_k1x1_g1 local_tile_replay tiles=8 hw_out=fp16 PASS max_diff=0.0156
+PASS     b1_c128_h56_w56_oc128_wic128_k1x1_g1 :: shape=b1_c128_h56_w56_oc128_wic128_k1x1_g1 local_tile_replay tiles=12 hw_out=fp16 PASS max_diff=0.0312
+PASS     b1_c128_h28_w28_oc256_wic128_k1x1_g1 :: pointwise_exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c128_h28_w28_oc256_wic128_k1x1_g1 guarded=pointwise_exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0156
+FENCED   b1_c256_h28_w28_oc256_wic256_k1x1_g1 :: error: BY_YK is disabled before allocation; mixed Y/K setup and k_half semantics are unresolved
+PASS     b1_c3_h224_w224_oc32_wic3_k3x3_g1 :: shape=b1_c3_h224_w224_oc32_wic3_k3x3_g1 local_tile_replay tiles=5 hw_out=fp16 PASS max_diff=0.0151
+FENCED   b1_c96_h112_w112_oc96_wic1_k3x3_g96_s1_pvalid :: error: depthwise BY_YK closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c144_h56_w56_oc144_wic1_k3x3_g144_s1_pvalid :: error: depthwise BY_YK closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+PASS     b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid :: exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c192_h28_w28_oc96_wic192_k1x1_g1_s1_pvalid guarded=exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0306
+PASS     b1_c32_h14_w14_oc64_wic32_k3x3_g1_s1_pvalid :: shape=b1_c32_h14_w14_oc64_wic32_k3x3_g1_s1_pvalid split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0304
+PASS     b1_c528_h14_w14_oc256_wic528_k1x1_g1_s1_pvalid :: pointwise_exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c528_h14_w14_oc256_wic528_k1x1_g1_s1_pvalid guarded=pointwise_exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0312
+PASS     b1_c528_h14_w14_oc160_wic528_k1x1_g1_s1_pvalid :: pointwise_exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c528_h14_w14_oc160_wic528_k1x1_g1_s1_pvalid guarded=pointwise_exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0311
+PASS     b1_c160_h14_w14_oc320_wic160_k3x3_g1_s1_pvalid :: exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c160_h14_w14_oc320_wic160_k3x3_g1_s1_pvalid guarded=exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0624
+PASS     b1_c528_h14_w14_oc32_wic528_k1x1_g1_s1_pvalid :: pointwise_exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c528_h14_w14_oc32_wic528_k1x1_g1_s1_pvalid guarded=pointwise_exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0311
+PASS     b1_c32_h14_w14_oc128_wic32_k3x3_g1_s1_pvalid :: shape=b1_c32_h14_w14_oc128_wic32_k3x3_g1_s1_pvalid split=NONE family=setup tasks=1 submit_tasks=1 regs=108 hw_out=fp16 PASS max_diff=0.0304
+PASS     b1_c528_h14_w14_oc128_wic528_k1x1_g1_s1_pvalid :: pointwise_exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c528_h14_w14_oc128_wic528_k1x1_g1_s1_pvalid guarded=pointwise_exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0311
+PASS     b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid :: exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c160_h7_w7_oc320_wic160_k3x3_g1_s1_pvalid guarded=exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0621
+PASS     b1_c32_h7_w7_oc128_wic32_k3x3_g1_s1_pvalid :: shape=b1_c32_h7_w7_oc128_wic32_k3x3_g1_s1_pvalid split=NONE family=setup tasks=1 submit_tasks=1 regs=47 hw_out=fp16 PASS max_diff=0.0265
+FENCED   b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c832_h7_w7_oc48_wic832_k1x1_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c32_h150_w150_oc32_wic1_k3x3_g32_s1_pvalid :: error: depthwise BY_Y closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+PASS     b1_c32_h150_w150_oc16_wic32_k1x1_g1_s1_pvalid :: shape=b1_c32_h150_w150_oc16_wic32_k1x1_g1_s1_pvalid split=BY_Y family=y_tile tasks=5 submit_tasks=5 regs=47;47;47;47;47 hw_out=fp16 PASS max_diff=0.0156
+PASS     b1_c16_h150_w150_oc96_wic16_k1x1_g1_s1_pvalid :: shape=b1_c16_h150_w150_oc96_wic16_k1x1_g1_s1_pvalid local_tile_replay tiles=15 hw_out=fp16 PASS max_diff=0.0078
+FENCED   b1_c96_h150_w150_oc96_wic1_k3x3_g96_s1_pvalid :: error: depthwise BY_YK closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+PASS     b1_c96_h75_w75_oc24_wic96_k1x1_g1_s1_pvalid :: shape=b1_c96_h75_w75_oc24_wic96_k1x1_g1_s1_pvalid local_tile_replay tiles=4 hw_out=fp16 PASS max_diff=0.0156
+FENCED   b1_c144_h75_w75_oc144_wic1_k3x3_g144_s1_pvalid :: error: depthwise BY_YK closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+PASS     b1_c144_h75_w75_oc24_wic144_k1x1_g1_s1_pvalid :: shape=b1_c144_h75_w75_oc24_wic144_k1x1_g1_s1_pvalid local_tile_replay tiles=5 hw_out=fp16 PASS max_diff=0.0238
+PASS     b1_c144_h38_w38_oc32_wic144_k1x1_g1_s1_pvalid :: shape=b1_c144_h38_w38_oc32_wic144_k1x1_g1_s1_pvalid local_tile_replay tiles=2 hw_out=fp16 PASS max_diff=0.0156
+FENCED   b1_c192_h38_w38_oc192_wic1_k3x3_g192_s1_pvalid :: error: depthwise BY_YK closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+PASS     b1_c192_h38_w38_oc32_wic192_k1x1_g1_s1_pvalid :: shape=b1_c192_h38_w38_oc32_wic192_k1x1_g1_s1_pvalid local_tile_replay tiles=2 hw_out=fp16 PASS max_diff=0.0300
+FENCED   b1_c384_h19_w19_oc384_wic1_k3x3_g384_s1_pvalid :: error: depthwise BY_YK closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c384_h19_w19_oc64_wic384_k1x1_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c384_h19_w19_oc96_wic384_k1x1_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c576_h19_w19_oc576_wic1_k3x3_g576_s1_pvalid :: error: depthwise BY_YK closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c576_h19_w19_oc96_wic576_k1x1_g1_s1_pvalid :: error: BY_YK is disabled before allocation; mixed Y/K setup and k_half semantics are unresolved
+FENCED   b1_c576_h19_w19_oc12_wic576_k1x1_g1_s1_pvalid :: error: pointwise-wide BY_Y is fenced pending proven row closure; no allocation or submit attempted
+FENCED   b1_c576_h19_w19_oc273_wic576_k1x1_g1_s1_pvalid :: error: BY_YK is disabled before allocation; mixed Y/K setup and k_half semantics are unresolved
+FENCED   b1_c960_h10_w10_oc960_wic1_k3x3_g960_s1_pvalid :: error: depthwise BY_K closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c1280_h10_w10_oc24_wic1280_k1x1_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c1280_h10_w10_oc546_wic1280_k1x1_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c256_h10_w10_oc512_wic256_k3x3_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c128_h5_w5_oc256_wic128_k3x3_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+PASS     b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid :: pointwise_exact11_chain_compact_weight_submit tasks=11 submit_task_number=1 weight_bytes=12288 subcores=(0,1),(0,0),(0,0),(0,0),(0,0)
+shape=b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid guarded=pointwise_exact11_chain_compact_weight tasks=11 submit_tasks=1 PASS max_diff=0.0149
+FENCED   b1_c256_h3_w3_oc546_wic256_k1x1_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c256_h3_w3_oc128_wic256_k1x1_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c128_h3_w3_oc256_wic128_k3x3_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+PASS     b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid :: pointwise_setup108_compact_weight_submit tasks=1 amount=108 weight_bytes=12288 subcores=(0,1),(0,0),(0,0),(0,0),(0,0)
+shape=b1_c256_h2_w2_oc24_wic256_k1x1_g1_s1_pvalid guarded=pointwise_setup108_compact_weight tasks=1 PASS max_diff=0.0245
+FENCED   b1_c256_h2_w2_oc546_wic256_k1x1_g1_s1_pvalid :: error: shape is crash-fenced after c256_h2 setup108 generalization reboot; capture exact RKNN GEM1/GEM2 closure before submit
+PASS     b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid :: exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid guarded=exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0245
+FENCED   b1_c128_h1_w1_oc24_wic128_k1x1_g1_s1_pvalid :: error: pointwise-wide NONE is fenced pending RKNN 108-row closure; no allocation or submit attempted
+PASS     b1_c3_h320_w320_oc32_wic3_k3x3_g1_s1_pvalid :: shape=b1_c3_h320_w320_oc32_wic3_k3x3_g1_s1_pvalid local_tile_replay tiles=10 hw_out=fp16 PASS max_diff=0.0114
+PASS     b1_c32_h160_w160_oc8_wic32_k1x1_g1_s1_pvalid :: shape=b1_c32_h160_w160_oc8_wic32_k1x1_g1_s1_pvalid split=BY_Y family=y_tile tasks=5 submit_tasks=5 regs=47;47;47;47;47 hw_out=fp16 PASS max_diff=0.0131
+PASS     b1_c8_h160_w160_oc16_wic8_k3x3_g1_s1_pvalid :: shape=b1_c8_h160_w160_oc16_wic8_k3x3_g1_s1_pvalid local_tile_replay tiles=3 hw_out=fp16 PASS max_diff=0.0156
+PASS     b1_c16_h160_w160_oc128_wic16_k3x3_g1_s1_pvalid :: guarded_h160_setup3_submit tasks=3 amounts=108;108;17 spans=0x380;0x380;0xc0 pc_amounts=55;10;0 rows=53;49;16 offsets=0;112;224 subcores=(0,3),(0,0),(0,0),(0,0),(0,0)
+shape=b1_c16_h160_w160_oc128_wic16_k3x3_g1_s1_pvalid guarded=h160_setup3 tasks=3 amounts=108;108;17 subcores=(0,3),(0,0),(0,0),(0,0),(0,0) PASS max_diff=0.0310
+PASS     b1_c128_h80_w80_oc16_wic128_k1x1_g1_s1_pvalid :: shape=b1_c128_h80_w80_oc16_wic128_k1x1_g1_s1_pvalid local_tile_replay tiles=5 hw_out=fp16 PASS max_diff=0.0245
+PASS     b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid :: exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid guarded=exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0293
+PASS     b1_c64_h80_w80_oc16_wic64_k1x1_g1_s1_pvalid :: shape=b1_c64_h80_w80_oc16_wic64_k1x1_g1_s1_pvalid local_tile_replay tiles=3 hw_out=fp16 PASS max_diff=0.0156
+PASS     b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid :: exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid guarded=exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0293
+FENCED   b1_c16_h80_w80_oc128_wic16_k5x5_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+PASS     b1_c128_h40_w40_oc40_wic128_k1x1_g1_s1_pvalid :: shape=b1_c128_h40_w40_oc40_wic128_k1x1_g1_s1_pvalid local_tile_replay tiles=4 hw_out=fp16 PASS max_diff=0.0156
+FENCED   b1_c40_h40_w40_oc160_wic40_k3x3_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+PASS     b1_c160_h40_w40_oc40_wic160_k1x1_g1_s1_pvalid :: shape=b1_c160_h40_w40_oc40_wic160_k1x1_g1_s1_pvalid local_tile_replay tiles=4 hw_out=fp16 PASS max_diff=0.0253
+PASS     b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid :: pointwise_setup108_compact_weight_submit tasks=1 amount=108 weight_bytes=25600 subcores=(0,1),(0,0),(0,0),(0,0),(0,0)
+shape=b1_c40_h40_w40_oc320_wic40_k1x1_g1_s1_pvalid guarded=pointwise_setup108_compact_weight tasks=1 PASS max_diff=0.0155
+FENCED   b1_c320_h40_w40_oc320_wic1_k3x3_g320_s1_pvalid :: error: depthwise BY_YK closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c320_h20_w20_oc72_wic320_k1x1_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c72_h20_w20_oc576_wic72_k1x1_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c576_h20_w20_oc576_wic1_k3x3_g576_s1_pvalid :: error: depthwise BY_YK closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c576_h20_w20_oc72_wic576_k1x1_g1_s1_pvalid :: error: BY_YK is disabled before allocation; mixed Y/K setup and k_half semantics are unresolved
+FENCED   b1_c72_h20_w20_oc288_wic72_k3x3_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c288_h20_w20_oc72_wic288_k1x1_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c576_h20_w20_oc576_wic1_k5x5_g576_s1_pvalid :: error: depthwise BY_YK closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c576_h20_w20_oc96_wic576_k1x1_g1_s1_pvalid :: error: BY_YK is disabled before allocation; mixed Y/K setup and k_half semantics are unresolved
+FENCED   b1_c768_h20_w20_oc768_wic1_k5x5_g768_s1_pvalid :: error: depthwise BY_YK closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c768_h20_w20_oc96_wic768_k1x1_g1_s1_pvalid :: error: BY_YK is disabled before allocation; mixed Y/K setup and k_half semantics are unresolved
+FENCED   b1_c768_h20_w20_oc768_wic1_k3x3_g768_s1_pvalid :: error: depthwise BY_YK closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c768_h10_w10_oc120_wic768_k1x1_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c960_h10_w10_oc120_wic960_k1x1_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c480_h10_w10_oc480_wic1_k5x5_g480_s1_pvalid :: error: depthwise BY_K closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c480_h10_w10_oc120_wic480_k1x1_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c960_h10_w10_oc960_wic1_k5x5_g960_s1_pvalid :: error: depthwise BY_K closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c256_h10_w10_oc256_wic1_k3x3_g256_s1_pvalid :: error: depthwise BY_K closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c128_h3_w3_oc256_wic128_k1x1_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c128_h3_w3_oc128_wic1_k3x3_g128_s1_pvalid :: error: depthwise BY_K closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+PASS     b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid :: exact11_byk_submit tasks=11 submit_task_number=3 amounts=108;104;26;104;26;104;26;104;26;104;26 masks=0xd;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60;0xd;0x60 subcores=(0,1),(0,1),(0,1),(0,0),(0,0)
+shape=b1_c64_h1_w1_oc128_wic64_k1x1_g1_s1_pvalid guarded=exact11_byk tasks=11 submit_tasks=3 PASS max_diff=0.0078
+FENCED   b1_c96_h20_w20_oc96_wic1_k3x3_g96_s1_pvalid :: error: depthwise BY_YK closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c384_h10_w10_oc384_wic1_k3x3_g384_s1_pvalid :: error: depthwise BY_K closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c512_h5_w5_oc512_wic1_k3x3_g512_s1_pvalid :: error: depthwise BY_K closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+FENCED   b1_c256_h3_w3_oc256_wic1_k3x3_g256_s1_pvalid :: error: depthwise BY_K closure is unfenced without DEPTHWISE_BODY_SHAPES membership; no allocation or submit attempted
+PASS     b1_c96_h20_w20_oc12_wic96_k1x1_g1_s1_pvalid :: shape=b1_c96_h20_w20_oc12_wic96_k1x1_g1_s1_pvalid local_tile_replay tiles=1 hw_out=fp16 PASS max_diff=0.0156
+FENCED   b1_c96_h20_w20_oc273_wic96_k1x1_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted
+FENCED   b1_c384_h10_w10_oc546_wic384_k1x1_g1_s1_pvalid :: error: BY_K/k_tile is fenced pending RKNN 108/104/26-row closure; no allocation or submit attempted

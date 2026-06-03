@@ -541,7 +541,12 @@ TARGETS = {
     "c16_h80_oc64_promoted_via_exact11_byk": {
         "shape": "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid",
         "case": "b1_c16_h80_w80_oc64_wic16_k3x3_g1_s1_pvalid 1 16 80 80 64 3 3 1 c16_h80_oc64",
-        "note": "promoted via 11-task EXACT11 BY_K closure with per-shape overrides CBUF0=0x57, DATA_SIZE1=0x000F0010, CONV2_LOW=0x1a0. Un-fenced from KNOWN_BAD_SPATIAL_SETUP_SHAPES. Live regcmd captured at GEM 2 offset 0x5000 (98 qwords of setup body) confirms body field matches when overrides are applied. max_diff=0.0293 PASS. Sibling c16_h80_oc128 still FENCED because the hardcoded k_tile OC splits ((0,112),(112,112),(224,96)) are for oc=320, not oc=128; need parameterization of _exact11_task_regs k_tile splits. Sibling c16_h80_oc128_k5x5 still FENCED (also needs k5x5 body overrides).",
+        "note": "promoted via 11-task EXACT11 BY_K closure with per-shape overrides CBUF0=0x57, DATA_SIZE1=0x000F0010, CONV2_LOW=0x1a0. Un-fenced from KNOWN_BAD_SPATIAL_SETUP_SHAPES. Live regcmd captured at GEM 2 offset 0x5000 (98 qwords of setup body) confirms body field matches when overrides are applied. max_diff=0.0293 PASS. Sibling c16_h80_oc128_3x3 promoted (15:41 this session) by adding it to PREFIX_BY_K_SHAPES + CBUF0_OVERRIDES + DATA_SIZE1_OVERRIDES + CONV2_LOW_OVERRIDES with the same constants (KT_TILE_SPLITS already had the parameterization ((0, 48), (48, 48), (96, 32)) summing to 128). max_diff=0.0293 PASS. Sibling c16_h80_oc128_k5x5 still FENCED (needs k5x5 body overrides: weight per kernel changes from 288 to 800, CBUF0 and CONV2_LOW need fresh decode).",
+    },
+    "c16_h80_oc128_promoted_via_exact11_byk": {
+        "shape": "b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid",
+        "case": "b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid 1 16 80 80 128 3 3 1 c16_h80_oc128",
+        "note": "promoted via 11-task EXACT11 BY_K closure with per-shape overrides CBUF0=0x57, DATA_SIZE1=0x000F0010, CONV2_LOW=0x1a0 (identical to c16_h80_oc64; the dump at /home/orangepi/npu/ops_rknn/dump/prefix_c16_h80_oc128_s1pvalid_keep1_gem2/dump_gem2.txt confirms CBUF0_WEIGHT_BANK=5/DATA_BANK=7, DATAIN_CHANNEL=16, FEATURE_GRAINS=26, weight bytes per kernel=288). KT_TILE_SPLITS already had ((0, 48), (48, 48), (96, 32)) which sums to 128. WEIGHT_SIZE0 auto-scales per task (setup=0x9000, k_half=0x4800, k_tile=0x3600/0x3600/0x2400). max_diff=0.0293 PASS, pre/post simple_add PASS. 15:41 this session.",
     },
     "cc_c128_h28_pw_by_k_dump": {
         "shape": "conv2d_cc_b1_c128_h28_w28_oc256_wic128_k1x1_g1",

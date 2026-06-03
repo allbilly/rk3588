@@ -1,0 +1,4 @@
+timestamp=20260603_154115
+total=1 counts={'PASS': 1}
+pre_health_rc=-1 post_health_rc=-1
+PASS b1_c16_h80_w80_oc128_wic16_k3x3_g1_s1_pvalid
