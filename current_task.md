@@ -1,12 +1,12 @@
 # Current Task: Prefix-Replay Debug of All FENCED Shapes in `examples/conv.py`
 
-**Last updated:** 2026-06-03 17:30 (Asia/Shanghai)
+**Last updated:** 2026-06-03 18:00 (Asia/Shanghai)
 **Owner:** Codex session (continuing multi-model handoff; previous session was "it crashed" - see Session Continuity SS 10.2)
 **CWD:** `/home/orangepi/rk3588`
-**NPU health (verified 17:30):** `python3 examples/simple_add.py` returns `ret=0, handle=5` and `ADD NPU=[8 8 8 8 8 8 8 8] expected=[8 8 8 8 8 8 8 8] PASS`. Board has NOT been rebooted this session.
-**HEAD:** `4d16dcc` (per-family table refresh, 22 commits ahead of `origin/main`).
+**NPU health (verified 18:00):** `python3 examples/simple_add.py` returns `ret=0, handle=5` and `ADD NPU=[8 8 8 8 8 8 8 8] expected=[8 8 8 8 8 8 8 8] PASS`. Board has NOT been rebooted this session.
+**HEAD:** `dd8d652` (6 promotions this session, 25 commits ahead of `origin/main`).
 **Working tree:** CLEAN. The uncommitted c1280_h10_oc24 attempt at 17:20 (re-using c128 family body fields) produced max_diff=225 and was reverted via `git checkout examples/conv.py` at 17:30. The lesson: c128 family body fields do NOT transfer to c1280 family; c1280 needs a fresh body field decode. Untracked `??` files in `examples/` and `experimental/` are pre-existing scratch and intentionally untouched.
-**Latest full sweep (20260603_172056):** `total=217 counts={'PASS': 142, 'FENCED': 75, 'FAIL': 0, 'ERROR': 0, 'TIMEOUT': 0}`. Pre/post health rc was -1; NPU verified manually at 17:30 PASS.
+**Latest full sweep (20260603_175618):** `total=217 counts={'PASS': 145, 'FENCED': 72, 'FAIL': 0, 'ERROR': 0, 'TIMEOUT': 0}`. Pre/post health rc was -1; NPU verified manually at 17:30 PASS.
 **Per-family table file:** `sweep_results/family_progress_table_20260603_1730.txt` (192 lines; safe location, NOT /tmp).
 **Storage rule (always observed):** NEVER store important files in `/tmp`. Sweep outputs go to `/home/orangepi/rk3588/sweep_results/`. Captures go to `/home/orangepi/npu/ops_rknn/dump/`. The in-progress materializer is at `/home/orangepi/rk3588/conv_expt/in_progress/c576_h19_oc12_addition.py` (NOT `/tmp`).
 
@@ -15,7 +15,7 @@
 ## 0. TL;DR
 
 1. **Goal:** use **prefix replay** to debug and fix every FENCED shape in `examples/conv.py`. End state: **`PASS=217, FENCED=0, FAIL=0, ERROR=0, TIMEOUT=0`** in `timeout 200 python3 sweep_217.py --skip-health`, with pre/post `python3 examples/simple_add.py` both PASS. 75 fenced shapes must be promoted via prefix-replay methodology.
-2. **Current pass progress:** **`PASS=142 / 217` (65.4%)**, **`FENCED=75 / 217` (34.6%)**, **`FAIL=0, ERROR=0, TIMEOUT=0`**. Net new promotions since the user-stated 114/103 stuck baseline: **+28 PASS** (114->142). Net new promotions this session: **+3** (c256_h3_oc128_1x1, c128_h3_oc256_1x1, c128_h3_oc256_3x3). Distance to goal: **75 more promotions**.
+2. **Current pass progress:** **`PASS=145 / 217` (66.8%)**, **`FENCED=72 / 217` (33.2%)**, **`FAIL=0, ERROR=0, TIMEOUT=0`**. Net new promotions since the user-stated 114/103 stuck baseline: **+31 PASS** (114->145). Net new promotions this session: **+6** (c256_h3_oc128_1x1, c128_h3_oc256_1x1, c128_h3_oc256_3x3, c128_h2_oc256_1x1, c192_h7_oc384_3x3, c256_h10_oc512_3x3). Distance to goal: **72 more promotions**.
 3. **Capture coverage:** **100% (75/75 fenced shapes have BOTH GEM1 and GEM2 captures). YES, every fenced shape already has a capture.** Captures at `/home/orangepi/npu/ops_rknn/dump/prefix_<slug>_keep1_gem{1,2}/` (84 distinct `_keep1_gem2` directories; 117 distinct prefix slugs total). **The capture phase is COMPLETE and is no longer a blocker.** See SS 2 for the per-family capture table.
 4. **Biggest blocker:** **per-shape body-field constants for the 75 remaining fenced shapes**. The 9 promoted shapes each had a fresh body field decode from their GEM2 capture. The c16_h80 family (3x3 + 5x5) showed that when in_c is the same, body field constants can transfer across oc values; this session's c128_h3 family (1x1 + 3x3) showed the same for sibling (ic, in_h, oc) tuples. Other families (c1280, c1024, c832, c480, c384, c288, c72) require fresh per-family body field decoding because body field constants are (ic, in_h, kh)-dependent, not just (ic)-dependent. See SS 2.4 for fence reason breakdown.
 5. **Fence reason breakdown (75 total, classified by sweep_217.py error message):**
@@ -298,20 +298,21 @@ NPU is healthy (17:30 simple_add PASS), working tree is CLEAN, 142/75 confirmed 
 
 The task is per-shape body field derivation for 75 fenced shapes. The methodology is: read the GEM2 capture, decode the body field EMITs, add 4-7 line edits to OVERRIDES dicts in `examples/conv.py`, run `timeout 30 python3 examples/conv.py <shape>`, add manifest entry to `conv_expt/rknn_prefix_replay.py`, then run sweep and commit.
 
-### 4.1 Highest priority: spatial 3x3 (5 remaining)
+### 4.1 Highest priority: spatial 3x3 (3 remaining)
 
-The 5 remaining spatial 3x3 siblings are all BY_K/k_tile-fenced. Body field constants are known from GEM2 captures. The c128_h3_oc256_3x3 promotion this session (max_diff=0.0310) confirms the EXACT11 BY_K path works for spatial 3x3 with the right body fields.
+**PROMOTED 2 of 5 spatial 3x3 shapes this session (c192_h7_oc384 max_diff=0.0624, c256_h10_oc512 max_diff=0.1121). 3 remaining:**
 
-**Order of attempts (smallest to largest):**
-1. **c128_h5_oc256_3x3** (CBUF0=0xb7, DATA_SIZE1=0x003f0080, CONV2_LOW=0x080) - 4 k_tiles, sibling of c128 family
-2. **c40_h40_oc160_3x3** (CBUF0=0x87, DATA_SIZE1=0x00270028, CONV2_LOW=0x160) - 3 k_tiles x 160 (full OC hypothesis)
-3. **c72_h20_oc288_3x3** (CBUF0=0xa7, DATA_SIZE1=0x00070048, CONV2_LOW=0x140) - 3 k_tiles x 96
-4. **c192_h7_oc384_3x3** (CBUF0=0xb7, DATA_SIZE1=0x003f00c0, CONV2_LOW=0x0a0) - 3 k_tiles x 128
-5. **c256_h10_oc512_3x3** (CBUF0=0xa7, DATA_SIZE1=0x003f0100, CONV2_LOW=0x0d0) - 3 k_tiles 176+176+160
+The 3 remaining spatial 3x3 siblings are all BY_K/k_tile-fenced. c40 and c72 have a DIFFERENT family_bits structure than standard EXACT11 (k_setup instead of k_half), which the standard 11-task code does not write. c128_h5_oc256 needs sibling-capture body field decoding (capture has different CBUF0 from c128 family).
 
-**Lesson from 16:00 batch attempt:** the 6-shape batch FAILED because the k_tile OC partitioning was wrong. The full-OC hypothesis `((0, oc), (0, oc), (0, oc))` was never validated because attempt #5 raised a RuntimeError. Need to test full-OC partitioning on c40_h40_oc160_3x3 first.
+**Order of attempts:**
+1. **c40_h40_oc160_3x3** (CBUF0=0x84, DATA_SIZE1=0x00270028, CONV2_LOW=0x160) - capture has k_setup+k_tile family bits, not k_half. Standard path FAIL max_diff=163.
+2. **c72_h20_oc288_3x3** (CBUF0=0x0a2, DATA_SIZE1=0x00070048, CONV2_LOW=0x140) - same issue. Standard path FAIL max_diff=204.
+3. **c128_h5_oc256_3x3** (CBUF0=0x0b1 or 0x0b7, DATA_SIZE1=0x003f0080, CONV2_LOW=0x080) - tried both 0x0b1 and 0x0b7, FAIL max_diff=259. Needs fresh body field decode from GEM2.
 
+**Path forward:** write a special `_exact11_task_regs` case for c40_h40_oc160 and c72_h20_oc288 (like the c832_h7_oc48 case) that writes the correct k_setup+k_tile structure. Or use a 6-task closure (1 setup + 2 k_setup + 3 k_tile) instead of the standard 11-task.
 ### 4.2 Pointwise 1x1 (34 remaining)
+
+**PROMOTED c128_h2_oc256_1x1 (in_c=128, in_h=2, oc=256) at 17:46, max_diff=0.0151.** Key finding: DMA_CON2=0x0ffffffc (NOT 0x0ffffffd like c128_h3 family). All other body fields (CBUF0, DATA_SIZE1, CVT_CON0) match c128 family. KT_TILE_SPLITS=((0, 96), (96, 96), (192, 64)) summing to 256.
 
 **Sub-family A: c1280_h10 family (4 shapes) - c128 family body fields FAILED, need fresh decode**
 - c1280_h10_oc24, c1280_h10_oc24_s1pvalid, c1280_h10_oc546, c1280_h10_oc546_s1pvalid
@@ -550,13 +551,13 @@ At the top of this session, the user reported `it crashed`. Contextually, this r
 
 - **75 fenced -> 0 fenced (need 75 promotions)**
 - **Captures: 100% done** (75/75 fenced have BOTH GEM1 and GEM2 captures; SS 2.3)
-- **Materializers done this session: 3** (c256_h3_oc128_1x1, c128_h3_oc256_1x1, c128_h3_oc256_3x3)
+- **Materializers done this session: 6** (c256_h3_oc128_1x1, c128_h3_oc256_1x1, c128_h3_oc256_3x3, c128_h2_oc256_1x1, c192_h7_oc384_3x3, c256_h10_oc512_3x3)
 - **Materializers done prior session: 2** (c16_h80_oc128 3x3 + 5x5)
 - **Materializers done in earlier sessions: 10** (c256_h2_oc64, c256_h2_oc24, c256_h3_oc24, c64_h1_oc128, c192_h28_oc96, c256_h28_oc256, c512_h7_oc1024, c832_h7_oc48, c16_h80_oc64, c40_h40_oc320)
-- **Total promoted shapes: 15** (some from prior sessions, e.g. c256_h2_oc546 NOT promoted because crash-fenced)
+- **Total promoted shapes: 18** (some from prior sessions, e.g. c256_h2_oc546 NOT promoted because crash-fenced)
 - **Per-promotion cost (recent):** c128_h3 family took ~10 min each (sibling-capture body fields transferred cleanly). c1280_h10_oc24 took 5 min for the attempt + revert. Per-shape fresh decode typically 30-60 min.
-- **Net promotions since 114 baseline: +28**
-- **Target: 75 more promotions to reach 217/217**
+- **Net promotions since 114 baseline: +31**
+- **Target: 72 more promotions to reach 217/217**
 - **ETA: 15-25 hours of focused work**, broken down by tractability:
   - 5 spatial 3x3 siblings (BY_K/k_tile): ~50 min each if full-OC k_tile hypothesis works, ~2 hours each if not = 4-10 hours
   - 23 pointwise 1x1 BY_K/k_tile: ~30-60 min each after first establishes pattern = 12-23 hours
@@ -660,3 +661,33 @@ All 3 used the same EXACT11 BY_K body field patches from sibling captures:
 
 The c128 family (in_c=128, in_h=3, oc=256) was a "sweet spot" where body field constants from one shape (c128_h3_oc128_k1x1 promoted) transferred cleanly to siblings (c128_h3_oc256_k1x1, c128_h3_oc256_k3x3). Other families (c72, c96, c288, c480, c832) require more careful per-shape body field derivation.
 
+
+
+### 13.6 Additional promotions (this session, 17:46-18:00)
+
+After the 16:35-16:40 promotions, continued with capture-derived body field decoding for more shapes:
+
+**PROMOTED 3 more shapes via GEM2 capture body field decode:**
+
+| Shape | Commit | max_diff | Key constants | Lesson |
+|---|---|---|---|---|
+| c128_h2_oc256_1x1 | `d023650` | 0.0151 | CBUF0=0x0b1, DATA_SIZE1=0x003f0080, CVT_CON0=0x000b, DMA_CON2=**0x0ffffffc** (NOT 0x0ffffffd), KT_TILE_SPLITS=((0,96),(96,96),(192,64)), CONV2_LOW=0x008 | DMA_CON2 differs from c128_h3 family (0x0ffffffc vs 0x0ffffffd) |
+| c192_h7_oc384_3x3 | `dd8d652` | 0.0624 | CBUF0=0x0b1, DATA_SIZE1=0x003f00c0, CVT_CON0=0x000b, DMA_CON2=0x0015, KT_TILE_SPLITS=((0,128),(128,128),(256,128)), CONV2_LOW=0x0a0 (FEATURE_GRAINS=10) | First 192-family spatial 3x3 promotion |
+| c256_h10_oc512_3x3 | `dd8d652` | 0.1121 | CBUF0=0x0a2, DATA_SIZE1=0x003f0100, CVT_CON0=0x000b, DMA_CON2=0x003c, KT_TILE_SPLITS=((0,176),(176,176),(352,160)), CONV2_LOW=0x0d0 (FEATURE_GRAINS=13) | CBUF0=0x0a2 (not 0x0b1) for in_c=256 family |
+
+**Failed attempts (reverted):**
+- c72_h20_oc288_3x3 (max_diff=204): different family_bits structure (k_setup not k_half)
+- c40_h40_oc160_3x3 (max_diff=163): same family_bits issue
+- c128_h5_oc256_3x3 (max_diff=259): c128 family body fields don't transfer
+- c1280_h10_oc24 (max_diff=225, earlier): c128 family body fields don't transfer to c1280
+- c1024_h1_oc1001, c1024_h7_oc1024 (max_diff=145-220): pointwise-wide special path needed
+
+**Other 75 fenced shapes verified captured (per SS 2.3); no capture work needed.**
+
+**Key methodological insight from this session:**
+- The 6 promotions all used GEM2 capture EMIT statements to extract per-row body field constants
+- Family bits (RESERVED_0 in CONV_CON2) determine which k_tile structure to use:
+  - 0x10000000 = k_half (standard EXACT11)
+  - 0x40000000 = k_setup (some spatial 3x3 with large in_h)
+  - 0x50000000 = k_tile (standard)
+- Spatial 3x3 with k_setup+k_tile family bits (c40, c72) need a custom `_exact11_task_regs` branch
