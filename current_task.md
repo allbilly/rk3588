@@ -1,12 +1,12 @@
 # Current Task: Prefix-Replay Debug of All FENCED Shapes in `examples/conv.py`
 
-**Last updated:** 2026-06-03 16:00 (Asia/Shanghai)
+**Last updated:** 2026-06-03 17:05 (Asia/Shanghai)
 **Owner:** Codex session (continuing multi-model handoff; previous session was "it crashed" - see Session Continuity SS 10.2)
 **CWD:** `/home/orangepi/rk3588`
-**NPU health (verified 16:00):** `python3 examples/simple_add.py` returns `ret=0, handle=5` and `ADD NPU=[8 8 8 8 8 8 8 8] expected=[8 8 8 8 8 8 8 8] PASS`. Board has NOT been rebooted this session.
-**HEAD:** `8a50477` (c16_h80_oc128_5x5 promotion, 13 commits ahead of `origin/main`).
+**NPU health (verified 17:05):** `python3 examples/simple_add.py` returns `ret=0, handle=5` and `ADD NPU=[8 8 8 8 8 8 8 8] expected=[8 8 8 8 8 8 8 8] PASS`. Board has NOT been rebooted this session.
+**HEAD:** `eb45bfb` (c128_h3_oc256_3x3 promotion, 16 commits ahead of `origin/main`).
 **Working tree:** `M conv_expt/build_progress_table.py` (path updated, not in /tmp). `D shape_stratgery.md` (unrelated, was already deleted last session). Other `??` files in `examples/` and `experimental/` are pre-existing scratch and intentionally untouched.
-**Latest full sweep (20260603_155357):** `total=217 counts={'PASS': 139, 'FENCED': 78, 'FAIL': 0, 'ERROR': 0, 'TIMEOUT': 0}`. Pre/post health rc was -1 for this sweep iteration (the runner was not invoking simple_add.py); NPU verified manually at 16:00 PASS.
+**Latest full sweep (20260603_170242):** `total=217 counts={'PASS': 142, 'FENCED': 75, 'FAIL': 0, 'ERROR': 0, 'TIMEOUT': 0}`. Pre/post health rc was -1; NPU verified manually at 17:05 PASS.
 **Per-family table file:** `sweep_results/family_progress_table_20260603_1600.txt` (135 lines; safe location, NOT /tmp).
 **Storage rule (always observed):** NEVER store important files in `/tmp`. Sweep outputs go to `/home/orangepi/rk3588/sweep_results/`. Captures go to `/home/orangepi/npu/ops_rknn/dump/`. The in-progress materializer is at `/home/orangepi/rk3588/conv_expt/in_progress/c576_h19_oc12_addition.py` (NOT `/tmp`).
 
@@ -15,7 +15,7 @@
 ## 0. TL;DR
 
 1. **Goal:** use **prefix replay** to debug and fix every FENCED shape in `examples/conv.py`. End state: **`PASS=217, FENCED=0, FAIL=0, ERROR=0, TIMEOUT=0`** in `timeout 200 python3 sweep_217.py --skip-health`, with pre/post `python3 examples/simple_add.py` both PASS. 78 fenced shapes must be promoted via prefix-replay methodology.
-2. **Current pass progress:** **`PASS=139 / 217` (64.1%), **`FENCED=78 / 217` (35.9%)**, **`FAIL=0, ERROR=0, TIMEOUT=0`**. Net new promotions since the user-stated 114/103 stuck baseline: **+25 PASS** (114->139). Net new promotions last session: **+2** (c16_h80_oc128_3x3 at 15:41, c16_h80_oc128_5x5 at 15:50). Distance to goal: **78 more promotions**.
+2. **Current pass progress:** **`PASS=142 / 217` (65.4%)**, **`FENCED=75 / 217` (34.6%)**, **`FAIL=0, ERROR=0, TIMEOUT=0`**. Net new promotions since the user-stated 114/103 stuck baseline: **+28 PASS** (114->142). Net new promotions this session (post-current_task.md-rewrite): **+3** (c256_h3_oc128_1x1, c128_h3_oc256_1x1, c128_h3_oc256_3x3). Distance to goal: **75 more promotions**.
 3. **Capture coverage:** **100% (78/78 fenced shapes have BOTH GEM1 and GEM2 captures)**. Captures at `/home/orangepi/npu/ops_rknn/dump/prefix_<slug>_keep1_gem{1,2}/` (84 distinct `_keep1_gem2` directories; 117 distinct prefix slugs total). Captures are **no longer a blocker**. **YES, every fenced shape has a capture already.** Detail in SS 2 below.
 4. **Biggest blocker (stated explicitly):** **per-shape body-field constants for the 78 remaining fenced shapes**. The generic 11-task EXACT11 BY_K path works for the existing 9 promoted shapes but has hard-coded body fields (CBUF0, DATA_SIZE1, DMA_CON2, CVT_CON0, CONV2_LOW, weight size, k_tile OC splits) that don't match the (ic, oc, kh, kw, in_h) tuple of every other shape. The c16_h80_oc128_3x3 promotion last turn showed that the spatial-3x3 with in_c=16 family shares body field constants (CBUF0=0x57, DATA_SIZE1=0x000F0010, CONV2_LOW=0x1a0) across oc values, with KT_TILE_SPLITS auto-parameterized for the OC count.
 5. **In-flight work (last session):** c16_h80_oc128_3x3 PROMOTED at 15:41 (max_diff=0.0293). c16_h80_oc128_5x5 PROMOTED at 15:50 (max_diff=0.0313). Both used the same body field constants as c16_h80_oc64 (CBUF0=0x57, DATA_SIZE1=0x000F0010, CONV2_LOW=0x1a0). The 5x5 differed only in weight size (auto-scaled by EXACT11 BY_K path: weight per kernel changes from 288 to 800 for 5x5). c16_h80 family is now fully promoted (3x3 and 5x5 both done). A **batch promotion of 6 spatial 3x3 siblings FAILED** with max_diff=163-368 and was reverted via `git checkout examples/conv.py`; NPU still healthy. The c576_h19_oc12 materializer (committed in 3b520a0/3704e1c/40b6133) is still FAIL max_diff=152; left as-is.
@@ -42,6 +42,11 @@
 | 2026-06-03 15:50 | 139 |  78 | c16_h80_oc128_5x5 promoted: same body fields as 3x3 sibling; PASS max_diff=0.0313 |
 | 2026-06-03 15:55 | 139 |  78 | sweep 155357 confirms FENCED=78; net session +2 (137->139) |
 | 2026-06-03 16:00 | 139 |  78 | NPU health re-verified PASS; current_task.md rewritten with full per-family table |
+| 2026-06-03 16:30 | 139 |  78 | Spatial 3x3 attempts (c40_h40_oc160, c72_h20_oc288): all FAILED, documented in section 12 |
+| 2026-06-03 16:35 | 140 |  77 | c256_h3_oc128_1x1 PROMOTED via EXACT11 BY_K (sibling of c256_h3_oc24); max_diff=0.0155 |
+| 2026-06-03 16:38 | 141 |  76 | c128_h3_oc256_1x1 PROMOTED via EXACT11 BY_K (c128 family); max_diff=0.0154 |
+| 2026-06-03 16:40 | 142 |  75 | c128_h3_oc256_3x3 PROMOTED via EXACT11 BY_K (spatial 3x3 sibling); max_diff=0.0310 |
+| 2026-06-03 17:05 | 142 |  75 | Sweep 170242 confirms 142/75; current_task.md updated with new session results |
 
 ---
 
@@ -330,12 +335,12 @@ At the top of this session, the user reported `it crashed`. Contextually, this r
 
 - 78 fenced -> 0 fenced (need 78 promotions)
 - **Captures: 100% done** (no longer a blocker; SS 2)
-- **Materializers done in this session: 0** (focus on current_task.md rewrite and table refresh)
-- **Materializers done last session: 2** (c16_h80_oc128 3x3 + 5x5)
+- **Materializers done in this session: 3** (c256_h3_oc128_1x1, c128_h3_oc256_1x1, c128_h3_oc256_3x3)
+- **Materializers done prior session: 2** (c16_h80_oc128 3x3 + 5x5)
 - **Total materializers done: 9 promoted shapes** (c256_h2_oc64, c256_h2_oc24, c256_h3_oc24, c64_h1_oc128, c192_h28_oc96, c256_h28_oc256, c512_h7_oc1024, c832_h7_oc48, c16_h80_oc64, c16_h80_oc128 3x3, c16_h80_oc128 5x5, c40_h40_oc320, c256_h2_oc546 NOT promoted)
 - **Per-promotion cost:** ~1-2 hours (fresh GEM2 capture + body field decode + materializer code + guarded test + manifest entry + sweep verification). **c16_h80_oc128_3x3 took ~10 min** because the body field constants were identical to c16_h80_oc64.
-- **Net promotions since 114 baseline: +25**
-- **Target: 78 more promotions to reach 217/217**
+- **Net promotions since 114 baseline: +28**
+- **Target: 75 more promotions to reach 217/217**
 - **ETA: 15-21 hours of focused work** (c16_h80 family took ~20 min total; spatial 3x3 batch is 6 more at ~10 min each if the full-OC k_tile hypothesis holds; pointwise 1x1 batch is 36 at ~5-10 min each after the first establishes the pattern; depthwise is the slow track at ~30 min each with new closure derivation)
 
 
