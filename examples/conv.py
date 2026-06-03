@@ -205,7 +205,7 @@ C576_H19_OC12_K_TILE_SPLITS = ((0, 4), (4, 3), (7, 2), (9, 1), (10, 2))  # 4+3+2
 C576_H19_OC12_EXACT12_AMOUNTS = (108, 108, 104, 26, 104, 26, 104, 26, 104, 26, 104, 26)
 C576_H19_OC12_EXACT12_MASKS = (0x0d, 0x0d, 0x0d, 0x60, 0x0d, 0x60, 0x0d, 0x60, 0x0d, 0x60, 0x0d, 0x60)
 # Per-row out_c (used for body field patches); (None, 'aux') means skip (aux row)
-C576_H19_OC12_EXACT12_ROW_OUT_C = (12, 12, 4, None, 3, None, 2, None, 1, None, 2, None)
+C576_H19_OC12_EXACT12_ROW_OUT_C = (12, 12, 12, None, 12, None, 12, None, 12, None, 12, None)
 C576_H19_OC12_EXACT12_ROW_CBUF0 = (C576_H19_OC12_CBUF0, C576_H19_OC12_CBUF0_REUSE, C576_H19_OC12_CBUF0, None, C576_H19_OC12_CBUF0, None, C576_H19_OC12_CBUF0, None, C576_H19_OC12_CBUF0, None, C576_H19_OC12_CBUF0, None)
 
 
@@ -1823,41 +1823,67 @@ def _c576_h19_oc12_exact12_task_regs(s, in_dma, wt_dma, out_dma):
     if s["name"] != C576_H19_OC12_EXACT12_SHAPE:
         raise ValueError("c576_h19_oc12 exact12 rows are scoped only to the RKNN-proven c576_h19_oc12 shape")
 
-    # Per-row y_start offsets derived from the GEM2 dump. The 5 k_tile rows write
-    # to 5 distinct output regions (not the same region). The offsets are absolute
-    # (relative to out_dma) so we patch both FEATURE_DATA_ADDR and DST_BASE_ADDR.
-    # stride_estimate = p["out_width_stride"] * 2 (fp16) * align_out_c / 2 ... ; we
-    # bypass _exact11_body_regs' y_start math and patch the addresses directly.
-    k_tile_offsets = (
-        0x1300,   # k_tile 0: y_start=4
-        0,        # k_tile 1: y_start=0
-        -0x420,   # k_tile 2: y_start=-2 (negative)
-        0,        # k_tile 3: y_start=0
-        0x850,    # k_tile 4: y_start=2
-    )
+    # Per-row y_start (in rows) and y_count derived from the GEM2 dump.
+    # The 7 CNA tasks write 7 distinct (y_count wide x y_count tall) sub-regions
+    # of the output, with the 5 k_tiles splitting the (oc, y) plane.
+    # FE and DST offsets use y_start * 304 (= in_w * UNPACK_C2 * FP16_BYTES = 19*8*2)
+    # which matches the GEM2 dump byte offsets 0/0x1300/0/0xbe0/0/0x850/0xf70.
+    # Per-task y_counts (= DS0 w = DATA_CUBE_HEIGHT+1) come from the dump:
+    #   setup=16, k_half=3, k_tile 0..4 = 10, 9, 7, 6, 6
+    # Per-task CONV_CON2 (FEATURE_GRAINS in bits 0:11, sbsize in bits 16:23) from the dump:
+    #   setup=0x80, k_half=0x40, k_tile 0=0x100080, k_tile 1=0x100080,
+    #   k_tile 2=0x200070, k_tile 3=0x200060, k_tile 4=0x200060
+    per_task_y_offset_rows = (0, 16, 0, 10, 0, 7, 13)
+    per_task_y_count = (16, 3, 10, 9, 7, 6, 6)
+    per_task_conv2 = (0x80, 0x40, 0x100080, 0x100080, 0x200070, 0x200060, 0x200060)
     p = _conv_params(s)
 
-    def row(family, oc_start, oc_count, cbuf0_val, y_offset=0):
+    def row(family, oc_start, oc_count, cbuf0_val, y_offset=0, y_count=19, conv2=0):
+        # y_offset is in ROWS; the byte delta = y_offset * 304 (applied below).
+        # y_count overrides the per-row DS0 w and the output DATA_CUBE_HEIGHT.
+        # conv2 overrides the per-row CONV_CON2 (FEATURE_GRAINS|sbsize).
         body = _exact11_body_regs(s, family, oc_start, oc_count, in_dma, wt_dma, out_dma, input_h=19)
+        # DS0 w encodes the conv window width (= y_count for this shape).
+        # FC_DATA_SIZE0 mirrors DS0 w (used by FC for op 1 = "pointwise").
+        ds0_packed = (19 << 16) | y_count
+        fc_ds0_packed = (19 << 16) | y_count
+        # DATA_CUBE_HEIGHT = y_count - 1; WDMA_SIZE_1 = (h<<16) | (out_w-1)
+        cube_h_minus_1 = y_count - 1
+        wdma_h = cube_h_minus_1
+        wdma_w = 18  # out_w - 1 = 19 - 1
+        # Aligned OC = 16 (dump shows DATA_CUBE_CHANNEL = (11<<16)|15 and WDMA_SIZE_0=15)
+        aligned_oc_minus_1 = 15
+        # weight_bytes_per_kernel = 1*1*576*2 = 1152 = 0x480 (dump WEIGHT_SIZE1)
+        weight_bytes_per_kernel = 0x480
+        # DATA_SIZE3 = out_w * align_out_c = 19 * 16 = 304 = 0x130 (dump)
+        data_size3 = 0x130
         patches = {
+            (reg.CNA, reg.CNA_DATA_SIZE0): ds0_packed,
+            (reg.CNA, reg.CNA_DATA_SIZE3): data_size3,
+            (reg.CNA, reg.CNA_FC_DATA_SIZE0): fc_ds0_packed,
             (reg.CNA, reg.CNA_DATA_SIZE1): C576_H19_OC12_DATA_SIZE1,
             (reg.CNA, reg.CNA_CBUF_CON0): cbuf0_val,
             (reg.CNA, reg.CNA_CVT_CON0): C576_H19_OC12_CVT_CON0,
             (reg.CNA, reg.CNA_DMA_CON2): C576_H19_OC12_DMA_CON2,
             (reg.CNA, reg.CNA_WEIGHT_SIZE0): C576_H19_OC12_K_TILE_WEIGHT_SIZE0,
-            (reg.CNA, reg.CNA_WEIGHT_SIZE1): C576_H19_OC12_K_TILE_WEIGHT_SIZE0 >> 8,
+            (reg.CNA, reg.CNA_WEIGHT_SIZE1): weight_bytes_per_kernel,
             (reg.CNA, reg.CNA_WEIGHT_SIZE2): (s["kw"] << 24) | (s["kh"] << 16) | oc_count,
-            (reg.CORE, reg.CORE_DATAOUT_SIZE_1): oc_count - 1,
-            (reg.DPU, reg.DATA_CUBE_CHANNEL): ((oc_count - 1) << 16) | (oc_count - 1),
-            (reg.DPU, reg.WDMA_SIZE_0): oc_count - 1,
+            (reg.CORE, reg.CORE_DATAOUT_SIZE_0): ((cube_h_minus_1) << 16) | 18,  # (y_count-1) | (out_w-1) - matches dump
+            (reg.CORE, reg.CORE_DATAOUT_SIZE_1): aligned_oc_minus_1,  # 15 not 11 (aligned)
+            (reg.DPU, reg.DATA_CUBE_HEIGHT): cube_h_minus_1,
+            (reg.DPU, reg.DATA_CUBE_CHANNEL): (aligned_oc_minus_1 << 16) | aligned_oc_minus_1,
+            (reg.DPU, reg.WDMA_SIZE_0): aligned_oc_minus_1,
+            (reg.DPU, reg.WDMA_SIZE_1): (wdma_h << 16) | wdma_w,
+            (reg.DPU, reg.DST_SURF_STRIDE): 0x16c0,  # dump value
         }
+        if conv2 != 0:
+            # Override CONV_CON2 to match the dump (sbsize + feature_grains encoding)
+            patches[(reg.CNA, reg.CNA_CONV_CON2)] = conv2
         if y_offset != 0:
-            # Patch FEATURE_DATA_ADDR and DST_BASE_ADDR with y_offset applied
-            # (the underlying _exact11_body_regs already adds oc_start and y_start=0 offset;
-            # we add the per-row delta here)
-            feature_delta = y_offset * p["out_w"] * UNPACK_C2 * FP16_BYTES
-            patches[(reg.CNA, reg.CNA_FEATURE_DATA_ADDR)] = in_dma + feature_delta
-            patches[(reg.DPU, reg.DST_BASE_ADDR)] = out_dma + y_offset * p["out_w"] * UNPACK_C2 * FP16_BYTES
+            # y_offset is in ROWS; byte delta = y_offset * 304 = y_offset * in_w * UNPACK_C2 * FP16_BYTES
+            byte_delta = y_offset * p["out_w"] * UNPACK_C2 * FP16_BYTES
+            patches[(reg.CNA, reg.CNA_FEATURE_DATA_ADDR)] = in_dma + byte_delta
+            patches[(reg.DPU, reg.DST_BASE_ADDR)] = out_dma + byte_delta
         return patch_regs(body, patches)
 
     aux_dma = wt_dma + 0x3600  # weight is 0x3600, aux goes after
@@ -1867,14 +1893,22 @@ def _c576_h19_oc12_exact12_task_regs(s, in_dma, wt_dma, out_dma):
         E(reg.CNA, 0x1100, 0),
         E(reg.CNA, reg.CNA_CONV_CON1, 0x120),
     )
+    # task 0 = setup (y_offset=0, y_count=16, conv2=0x80)
+    # task 1 = k_half (y_offset=16, y_count=3, conv2=0x40)
+    # tasks 2..11 = (k_tile, aux) pairs; per-task conv2 from per_task_conv2
     rows = [
-        row("setup", 0, 12, C576_H19_OC12_CBUF0),                                   # task 0: 108q
-        list(k_half_prelude) + row("k_half", 0, 12, C576_H19_OC12_CBUF0_REUSE),     # task 1: 108q (4q prelude + 104q body)
+        row("setup", 0, 12, C576_H19_OC12_CBUF0, y_offset=per_task_y_offset_rows[0], y_count=per_task_y_count[0], conv2=per_task_conv2[0]),  # task 0: 108q
+        list(k_half_prelude) + row("k_half", 0, 12, C576_H19_OC12_CBUF0_REUSE, y_offset=per_task_y_offset_rows[1], y_count=per_task_y_count[1], conv2=per_task_conv2[1]),  # task 1: 108q
     ]
-    for k_tile_idx, (oc_start, oc_count) in enumerate(C576_H19_OC12_K_TILE_SPLITS):
-        y_off = k_tile_offsets[k_tile_idx] if k_tile_idx < len(k_tile_offsets) else 0
-        rows.append(row("k_tile", oc_start, oc_count, C576_H19_OC12_CBUF0, y_offset=y_off))  # 104q k_tile
-        rows.append(_exact11_aux_regs(s, out_dma, aux_dma))                                    # 26q aux
+    # The k_tiles all use the full 12 OC (per the dump: CORE_DATAOUT_SIZE_1=11 for all 7 CNA tasks).
+    # The K_TILE_SPLITS (kept for layout compatibility) is not used for (oc_start, oc_count);
+    # the (oc_count, kerns) is always 12 and the y dimension is the only thing that varies per tile.
+    for k_tile_idx, _ in enumerate(C576_H19_OC12_K_TILE_SPLITS):
+        y_off = per_task_y_offset_rows[2 + k_tile_idx]  # tasks 2..6
+        y_cnt = per_task_y_count[2 + k_tile_idx]
+        cv2 = per_task_conv2[2 + k_tile_idx]
+        rows.append(row("k_tile", 0, 12, C576_H19_OC12_CBUF0, y_offset=y_off, y_count=y_cnt, conv2=cv2))  # 104q k_tile
+        rows.append(_exact11_aux_regs(s, out_dma, aux_dma))                                                  # 26q aux
     # Validate amounts match the expected 12-task sequence
     actual_amounts = tuple(len(r) for r in rows)
     if actual_amounts != C576_H19_OC12_EXACT12_AMOUNTS:
