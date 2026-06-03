@@ -190,6 +190,25 @@ C256_H2_OC64_EXACT11_SHAPE = "b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid"
 C256_H2_OC64_EXACT11_OUT_C = (64, 32, None, 32, None, 32, None, 16, None, 16, None)
 C256_H2_OC64_EXACT11_WEIGHT_SIZE0 = (0x8000, 0x4000, None, 0x4000, None, 0x4000, None, 0x2000, None, 0x2000, None)
 C256_H2_OC64_EXACT11_DST_OFFSETS = (0x0, 0x0, None, 0x100, None, 0x0, None, 0x100, None, 0x180, None)
+C576_H19_OC12_EXACT12_SHAPE = "b1_c576_h19_w19_oc12_wic576_k1x1_g1_s1_pvalid"
+C576_H19_OC12_EXACT12_OUT_C = (12, 12, None, 4, None, 3, None, 2, None, 1, None, 2, None)[:11]  # 12-task row out_c (placeholders; we patch per row)
+# Actual body field values from the c576_h19_oc12_s1pvalid_keep1_gem2 dump (NOT c256_h2_oc64 guesses):
+C576_H19_OC12_CBUF0 = 0x1b                   # CBUF_CON0: WEIGHT_BANK(1) | DATA_BANK(11)
+C576_H19_OC12_CBUF0_REUSE = 0x201b           # CBUF_CON0 with WEIGHT_REUSE(1) for k_half
+C576_H19_OC12_DATA_SIZE1 = 0x3f0240          # DATAIN_CHANNEL_REAL(63) | DATAIN_CHANNEL(576) - actual from dump
+C576_H19_OC12_DMA_CON2 = 0x011d              # SURF_STRIDE(285) - actual from dump
+C576_H19_OC12_CVT_CON0 = 0x000b              # DATA_SIGN(1) | CVT_TYPE(1) | CVT_BYPASS(1) - actual from dump
+C576_H19_OC12_SETUP_WEIGHT_SIZE0 = 0x3600    # 12*576*2 fp16 = 13824 (all 12 OC of weight)
+C576_H19_OC12_K_HALF_WEIGHT_SIZE0 = 0x3600   # same as setup; k_half covers all 12 OC
+C576_H19_OC12_K_TILE_WEIGHT_SIZE0 = 0x3600   # all k_tile rows use the full 12-OC weight (unused OC bits are ignored)
+C576_H19_OC12_K_TILE_SPLITS = ((0, 4), (4, 3), (7, 2), (9, 1), (10, 2))  # 4+3+2+1+2=12
+C576_H19_OC12_EXACT12_AMOUNTS = (108, 108, 104, 26, 104, 26, 104, 26, 104, 26, 104, 26)
+C576_H19_OC12_EXACT12_MASKS = (0x0d, 0x0d, 0x0d, 0x60, 0x0d, 0x60, 0x0d, 0x60, 0x0d, 0x60, 0x0d, 0x60)
+# Per-row out_c (used for body field patches); (None, 'aux') means skip (aux row)
+C576_H19_OC12_EXACT12_ROW_OUT_C = (12, 12, 4, None, 3, None, 2, None, 1, None, 2, None)
+C576_H19_OC12_EXACT12_ROW_CBUF0 = (C576_H19_OC12_CBUF0, C576_H19_OC12_CBUF0_REUSE, C576_H19_OC12_CBUF0, None, C576_H19_OC12_CBUF0, None, C576_H19_OC12_CBUF0, None, C576_H19_OC12_CBUF0, None, C576_H19_OC12_CBUF0, None)
+
+
 POINTWISE_EXACT11_CHAIN_COMPACT_WEIGHT_SHAPES = {
     "b1_c256_h3_w3_oc24_wic256_k1x1_g1_s1_pvalid",
 }
@@ -363,6 +382,8 @@ KT_TILE_SPLITS = {
     "b1_c512_h7_w7_oc1024_wic512_k1x1_g1":           ((0, 352), (352, 336), (688, 336)),
     "b1_c832_h7_w7_oc48_wic832_k1x1_g1":             ((0, 16), (16, 16), (32, 16)),
     "b1_c256_h2_w2_oc64_wic256_k1x1_g1_s1_pvalid":   ((0, 32), (32, 16), (48, 16)),
+    # 12-task c576_h19_oc12: 1 k_half + 5 k_tiles (k_splits 4+3+2+1+2=12), 5 aux rows
+    C576_H19_OC12_EXACT12_SHAPE: ((0, 4), (4, 3), (7, 2), (9, 1), (10, 2)),
 }
 CONV2_LOW_OVERRIDES = {
     # c160_h14 and c160_h7 fall through to the default logic below (0x0f0 / 0x0a0)
@@ -1340,7 +1361,44 @@ def exact_byk_legacy_layout_check(s):
         assert layout["pc_amounts"] == EXACT11_BYK_PC_AMOUNTS
         assert layout["roles"] == EXACT11_BYK_ROLES
         assert layout["offsets"] == (0, 112, 224, 256, 368, 400, 512, 544, 656, 688, 800)
+    elif s["name"] == C576_H19_OC12_EXACT12_SHAPE:
+        # 12-task layout: 1 setup + 1 k_half (both 108q) + 5 k_tile (104q) + 5 aux (26q)
+        # Build the layout manually (1-k_half + 5-k_tile structure, not 2-k_half default)
+        return c576_h19_oc12_exact12_layout()
     return layout
+
+
+def c576_h19_oc12_exact12_layout():
+    """Shape-specific layout for c576_h19_oc12: 1 k_half + 5 k_tiles + 5 aux (12 tasks total)."""
+    roles = ("setup_body", "k_half_body0", "k_tile_body0", "aux0",
+             "k_tile_body1", "aux1", "k_tile_body2", "aux2",
+             "k_tile_body3", "aux3", "k_tile_body4", "aux4")
+    amounts = C576_H19_OC12_EXACT12_AMOUNTS
+    masks = C576_H19_OC12_EXACT12_MASKS
+    # pc_amounts is for the first 11 roles (last role is "aux4" which has no PC header)
+    pc_amounts = (0, 0x1000e, 0x2000e, 0, 0x2000e, 0, 0x2000e, 0, 0x2000e, 0, 0x2000e)
+    offsets = []
+    qoff = 0
+    for idx, amount in enumerate(amounts):
+        offsets.append(qoff)
+        if idx + 1 == len(amounts):
+            break
+        if idx == 0:
+            tail_qwords = 4
+        elif roles[idx].startswith("aux"):
+            tail_qwords = 6
+        elif roles[idx].startswith("k_half"):
+            tail_qwords = 4  # k_half has 4-qword tail (PC_BASE_ADDRESS header only)
+        else:
+            tail_qwords = 8  # k_tile has 8-qword tail
+        qoff += _align_up(amount + tail_qwords, 8)
+    return {
+        "roles": roles,
+        "amounts": amounts,
+        "masks": masks,
+        "pc_amounts": pc_amounts,
+        "offsets": tuple(offsets),
+    }
 
 def dry_run_exact11_byk(s):
     rows = planner.descriptor_rows_for_shape(s)
@@ -1751,6 +1809,136 @@ def run_c256_h2_oc64_exact11_shape(s):
             f"{start}:{float(np.max(np.abs(got[:, start:start + 16].astype(np.float32) - expected[:, start:start + 16]))):.4f}"
             for start in range(0, s["out_c"], 16)))
         raise AssertionError(f"output mismatch max_diff={max_diff:.4f}")
+
+def _c576_h19_oc12_exact12_task_regs(s, in_dma, wt_dma, out_dma):
+    """Emit the 12-task 108/108/104/26... closure for c576_h19_oc12 (Attack H).
+
+    Modeled on c256_h2_oc64 EXACT11 path with 5 k_tiles (k_splits 4+3+2+1+2=12)
+    instead of 3. k_half row needs an explicit 4-qword prelude to reach 108q.
+
+    Body field constants are from the c576_h19_oc12_s1pvalid_keep1_gem2 dump
+    captured at /home/orangepi/npu/ops_rknn/dump/prefix_c576_h19_oc12_s1pvalid_keep1_gem2/dump_gem2.txt:
+    CBUF0=0x1b, DATA_SIZE1=0x3f0240, DMA_CON2=0x011d, CVT_CON0=0x000b.
+    """
+    if s["name"] != C576_H19_OC12_EXACT12_SHAPE:
+        raise ValueError("c576_h19_oc12 exact12 rows are scoped only to the RKNN-proven c576_h19_oc12 shape")
+
+    def row(family, oc_start, oc_count, cbuf0_val):
+        body = _exact11_body_regs(s, family, oc_start, oc_count, in_dma, wt_dma, out_dma, input_h=19)
+        return patch_regs(body, {
+            (reg.CNA, reg.CNA_DATA_SIZE1): C576_H19_OC12_DATA_SIZE1,
+            (reg.CNA, reg.CNA_CBUF_CON0): cbuf0_val,
+            (reg.CNA, reg.CNA_CVT_CON0): C576_H19_OC12_CVT_CON0,
+            (reg.CNA, reg.CNA_DMA_CON2): C576_H19_OC12_DMA_CON2,
+            (reg.CNA, reg.CNA_WEIGHT_SIZE0): C576_H19_OC12_K_TILE_WEIGHT_SIZE0,
+            (reg.CNA, reg.CNA_WEIGHT_SIZE1): C576_H19_OC12_K_TILE_WEIGHT_SIZE0 >> 8,
+            (reg.CNA, reg.CNA_WEIGHT_SIZE2): (s["kw"] << 24) | (s["kh"] << 16) | oc_count,
+            (reg.CORE, reg.CORE_DATAOUT_SIZE_1): oc_count - 1,
+            (reg.DPU, reg.DATA_CUBE_CHANNEL): ((oc_count - 1) << 16) | (oc_count - 1),
+            (reg.DPU, reg.WDMA_SIZE_0): oc_count - 1,
+        })
+
+    aux_dma = wt_dma + 0x3600  # weight is 0x3600, aux goes after
+    k_half_prelude = (
+        E(reg.CNA, reg.CNA_CBUF_CON0, C576_H19_OC12_CBUF0),
+        E(reg.CNA, 0x1104, 0),
+        E(reg.CNA, 0x1100, 0),
+        E(reg.CNA, reg.CNA_CONV_CON1, 0x120),
+    )
+    rows = [
+        row("setup", 0, 12, C576_H19_OC12_CBUF0),                                   # task 0: 108q
+        list(k_half_prelude) + row("k_half", 0, 12, C576_H19_OC12_CBUF0_REUSE),     # task 1: 108q (4q prelude + 104q body)
+    ]
+    for oc_start, oc_count in C576_H19_OC12_K_TILE_SPLITS:
+        rows.append(row("k_tile", oc_start, oc_count, C576_H19_OC12_CBUF0))         # 104q k_tile
+        rows.append(_exact11_aux_regs(s, out_dma, aux_dma))                          # 26q aux
+    # Validate amounts match the expected 12-task sequence
+    actual_amounts = tuple(len(r) for r in rows)
+    if actual_amounts != C576_H19_OC12_EXACT12_AMOUNTS:
+        raise RuntimeError(f"c576_h19_oc12 exact12 row amounts mismatch: {actual_amounts} vs {C576_H19_OC12_EXACT12_AMOUNTS}")
+    return rows
+
+
+def dry_run_c576_h19_oc12_exact12(s):
+    if s["name"] != C576_H19_OC12_EXACT12_SHAPE:
+        raise ValueError("c576_h19_oc12 exact12 dry-run is scoped only to the RKNN-proven c576_h19_oc12 shape")
+    in_dma, wt_dma, out_dma = 0x10000000, 0x20000000, 0x30000000
+    rows = _c576_h19_oc12_exact12_task_regs(s, in_dma, wt_dma, out_dma)
+    families = ("setup", "k_half", "k_tile", "ppu_pdp", "k_tile", "ppu_pdp",
+                "k_tile", "ppu_pdp", "k_tile", "ppu_pdp", "k_tile", "ppu_pdp")
+    out_c = []
+    for family, regs_row in zip(families, rows):
+        if family == "ppu_pdp":
+            out_c.append(None)
+            continue
+        values = {(qword >> 48, qword & 0xffff): (qword >> 16) & 0xffffffff for qword in regs_row}
+        out_c.append((values[(reg.CORE, reg.CORE_DATAOUT_SIZE_1)] & 0xffff) + 1)
+        cbuf0 = values[(reg.CNA, reg.CNA_CBUF_CON0)]
+        data_size1 = values[(reg.CNA, reg.CNA_DATA_SIZE1)]
+        if cbuf0 not in (C576_H19_OC12_CBUF0, C576_H19_OC12_CBUF0_REUSE):
+            raise RuntimeError(f"c576_h19_oc12 cbuf0 preflight mismatch at {family}: {cbuf0:#x}")
+        if data_size1 != C576_H19_OC12_DATA_SIZE1:
+            raise RuntimeError(f"c576_h19_oc12 data_size1 preflight mismatch at {family}: {data_size1:#x}")
+    if tuple(out_c) != C576_H19_OC12_EXACT12_ROW_OUT_C:
+        raise RuntimeError(f"c576_h19_oc12 out_c preflight mismatch: {out_c} vs {C576_H19_OC12_EXACT12_ROW_OUT_C}")
+    print(f"dry_run=c576_h19_oc12_exact12 shape={s['name']} status=no_drm_no_submit")
+    print("amounts=" + ",".join(str(len(r)) for r in rows))
+    print("masks=" + ",".join(hex(v) for v in C576_H19_OC12_EXACT12_MASKS))
+    print("families=" + ",".join(families))
+    print("out_c=" + ",".join("none" if v is None else str(v) for v in out_c))
+    print("k_tile_splits=4+3+2+1+2=12 (oc=12)")
+    print(f"consts=cbuf0:0x{C576_H19_OC12_CBUF0:x} reuse:0x{C576_H19_OC12_CBUF0_REUSE:x} data_size1:0x{C576_H19_OC12_DATA_SIZE1:x} dma2:0x{C576_H19_OC12_DMA_CON2:x} cvt0:0x{C576_H19_OC12_CVT_CON0:x} weight0:0x{C576_H19_OC12_K_TILE_WEIGHT_SIZE0:x}")
+
+
+def run_c576_h19_oc12_exact12_shape(s):
+    if s["name"] != C576_H19_OC12_EXACT12_SHAPE:
+        raise ValueError("c576_h19_oc12 exact12 run is scoped only to the RKNN-proven c576_h19_oc12 shape")
+    layout = exact_byk_legacy_layout_check(s)
+    p = _conv_params(s)
+    np.random.seed(42)
+    inp = np.random.uniform(-2, 2, (s["batch"], s["in_c"], s["in_h"], s["in_w"])).astype(np.float16)
+    wt = np.random.uniform(-2, 2, (s["out_c"], s["weight_in_c"], s["kh"], s["kw"])).astype(np.float16)
+    input_flat = pack_input(inp[0], p).view(np.uint16)
+    weight_flat = _pack_pointwise_wide(wt, s["out_c"], s["in_c"]).view(np.uint16)
+    out_count = _ceil_div(p["align_out_c"], UNPACK_C2) * p["out_width_stride"] * UNPACK_C2
+    output_bytes = out_count * np.dtype(np.float16).itemsize
+    regcmd_bytes = (layout["offsets"][-1] + layout["amounts"][-1]) * ctypes.sizeof(ctypes.c_uint64)
+    fd = os.open("/dev/dri/card1", os.O_RDWR)
+    task_map, task_mem = mem_allocate(fd, 4096, RKNPU_MEM_KERNEL_MAPPING | RKNPU_MEM_NON_CACHEABLE)
+    regcmd_map, regcmd_mem = mem_allocate(fd, regcmd_alloc_bytes(regcmd_bytes), RKNPU_MEM_NON_CACHEABLE)
+    input_map, input_mem = mem_allocate(fd, 4 * 1024 * 1024, RKNPU_MEM_NON_CACHEABLE)
+    weight_map, weight_mem = mem_allocate(fd, 4 * 1024 * 1024, RKNPU_MEM_NON_CACHEABLE)
+    output_map, output_mem = mem_allocate(fd, max(4 * 1024 * 1024, output_bytes), RKNPU_MEM_NON_CACHEABLE)
+    try:
+        (ctypes.c_uint16 * len(input_flat)).from_buffer(input_map)[:] = input_flat.tolist()
+        (ctypes.c_uint16 * len(weight_flat)).from_buffer(weight_map)[:] = weight_flat.tolist()
+        ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_map.size())
+        task_regs = _c576_h19_oc12_exact12_task_regs(s, input_mem.dma_addr, weight_mem.dma_addr, output_mem.dma_addr)
+        write_exact11_byk_tasks(task_map, regcmd_map, regcmd_mem, task_regs, layout)
+        subcores = ((0, 1), (0, 1), (0, 1), (0, 0), (0, 0))
+        print(f"c576_h19_oc12_exact12_submit tasks={len(layout['amounts'])} submit_task_number=3 amounts=" + ";".join(str(v) for v in layout["amounts"]) +
+              " masks=" + ";".join(hex(v) for v in layout["masks"]) + " subcores=(0,1),(0,1),(0,1),(0,0),(0,0)")
+        if npu_submit(fd, task_mem.obj_addr, 3, core_mask=0, subcores=subcores) < 0:
+            raise RuntimeError("npu_submit failed")
+        out_raw = np.frombuffer(output_map, dtype=np.float16, count=out_count).copy()
+        post_submit_reset(fd)
+    finally:
+        close_allocations(fd, ((task_map, task_mem), (regcmd_map, regcmd_mem),
+                                (input_map, input_mem), (weight_map, weight_mem), (output_map, output_mem)))
+        os.close(fd)
+    got = unpack_output(out_raw, s["out_c"], p["out_h"], p["out_w"], p["out_width_stride"], UNPACK_C2).reshape(1, s["out_c"], p["out_h"], p["out_w"])
+    expected = compute_expected_vectorized(inp, wt, s)
+    max_diff = float(np.max(np.abs(got.astype(np.float32) - expected)))
+    ok = bool(np.allclose(got, expected, atol=0.12))
+    print(f"shape={s['name']} guarded=c576_h19_oc12_exact12 tasks={len(layout['amounts'])} submit_tasks=3 {'PASS' if ok else 'FAIL'} max_diff={max_diff:.4f}")
+    if not ok:
+        print("debug_c576_h19_oc12_oc=" + ";".join(
+            f"{start}:{float(np.max(np.abs(got[:, start:start + 2].astype(np.float32) - expected[:, start:start + 2]))):.4f}"
+            for start in range(0, s["out_c"], 2)))
+        raise AssertionError(f"output mismatch max_diff={max_diff:.4f}")
+
+
+
 
 def run_pointwise_exact11_chain_compact_weight_shape(s):
     if s["name"] not in POINTWISE_EXACT11_CHAIN_COMPACT_WEIGHT_SHAPES:
@@ -2321,11 +2509,13 @@ def main(argv=None):
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--dry-run-exact11-byk", action="store_true", help="print exact-11 BY_K metadata without DRM")
     parser.add_argument("--dry-run-c256-h2-oc64-exact11", action="store_true", help="print c256_h2_oc64 exact-11 metadata without DRM")
+    parser.add_argument("--dry-run-c576-h19-oc12-exact12", action="store_true", help="print c576_h19_oc12 exact-12 metadata without DRM")
     parser.add_argument("--dry-run-h160-spatial-by-y", action="store_true", help="print h160 spatial BY_Y executable rows without DRM")
     parser.add_argument("--allow-h160-setup3-submit", action="store_true", help="run the guarded h160 setup3 closure attempt")
     parser.add_argument("--allow-exact11-byk-submit", action="store_true", help="run the guarded exact-11 BY_K h14 attempt")
     parser.add_argument("--allow-pointwise-exact11-byk-submit", action="store_true", help="run the guarded pointwise exact-11 BY_K attempt")
     parser.add_argument("--allow-c256-h2-oc64-exact11-submit", action="store_true", help="run the guarded c256_h2_oc64 exact-11 attempt")
+    parser.add_argument("--allow-c576-h19-oc12-exact12-submit", action="store_true", help="run the guarded c576_h19_oc12 exact-12 attempt")
     args = parser.parse_args(argv)
     if args.list:
         print("encoded shape syntax: [conv2d_]bN_cN_hN_wN_ocN_wicN_kHxW_gN[_sN][_pvalid]")
@@ -2340,8 +2530,14 @@ def main(argv=None):
         if args.dry_run_c256_h2_oc64_exact11:
             dry_run_c256_h2_oc64_exact11(s)
             return 0
+        if args.dry_run_c576_h19_oc12_exact12:
+            dry_run_c576_h19_oc12_exact12(s)
+            return 0
         if s["name"] == C256_H2_OC64_EXACT11_SHAPE and args.allow_c256_h2_oc64_exact11_submit:
             run_c256_h2_oc64_exact11_shape(s)
+            return 0
+        if s["name"] == C576_H19_OC12_EXACT12_SHAPE and args.allow_c576_h19_oc12_exact12_submit:
+            run_c576_h19_oc12_exact12_shape(s)
             return 0
         if s["name"] in CRASH_FENCED_SHAPES:
             raise ValueError("shape is crash-fenced after c256_h2 setup108 generalization reboot; capture exact RKNN GEM1/GEM2 closure before submit")
