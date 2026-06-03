@@ -946,6 +946,16 @@ MANIFEST = {
         "case": "b1_c128_h2_w2_oc256_wic128_k1x1_g1_s1_pvalid 1 128 2 2 256 1 1 1 c128_h2_oc256_k1x1",
         "note": "promoted via 11-task EXACT11 BY_K closure with body field constants from capture prefix_c128_h2_oc256_s1pvalid_keep1_gem2: CBUF0=0x0b1, DATA_SIZE1=0x003f0080, CVT_CON0=0x000b, DMA_CON2=0x0ffffffc (DIFFERENT from c128_h3 family which uses 0x0ffffffd!), KT_TILE_SPLITS=((0, 96), (96, 96), (192, 64)) summing to 256, CONV2_LOW=0x008. max_diff=0.0151 PASS, pre/post simple_add PASS. 17:46 this session.",
     },
+    "c192_h7_oc384_3x3_promoted_via_exact11_byk": {
+        "shape": "b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid",
+        "case": "b1_c192_h7_w7_oc384_wic192_k3x3_g1_s1_pvalid 1 192 7 7 384 3 3 1 c192_h7_oc384_k3x3",
+        "note": "promoted via 11-task EXACT11 BY_K closure (spatial 3x3, in_h=7) with body field constants from capture prefix_c192_h7_oc384_s1pvalid_keep1_gem2: CBUF0=0x0b1, DATA_SIZE1=0x003f00c0, CVT_CON0=0x000b, DMA_CON2=0x0015, FC_DATA_SIZE0=0x00070007, FC_DATA_SIZE1=0xc0. KT_TILE_SPLITS=((0, 128), (128, 128), (256, 128)) summing to 384. CONV2_LOW=0x0a0 (in_h+kh=10, FEATURE_GRAINS=10). max_diff=0.0624 PASS. 17:50 this session.",
+    },
+    "c256_h10_oc512_3x3_promoted_via_exact11_byk": {
+        "shape": "b1_c256_h10_w10_oc512_wic256_k3x3_g1_s1_pvalid",
+        "case": "b1_c256_h10_w10_oc512_wic256_k3x3_g1_s1_pvalid 1 256 10 10 512 3 3 1 c256_h10_oc512_k3x3",
+        "note": "promoted via 11-task EXACT11 BY_K closure (spatial 3x3, in_h=10) with body field constants from capture prefix_c256_h10_oc512_s1pvalid_keep1_gem2: CBUF0=0x0a2, DATA_SIZE1=0x003f0100, CVT_CON0=0x000b, DMA_CON2=0x003c, FC_DATA_SIZE0=0x000a000a, FC_DATA_SIZE1=0x100. KT_TILE_SPLITS=((0, 176), (176, 176), (352, 160)) summing to 512. CONV2_LOW=0x0d0 (in_h+kh=13, FEATURE_GRAINS=13). max_diff=0.1121 PASS. 17:50 this session.",
+    },
 }
 
 
