@@ -1823,9 +1823,23 @@ def _c576_h19_oc12_exact12_task_regs(s, in_dma, wt_dma, out_dma):
     if s["name"] != C576_H19_OC12_EXACT12_SHAPE:
         raise ValueError("c576_h19_oc12 exact12 rows are scoped only to the RKNN-proven c576_h19_oc12 shape")
 
-    def row(family, oc_start, oc_count, cbuf0_val):
+    # Per-row y_start offsets derived from the GEM2 dump. The 5 k_tile rows write
+    # to 5 distinct output regions (not the same region). The offsets are absolute
+    # (relative to out_dma) so we patch both FEATURE_DATA_ADDR and DST_BASE_ADDR.
+    # stride_estimate = p["out_width_stride"] * 2 (fp16) * align_out_c / 2 ... ; we
+    # bypass _exact11_body_regs' y_start math and patch the addresses directly.
+    k_tile_offsets = (
+        0x1300,   # k_tile 0: y_start=4
+        0,        # k_tile 1: y_start=0
+        -0x420,   # k_tile 2: y_start=-2 (negative)
+        0,        # k_tile 3: y_start=0
+        0x850,    # k_tile 4: y_start=2
+    )
+    p = _conv_params(s)
+
+    def row(family, oc_start, oc_count, cbuf0_val, y_offset=0):
         body = _exact11_body_regs(s, family, oc_start, oc_count, in_dma, wt_dma, out_dma, input_h=19)
-        return patch_regs(body, {
+        patches = {
             (reg.CNA, reg.CNA_DATA_SIZE1): C576_H19_OC12_DATA_SIZE1,
             (reg.CNA, reg.CNA_CBUF_CON0): cbuf0_val,
             (reg.CNA, reg.CNA_CVT_CON0): C576_H19_OC12_CVT_CON0,
@@ -1836,7 +1850,15 @@ def _c576_h19_oc12_exact12_task_regs(s, in_dma, wt_dma, out_dma):
             (reg.CORE, reg.CORE_DATAOUT_SIZE_1): oc_count - 1,
             (reg.DPU, reg.DATA_CUBE_CHANNEL): ((oc_count - 1) << 16) | (oc_count - 1),
             (reg.DPU, reg.WDMA_SIZE_0): oc_count - 1,
-        })
+        }
+        if y_offset != 0:
+            # Patch FEATURE_DATA_ADDR and DST_BASE_ADDR with y_offset applied
+            # (the underlying _exact11_body_regs already adds oc_start and y_start=0 offset;
+            # we add the per-row delta here)
+            feature_delta = y_offset * p["out_w"] * UNPACK_C2 * FP16_BYTES
+            patches[(reg.CNA, reg.CNA_FEATURE_DATA_ADDR)] = in_dma + feature_delta
+            patches[(reg.DPU, reg.DST_BASE_ADDR)] = out_dma + y_offset * p["out_w"] * UNPACK_C2 * FP16_BYTES
+        return patch_regs(body, patches)
 
     aux_dma = wt_dma + 0x3600  # weight is 0x3600, aux goes after
     k_half_prelude = (
@@ -1849,9 +1871,10 @@ def _c576_h19_oc12_exact12_task_regs(s, in_dma, wt_dma, out_dma):
         row("setup", 0, 12, C576_H19_OC12_CBUF0),                                   # task 0: 108q
         list(k_half_prelude) + row("k_half", 0, 12, C576_H19_OC12_CBUF0_REUSE),     # task 1: 108q (4q prelude + 104q body)
     ]
-    for oc_start, oc_count in C576_H19_OC12_K_TILE_SPLITS:
-        rows.append(row("k_tile", oc_start, oc_count, C576_H19_OC12_CBUF0))         # 104q k_tile
-        rows.append(_exact11_aux_regs(s, out_dma, aux_dma))                          # 26q aux
+    for k_tile_idx, (oc_start, oc_count) in enumerate(C576_H19_OC12_K_TILE_SPLITS):
+        y_off = k_tile_offsets[k_tile_idx] if k_tile_idx < len(k_tile_offsets) else 0
+        rows.append(row("k_tile", oc_start, oc_count, C576_H19_OC12_CBUF0, y_offset=y_off))  # 104q k_tile
+        rows.append(_exact11_aux_regs(s, out_dma, aux_dma))                                    # 26q aux
     # Validate amounts match the expected 12-task sequence
     actual_amounts = tuple(len(r) for r in rows)
     if actual_amounts != C576_H19_OC12_EXACT12_AMOUNTS:
