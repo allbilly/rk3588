@@ -1,10 +1,48 @@
 {
   "slug": "c128_h3_oc128_s1pvalid",
   "dump_dir": "/home/orangepi/npu/ops_rknn/dump/prefix_c128_h3_oc128_s1pvalid_keep1_gem2",
-  "task_count": 0,
-  "amounts": [],
-  "masks": [],
-  "regcmd_addrs": [],
-  "body_row_count": 0,
-  "body_rows": {}
+  "task_count": 3,
+  "amounts": [
+    108,
+    108,
+    108
+  ],
+  "masks": [
+    13,
+    13,
+    13
+  ],
+  "regcmd_addrs": [
+    "0xffc32100",
+    "0xffc32100",
+    "0xffc32100"
+  ],
+  "body_row_count": 1,
+  "body_rows": [
+    {
+      "cbuf0": 177,
+      "data_size0": 196611,
+      "data_size1": 4128896,
+      "data_size3": 1,
+      "fc_data_size0": 196611,
+      "fc_data_size1": 128,
+      "dma_con2": 268435453,
+      "weight_size0": 2304,
+      "weight_size1": 2304,
+      "weight_size2": 50528257,
+      "conv_con1": 291,
+      "conv_con2": 96,
+      "core_dataout_size0": 0,
+      "core_dataout_size1": 127,
+      "dst_base": 4290961408,
+      "feature_data_addr": 4290965504,
+      "dcomp_addr": 4290973696,
+      "dst_surf_stride": 16,
+      "data_cube_height": 0,
+      "data_cube_channel": 8323199,
+      "wdma_size0": 127,
+      "wdma_size1": 0,
+      "surface_add": 64
+    }
+  ]
 }

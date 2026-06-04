@@ -20,9 +20,16 @@ DUMP_ROOT = Path("/home/orangepi/npu/ops_rknn/dump")
 OUT_DIR = Path("/home/orangepi/rk3588/conv_expt/capture_harness/decoded")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def strip_ansi(text):
+    return ANSI_RE.sub("", text)
+
 
 def decode_task_descriptors(gem1_text):
     """Parse 'Task N @ offset ...' sections to get amounts, masks, offsets, regcmd_addr."""
+    gem1_text = strip_ansi(gem1_text)
     tasks = []
     for m in re.finditer(r"Task (\d+) @ offset .*?regcfg_amount: (\d+) entries.*?regcmd_addr\s*:\s*0x([0-9a-f]+)", gem1_text, re.DOTALL):
         idx = int(m.group(1))
@@ -38,43 +45,75 @@ def decode_task_descriptors(gem1_text):
     return tasks
 
 
-def decode_body_rows(gem2_text):
+def decode_body_rows(gem2_text, tasks=None):
     """Parse body field EMIT statements to get per-row values."""
-    rows = []
-    # Match patterns like: 'CNA    EMIT(REG_CNA_CBUF_CON0, CNA_CBUF_CON0_WEIGHT_BANK(4) | CNA_CBUF_CON0_DATA_BANK(8));'
-    emit_re = re.compile(r"(\w+)\s+EMIT\((\w+),\s*([^)]+)\);")
+    gem2_text = strip_ansi(gem2_text)
+    dma_base_match = re.search(r"base selection for GEM 2: dma_base=(\d+)", gem2_text)
+    dma_base = int(dma_base_match.group(1)) if dma_base_match else None
+    # Match patterns like:
+    # [0x...] lsb 0201000000481040 - CNA EMIT(REG_CNA_CBUF_CON0, ...);
+    # The packed command word already contains the literal register value.
+    emit_re = re.compile(
+        r"\[\s*0x([0-9a-fA-F]+)\s*\].*?lsb\s+([0-9a-fA-F]{16}).*?-\s+(\w+)\s+EMIT\((\w+),\s*(.*)\);"
+    )
     field_re = re.compile(r"\w+\((\d+|\w+)\)")
 
-    # Group by absolute file offset; each "row" is a sequence of EMITs at increasing addresses
-    last_addr = -1
-    current = []
-    for m in re.finditer(r"\[\s*0x([0-9a-f]+)\s*\][^EMIT]*(\w+)\s+EMIT\((\w+),\s*([^)]+)\);", gem2_text):
+    entries = []
+    for line in gem2_text.splitlines():
+        m = emit_re.search(line)
+        if not m:
+            continue
         addr = int(m.group(1), 16)
-        target = m.group(2)
-        regname = m.group(3)
-        args = m.group(4)
-        if last_addr >= 0 and addr < last_addr:
-            # new row
-            if current:
-                rows.append(current)
-            current = []
-        # Extract field values
+        packed = int(m.group(2), 16)
+        target = m.group(3)
+        regname = m.group(4)
+        args = m.group(5)
         values = {}
+        target_code = (packed >> 48) & 0xffff
+        reg_addr = packed & 0xffff
+        values["__literal__"] = (packed >> 16) & 0xffffffff
         for fmatch in field_re.finditer(args):
             v = fmatch.group(1)
             try:
                 values[fmatch.group(0)] = int(v)
             except ValueError:
                 pass
-        # Also try to get literal value
-        lit = re.search(r"0x[0-9a-f]+|\d+", args)
-        if lit:
-            try:
-                values["__literal__"] = int(lit.group(0), 16) if lit.group(0).startswith("0x") else int(lit.group(0))
-            except ValueError:
-                pass
-        current.append(dict(addr=addr, target=target, reg=regname, args=args, values=values))
-        last_addr = addr
+        entries.append(dict(addr=addr, offset=addr & 0xfffff, target=target, target_code=target_code,
+                            reg=regname, reg_addr=reg_addr, args=args, values=values))
+
+    if tasks and dma_base is not None:
+        task_offsets = []
+        for t in tasks:
+            off = t["regcmd_addr"] - dma_base
+            if off >= 0:
+                task_offsets.append(off)
+        if not task_offsets:
+            first_cbuf = next((e["offset"] for e in entries if e["reg"] == "REG_CNA_CBUF_CON0"), None)
+            if first_cbuf is not None:
+                command_base = tasks[0]["regcmd_addr"] - max(0, first_cbuf - 0x30)
+                task_offsets = []
+                for t in tasks:
+                    off = t["regcmd_addr"] - command_base
+                    if off >= 0:
+                        task_offsets.append(off)
+        if task_offsets:
+            rows = []
+            for idx, start in enumerate(task_offsets):
+                end = task_offsets[idx + 1] if idx + 1 < len(task_offsets) else start + tasks[idx]["amount"] * 8
+                row = [e for e in entries if start <= e["offset"] < end]
+                if row:
+                    rows.append(row)
+            return rows
+
+    rows = []
+    current = []
+    for entry in entries:
+        if entry["reg"] == "REG_CNA_CBUF_CON0" and current and any(
+            e["reg"] in {"REG_DPU_DST_BASE_ADDR", "REG_PC_BASE_ADDRESS"} for e in current
+        ):
+            rows.append(current)
+            current = []
+        current.append(entry)
     if current:
         rows.append(current)
     return rows
@@ -90,17 +129,27 @@ def summarize_body_rows(rows):
         e_map = {e["reg"]: e for e in r}
         out.append(dict(
             cbuf0=e_map.get("REG_CNA_CBUF_CON0", {}).get("values", {}).get("__literal__"),
+            data_size0=e_map.get("REG_CNA_DATA_SIZE0", {}).get("values", {}).get("__literal__"),
             data_size1=e_map.get("REG_CNA_DATA_SIZE1", {}).get("values", {}).get("__literal__"),
+            data_size3=e_map.get("REG_CNA_DATA_SIZE3", {}).get("values", {}).get("__literal__"),
+            fc_data_size0=e_map.get("REG_CNA_FC_DATA_SIZE0", {}).get("values", {}).get("__literal__"),
+            fc_data_size1=e_map.get("REG_CNA_FC_DATA_SIZE1", {}).get("values", {}).get("__literal__"),
             dma_con2=e_map.get("REG_CNA_DMA_CON2", {}).get("values", {}).get("__literal__"),
             weight_size0=e_map.get("REG_CNA_WEIGHT_SIZE0", {}).get("values", {}).get("__literal__"),
             weight_size1=e_map.get("REG_CNA_WEIGHT_SIZE1", {}).get("values", {}).get("__literal__"),
             weight_size2=e_map.get("REG_CNA_WEIGHT_SIZE2", {}).get("values", {}).get("__literal__"),
             conv_con1=e_map.get("REG_CNA_CONV_CON1", {}).get("values", {}).get("__literal__"),
             conv_con2=e_map.get("REG_CNA_CONV_CON2", {}).get("values", {}).get("__literal__"),
+            core_dataout_size0=e_map.get("REG_CORE_DATAOUT_SIZE_0", {}).get("values", {}).get("__literal__"),
+            core_dataout_size1=e_map.get("REG_CORE_DATAOUT_SIZE_1", {}).get("values", {}).get("__literal__"),
             dst_base=e_map.get("REG_DPU_DST_BASE_ADDR", {}).get("values", {}).get("__literal__"),
             feature_data_addr=e_map.get("REG_CNA_FEATURE_DATA_ADDR", {}).get("values", {}).get("__literal__"),
             dcomp_addr=e_map.get("REG_CNA_DCOMP_ADDR0", {}).get("values", {}).get("__literal__"),
             dst_surf_stride=e_map.get("REG_DPU_DST_SURF_STRIDE", {}).get("values", {}).get("__literal__"),
+            data_cube_height=e_map.get("REG_DPU_DATA_CUBE_HEIGHT", {}).get("values", {}).get("__literal__"),
+            data_cube_channel=e_map.get("REG_DPU_DATA_CUBE_CHANNEL", {}).get("values", {}).get("__literal__"),
+            wdma_size0=e_map.get("REG_DPU_WDMA_SIZE_0", {}).get("values", {}).get("__literal__"),
+            wdma_size1=e_map.get("REG_DPU_WDMA_SIZE_1", {}).get("values", {}).get("__literal__"),
             surface_add=e_map.get("REG_DPU_SURFACE_ADD", {}).get("values", {}).get("__literal__"),
         ))
     return out
@@ -127,7 +176,7 @@ def main():
         gem1_text = gem1.read_text(errors="ignore")
         gem2_text = gem2.read_text(errors="ignore")
         tasks = decode_task_descriptors(gem1_text)
-        rows = decode_body_rows(gem2_text)
+        rows = decode_body_rows(gem2_text, tasks)
         body_summary = summarize_body_rows(rows)
         out = dict(
             slug=slug,

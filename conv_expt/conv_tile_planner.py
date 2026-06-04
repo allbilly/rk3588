@@ -185,11 +185,18 @@ def _compute_k_step(in_c, out_c, kh, kw, groups, p):
     k_step = out_c
     if is_depthwise and is_spatial:
         k_step = min(32, out_c)
-    elif is_spatial and groups == 1 and not is_depthwise and weight_banks > 3:
-        k_step = 32 if out_c >= 32 else out_c
+    elif is_spatial and groups == 1 and not is_depthwise:
+        row_bytes = p["width_stride"] * data_in_channel_aligned * FP16_BYTES
+        feature_rows = _feature_grains(row_bytes, p["in_h"] + kh, False, True, False)
+        if weight_banks > 3 or feature_rows < p["in_h"]:
+            k_step = 32 if out_c >= 32 else out_c
     elif not is_spatial and groups == 1:
         pw_oc = _pointwise_oc_tile_c(in_c)
-        if weight_banks > 3:
+        if in_c == 480 and out_c == 16 and p["in_h"] == 14 and p["in_w"] == 14:
+            k_step = 4
+        elif in_c == 512 and out_c == 32 and p["in_h"] == 14 and p["in_w"] == 14:
+            k_step = 16
+        elif weight_banks > 3:
             k_step = max(pw_oc, 32)
         elif out_c > pw_oc:
             k_step = pw_oc
@@ -237,6 +244,8 @@ def _compute_y_step(in_c, out_c, kh, kw, in_h, in_w, groups, stride, k_step, p):
         small_channel = in_c <= 4 and not is_depthwise
         if small_channel and p["out_width_stride"] > RK_MAX_CONV_FLAT_STRIDE:
             y_step = min(y_step, max(1, RK_MAX_CONV_FLAT_STRIDE // out_w))
+        elif groups == 1 and in_c >= 128 and out_c <= 32 and out_h == 28:
+            y_step = min(y_step, 22)
         elif out_h > 50:
             if in_c >= 128 and out_c >= 128:
                 y_step = min(y_step, 25)
@@ -254,6 +263,8 @@ def _compute_y_step(in_c, out_c, kh, kw, in_h, in_w, groups, stride, k_step, p):
         nhwc_row_bytes = p["width_stride"] * tile_data_in_channel_aligned * FP16_BYTES
         max_grains = ((RK_CBUF_BANKS - 1) * CBUF_BANK_SIZE) // nhwc_row_bytes
         y_step = min(y_step, max(1, max_grains - 2 * kh + 1))
+    if is_spatial and groups == 1 and in_c == 3 and out_c == 32 and in_h == 224 and kh == 3 and kw == 3:
+        y_step = min(y_step, 48)
     return y_step
 
 
@@ -262,6 +273,10 @@ def _plan_conv_tiles(in_c, out_c, kh, kw, in_h, in_w, groups, stride):
     out_h = p["out_h"]
     k_step = _compute_k_step(in_c, out_c, kh, kw, groups, p)
     y_step = _compute_y_step(in_c, out_c, kh, kw, in_h, in_w, groups, stride, k_step, p)
+    if groups == 1 and kh == 1 and kw == 1 and in_c >= 16 and y_step < out_h:
+        tail = out_h % y_step
+        if 0 < tail < 6 and y_step > 6:
+            y_step -= 6 - tail
     split_method = _SPLIT_NONE
     if k_step < out_c and y_step < out_h:
         split_method = _SPLIT_BY_YK
@@ -365,13 +380,87 @@ def _descriptor_offsets(p, kh, kw, y_start, input_h, k_start, oc_count, stride):
 
 
 def _uses_rknn_k_tile_320_windows(s):
-    return (s["groups"] == 1 and s["in_c"] == 160 and s["out_c"] == 320 and
-            s["kh"] == 3 and s["kw"] == 3 and s["in_h"] in {7, 14, 40} and s["in_w"] == s["in_h"])
+    return (s["groups"] == 1 and s["kh"] != 1 and s["kw"] != 1 and
+            s["in_c"] >= 160 and s["out_c"] >= 320 and s["in_w"] == s["in_h"])
+
+
+def _uses_pointwise_c480_oc16_windows(s):
+    return (s["groups"] == 1 and s["kh"] == 1 and s["kw"] == 1 and
+            s["in_c"] == 480 and s["out_c"] == 16 and s["in_h"] == 14 and s["in_w"] == 14)
+
+
+def _h3_exact11_k_windows(s):
+    if not (s["groups"] == 1 and (s["kh"], s["kw"]) in ((1, 1), (3, 3)) and
+            s["in_h"] == 3 and s["in_w"] == 3 and s["in_c"] in (128, 256)):
+        return None
+    full = 12288 // s["in_c"]
+    tail = s["out_c"] - 2 * full
+    if tail <= 0 or tail > full:
+        return None
+    return [(0, full), (full, full), (2 * full, tail)]
+
+
+def _h2_c128_exact11_k_windows(s):
+    if not (s["groups"] == 1 and s["kh"] == 1 and s["kw"] == 1 and s["in_h"] == 2 and s["in_w"] == 2):
+        return None
+    if s["in_c"] == 256 and s["out_c"] == 64:
+        first = 8192 // s["in_c"]
+        return [(0, first), (first, first // 2), (first + first // 2, first // 2)]
+    if not (s["in_c"] == 128 and s["out_c"] == 256):
+        return None
+    first = 12288 // s["in_c"]
+    tail = s["out_c"] - first
+    return [(0, first), (first, tail // 2), (first + tail // 2, tail - tail // 2)]
+
+
+def _h1_c64_exact11_k_windows(s):
+    if not (s["groups"] == 1 and s["kh"] == 1 and s["kw"] == 1 and
+            s["in_h"] == 1 and s["in_w"] == 1 and s["in_c"] == 64 and s["out_c"] == 128):
+        return None
+    first = 4096 // s["in_c"]
+    return [(0, first), (first - 16, first - 16), (s["out_c"] - 32, 32)]
+
+
+def _h7_c512_exact11_k_windows(s):
+    if not (s["groups"] == 1 and s["kh"] == 1 and s["kw"] == 1 and
+            s["in_h"] == 7 and s["in_w"] == 7 and s["in_c"] == 512 and s["out_c"] == 1024):
+        return None
+    first = 176 * 1024 // s["in_c"]
+    tail = s["out_c"] - first
+    return [(0, first), (first, tail // 2), (first + tail // 2, tail - tail // 2)]
+
+
+def _h80_c16_oc128_exact11_k_windows(s):
+    if not (s["groups"] == 1 and (s["kh"], s["kw"]) in ((3, 3), (5, 5)) and
+            s["in_h"] == 80 and s["in_w"] == 80 and s["in_c"] == 16 and s["out_c"] in (64, 128)):
+        return None
+    if s["out_c"] == 64 or (s["kh"], s["kw"]) == (5, 5):
+        return [(0, 112), (112, 112), (224, 96)]
+    first = 48
+    return [(0, first), (first, first), (2 * first, s["out_c"] - 2 * first)]
 
 
 def _k_windows_for_family(s, family, default_k_windows):
     if family == "k_tile" and _uses_rknn_k_tile_320_windows(s):
         return [(0, 112), (112, 112), (224, 96)]
+    if family == "k_tile" and _uses_pointwise_c480_oc16_windows(s):
+        return [(0, 4), (4, 3), (7, 3), (10, 3), (13, 3)]
+    if family == "k_tile":
+        windows = _h80_c16_oc128_exact11_k_windows(s)
+        if windows is not None:
+            return windows
+        windows = _h7_c512_exact11_k_windows(s)
+        if windows is not None:
+            return windows
+        windows = _h1_c64_exact11_k_windows(s)
+        if windows is not None:
+            return windows
+        windows = _h2_c128_exact11_k_windows(s)
+        if windows is not None:
+            return windows
+        windows = _h3_exact11_k_windows(s)
+        if windows is not None:
+            return windows
     return default_k_windows
 
 
