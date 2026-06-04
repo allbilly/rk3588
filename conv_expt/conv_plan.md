@@ -10,6 +10,29 @@ Build a clean FP16 CONV implementation for RK3588 NPU with:
 - Unsupported shapes fenced before allocation.
 - Eventual `217/217 PASS` on the canonical sweep.
 
+## Rewrite Status 2026-06-04
+
+`conv_expt/conv_1stprinciple.py` has now been completely rewritten as the compact
+runtime seed. The old 5k-line proof harness is preserved as
+`conv_expt/conv_1stprinciple_ref.py`, so the active file no longer needs to carry
+RKNN capture materializers, parity reports, failed closure experiments, or long
+shape-name allowlists.
+
+The active runtime is now coverage-first and descriptor-driven:
+
+```text
+shape
+  -> conv_tile_planner descriptor rows
+  -> generic local schedule selection
+  -> direct / BY_Y / BY_K / BY_YK setup-local / grouped / depthwise serial
+  -> one small hardware submit per local tile
+```
+
+This is intentionally not the final high-performance exact-chain CONV compiler.
+It is the clean base for replacing expensive local decomposition with real
+`setup/k_half/k_tile/aux` formulas once those semantics are derived from RK3588
+atomic-C/atomic-K hardware rules.
+
 The final design stays descriptor-driven:
 
 ```text
@@ -31,12 +54,13 @@ Current observed state:
 |---|---|---|
 | `examples/conv.py` | Hardware oracle/scratchpad | ~2927 lines, many prefix-replay-derived special cases. |
 | `conv_expt/conv_tile_planner.py` | Planner source of truth | ~527 lines, owns descriptor planning only. |
-| `conv_expt/conv_1stprinciple.py` | Clean hardware-submit proof harness | ~2095 lines, planner-backed, broad hardware submit coverage, but still imports scratch helpers from `examples/conv.py`. |
+| `conv_expt/conv_1stprinciple.py` | Active compact runtime seed | 375 lines, planner-backed, generic local decomposition, no exact11/capture materializer tables. |
+| `conv_expt/conv_1stprinciple_ref.py` | Archived proof harness/oracle | ~5215 lines, historical 217/217 evidence, capture-derived materializers, parity/debug reports. |
 | `examples/conv_tiles.py` | Large RKNN-topology reference | ~2588 lines, do not import/copy into clean runtime. |
 
-Current no-submit classification is `runnable=217, fenced=0` across the 217-shape set. Many promoted families still came from prefix-replay-derived evidence. That proves hardware behavior but not yet the final clean abstraction.
+The archived proof harness reached `runnable=217, fenced=0` and hardware-passed the canonical 217-shape sweep. Many promoted families still came from prefix-replay-derived evidence. That proves hardware behavior but not yet the final clean abstraction.
 
-The canonical 217-shape hardware sweep now passes through `conv_expt/conv_1stprinciple.py`, with `examples/simple_add.py` passing before and after the sweep. Several parity-clean CONV closures are still retained only as analysis evidence because they failed numerically or were unsafe; the passing coverage comes from safer first-principles alternate lowerings where needed.
+The active compact runtime is not yet claimed as the final 217/217 hardware implementation. It is the new base to validate generic local decomposition first, then selectively replace slow local paths with real exact-chain emitter formulas. Several parity-clean CONV closures remain retained only in `_ref.py` as analysis evidence because they failed numerically or were unsafe.
 
 ## Conv Python File Map
 
@@ -44,7 +68,8 @@ Use this map to decide what should feed first-principles work. High-value files 
 
 | File | Role | Help for first-principles work | Why |
 |---|---|---:|---|
-| `conv_expt/conv_1stprinciple.py` | Current clean-submit prototype | High | Target implementation; owns runnable/fenced policy and current emitters. |
+| `conv_expt/conv_1stprinciple.py` | Active compact runtime seed | High | Target implementation; owns generic local schedule selection and submit flow. |
+| `conv_expt/conv_1stprinciple_ref.py` | Archived proof harness/oracle | High | Historical hardware evidence; mine for formulas only, do not port shape tables. |
 | `conv_expt/conv_tile_planner.py` | No-submit descriptor planner | High | Core planner contract for `NONE/BY_Y/BY_K/BY_YK`. |
 | `conv_expt/conv_tile_cpu.py` | CPU-only planner validation harness | High | Safely validates descriptor math and shape coverage without NPU submit. |
 | `conv_expt/conv_pershapepatch.py` | Large per-shape patched submit path | Medium | Useful historical register evidence, but too per-shape for final runtime. |
@@ -85,15 +110,23 @@ Use this map to decide what should feed first-principles work. High-value files 
 
 ## Strategic Decision
 
-Do not chase `217/217` by adding more per-shape special cases first.
+Do not chase `217/217` in the active runtime by adding more per-shape special cases first.
 
-Use the current scratch implementation and RKNN captures as evidence, then derive generic family rules. The next clean implementation path is `conv_expt/conv_1stprinciple.py`, not more growth in `examples/conv.py`.
+Use `conv_1stprinciple_ref.py`, `examples/conv.py`, and RKNN captures as evidence, then derive generic family rules. The active clean implementation path is now `conv_expt/conv_1stprinciple.py`, not more growth in `examples/conv.py`.
 
 ## New First-Principles Runtime Seed
 
-`conv_expt/conv_1stprinciple.py` now has hardware submit.
+`conv_expt/conv_1stprinciple.py` now has a compact hardware-submit runtime seed.
 
-Current no-submit classification from `python3 conv_expt/conv_1stprinciple.py --list`:
+The active seed supports generic local lowering families and deliberately omits
+the archived exact11/exact12 capture materializers. It should be evaluated first
+for safety and correctness on representative shapes, then broadened through
+hardware-understood formulas.
+
+Historical 217/217 evidence below refers to `conv_expt/conv_1stprinciple_ref.py`
+unless explicitly stated otherwise.
+
+Archived no-submit classification from the proof harness:
 
 ```text
 runnable 217
@@ -210,23 +243,24 @@ Run before and after every hardware experiment:
 python3 examples/simple_add.py
 ```
 
-2. Stabilize `conv_1stprinciple.py` as the clean entrypoint.
+2. Stabilize the rewritten `conv_1stprinciple.py` as the clean entrypoint.
 
 Required checks:
 
 ```sh
 python3 -m py_compile conv_expt/conv_1stprinciple.py examples/conv.py
+python3 conv_expt/conv_1stprinciple.py --list
 python3 conv_expt/conv_1stprinciple.py --dry-run conv2d_b1_c4_h9_w9_oc4_wic4_k3x3_g1
 python3 conv_expt/conv_1stprinciple.py conv2d_b1_c4_h9_w9_oc4_wic4_k3x3_g1
 python3 conv_expt/conv_1stprinciple.py conv2d_b1_c96_h56_w56_oc24_wic96_k1x1_g1
 python3 conv_expt/conv_1stprinciple.py b1_c160_h14_w14_oc320_wic160_k3x3_g1_s1_pvalid
 ```
 
-Expected behavior: the two small hardware shapes PASS; the BY_K shape is runnable through the promoted high-channel spatial BY_K family.
+Expected behavior for the rewritten seed: no-submit listing/dry-run are deterministic; small representative hardware shapes pass through local decomposition with pre/post `simple_add.py`. The BY_K shape may run as local K decomposition first; exact-chain replacement should only be promoted after formula parity and hardware proof.
 
-3. Add a small no-submit suite mode to `conv_1stprinciple.py`.
+3. Keep the small no-submit suite mode in `conv_1stprinciple.py`.
 
-Goal: report all 217 shapes by `runnable/fenced`, split, families, and row count. Keep it read-only and deterministic. This is the selection tool for clean family work.
+Goal: report all 217 shapes by schedule kind, split, families, and row count. Keep it read-only and deterministic. This is the selection tool for clean family work.
 
 4. Run all `NONE/setup` candidates through `conv_1stprinciple.py`.
 
@@ -338,7 +372,7 @@ The first clean rule has a local fallback for 10 pointwise BY_YK shapes: use pla
 
 14. Only after family rules stabilize, replace `examples/conv.py`.
 
-When `conv_1stprinciple.py` covers most families with generic emitters, either rename it into `examples/conv.py` or port its clean structure there. The target is still `< 1000` lines.
+When `conv_1stprinciple.py` covers the canonical shapes with generic emitters or understood NPU-only fallback lowerings, either rename it into `examples/conv.py` or port its clean structure there. The target is still `< 1000` lines; the active seed is currently 375 lines, leaving room for real exact-chain formulas.
 
 ## Acceptance Gates
 
