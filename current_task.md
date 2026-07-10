@@ -1,6 +1,6 @@
 # Current Task: Prefix-Replay Debug of All FENCED Shapes in `examples/conv.py`
 
-**Last updated:** 2026-06-03 18:00 (Asia/Shanghai)
+**Last updated:** 2026-06-03 21:01 (Asia/Shanghai) — Promoted c480_h14_oc16 via a new "no-khalf" exact11 materializer variant (1 setup + 5 k_tiles + 5 aux = 11 tasks). Added `C480_H14_OC16_EXACT11_SHAPE`, `no_khalf_5tile_layout()`, override entries (CBUF0=0x066, DATA_SIZE1=0x1f01e0, DMA_CON2=0x8c, CVT_CON0=0xb), KT_TILE_SPLITS=((0,4),(4,3),(7,3),(10,3),(13,3)). Direct run PASSed `max_diff=0.0312`, pre/post `simple_add.py` PASS, sweep `/home/orangepi/rk3588/sweep_results/conv_py_217_sweep_20260603_210134_summary.txt` confirms **PASS=146/FENCED=71** (no regression). c512_h14_oc24 attempt at 20:35 with same pattern FAILED `max_diff=135.34` (per-tile DATA_SIZE3 98/98/70/70/56 not the default; per-tile CONV_CON2 differs); reverted. c512_h14_oc24 remains FENCED (BY_K/k_tile).
 **Owner:** Codex session (continuing multi-model handoff; previous session was "it crashed" - see Session Continuity SS 10.2)
 **CWD:** `/home/orangepi/rk3588`
 **NPU health (verified 18:00):** `python3 examples/simple_add.py` returns `ret=0, handle=5` and `ADD NPU=[8 8 8 8 8 8 8 8] expected=[8 8 8 8 8 8 8 8] PASS`. Board has NOT been rebooted this session.

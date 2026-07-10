@@ -473,13 +473,29 @@ def run_gemm(m, n, k, a_matrix, b_matrix, out_fp16=False):
     input_packed = np.zeros(align_in * m, dtype=np.float16)
     input_packed.reshape(m, align_in)[:, :k] = a_matrix[:, :k]
     input_packed = input_packed.view(np.uint16).tolist()
-    
+
     # pack_weight_tile_16x32
     weight = np.zeros((align_out, align_in), dtype=np.float16)
     weight_packed = np.zeros(align_out * align_in, dtype=np.float16)
     weight[:n, :k] = b_matrix.T[:n, :k]
     weight_packed[:] = weight.reshape(align_out // 16, 16, align_in // 32, 32).transpose(0, 2, 1, 3).ravel()
     weight_packed = weight_packed.view(np.uint16).tolist()
+
+    def fmt(v):
+        if v == 0:
+            return "      0 "
+        fv = np.frombuffer(np.array([v], dtype=np.uint16).tobytes(), dtype=np.float16)[0]
+        return f"0x{v:04x}={fv:>5.2f}"
+    print(f"{'idx':>4} | {'input':<14} | {'weight':<14}")
+    print(f"{'-'*4}-+-{'-'*14}-+-{'-'*14}")
+    for i in range(max(len(input_packed), len(weight_packed))):
+        iv = input_packed[i] if i < len(input_packed) else 0
+        wv = weight_packed[i] if i < len(weight_packed) else 0
+        if iv == 0 and wv == 0:
+            continue
+        is_ = fmt(iv) if i < len(input_packed) else "-" * 14
+        ws = fmt(wv) if i < len(weight_packed) else "-" * 14
+        print(f"{i:4d} | {is_:<14} | {ws:<14}")
     
     # write np array to C array
     ct_inputs = (ctypes.c_uint16 * len(input_packed)).from_buffer(input_map)
@@ -507,6 +523,15 @@ def run_gemm(m, n, k, a_matrix, b_matrix, out_fp16=False):
     if npu_submit(tasks_mem_create.obj_addr, task_count=len(task_regs), flags=submit_flags) < 0:
         raise RuntimeError("npu_submit failed")
 
+    # raw DPU surface: m rows × align_out channels, with notch junk between useful cells
+    print(f"raw output surface (m={m}, align_out={align_out}, dtype={out_dtype}):")
+    for idx, v in enumerate(output[:m * align_out]):
+        if v == 0:
+            continue
+        row, col = divmod(idx, align_out)
+        mark = "" if col < n else " (junk)"
+        print(f"  [{idx:4d}] r{row} c{col} = {v}{mark}")
+
     if out_fp16:
         expected = _gemm_output_indices(m, n, align_out, True)
         result = output[expected].copy().reshape(m, n)
@@ -522,15 +547,39 @@ if __name__ == "__main__":
     out_fp16 = "--out" in sys.argv and sys.argv[sys.argv.index("--out") + 1] == "fp16"
     test_cases = [
         (2, 2, 1,
-        np.array([[1], [3]], dtype=np.float16),
-        np.array([[5, 6]], dtype=np.float16)),
+        np.array([[1],
+                  [2]], dtype=np.float16),
+        np.array([[4, 5]], dtype=np.float16)),
+        # k=2 matmul: a = [[1, 2], [3, 4]], b = [[5, 6], [7, 8]]
+        #   a @ b = [[1*5+2*7, 1*6+2*8],   = [[19, 22],
+        #            [3*5+4*7, 3*6+4*8]]      [43, 50]]
+        (2, 2, 2,
+        np.array([[1, 2],
+                  [3, 4]], dtype=np.float16),
+        np.array([[5, 6],
+                  [7, 8]], dtype=np.float16)),
     ]
+    """
+    for 2x2
+    A = [[1],     B = [[4, 5]]   A@B = [[1*4, 1*5], = [[4,  5],
+        [2]]                          [2*4, 2*5]] = [8, 10]]
+
+    for 3x3
+    A = [[1],     B = [[4, 5, 6]]   A@B = [[1*4, 1*5, 1*6], = [[4,  5,  6],
+        [2],                               [2*4, 2*5, 2*6], = [8,  10, 12],
+        [3]]                               [3*4, 3*5, 3*6]] = [12, 15, 18]]
+
+    for k=2 (a 2x2, b 2x2)
+    A = [[1, 2],  B = [[5, 6],  A@B = [[1*5+2*7, 1*6+2*8],   = [[19, 22],
+         [3, 4]]     [7, 8]]             [3*5+4*7, 3*6+4*8]]      [43, 50]]
+    """
+
     np.random.seed(42)
-    for size in range(2,520,2):
-        m = n = k = size
-        a = np.random.randn(m, k).astype(np.float16)
-        b = np.random.randn(k, n).astype(np.float16)
-        test_cases.append((m, n, k, a, b))
+    # for size in range(2,520,2):
+    #     m = n = k = size
+    #     a = np.random.randn(m, k).astype(np.float16)
+    #     b = np.random.randn(k, n).astype(np.float16)
+    #     test_cases.append((m, n, k, a, b))
 
     for m, n, k, a, b in test_cases:
         print(f"\n{m}x{n}x{k} ({'fp16' if out_fp16 else 'fp32'}):")
@@ -542,4 +591,6 @@ if __name__ == "__main__":
         md = np.max(np.abs(r.astype(np.float64) - expected.astype(np.float64)))
         print(f"  {'PASS' if ok else 'FAIL'} (max_diff={md:.4f})")
         assert ok , f"test shape {m, n, k} failed"
+        print("result:  ", r)
+        print("expected:", expected)
     os.close(fd)

@@ -1,0 +1,991 @@
+Function "ioctl" not defined.
+Breakpoint 1 (ioctl) pending.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/aarch64-linux-gnu/libthread_db.so.1".
+
+################################################################################
+Conv2D Multi-Test Suite
+Testing 1 different convolution shapes
+################################################################################
+
+================================================================================
+TEST: conv2d_cc_b1_c256_h14_w14_oc512_wic256_k1x1_g1
+  Weight shape: (512,256,1,1)
+================================================================================
+I RKNN: [13:17:49.364] RKNN Runtime Information, librknnrt version: 2.3.0 (c949ad889d@2024-11-07T11:35:33)
+I RKNN: [13:17:49.365] RKNN Driver Information, version: 0.9.8
+I RKNN: [13:17:49.365] RKNN Model Information, version: 6, toolkit version: 2.3.2(compiler version: 2.3.2 (@2025-04-03T08:26:16)), target: RKNPU v2, target platform: rk3588, framework name: ONNX, framework layout: NCHW, model inference type: static_shape
+D RKNN: [13:17:49.367] allocated memory, name: task, virt addr: 0x7ff7ff6000, dma addr: 0xfff9f000, obj addr: 0xffffff8108552c00, size: 440, aligned size: 4096, fd: 4, handle: 1, flags: 0x40b, gem name: 1, iommu domain id: 0
+D RKNN: [13:17:49.369] allocated memory, name: weight, virt addr: 0x7ff7347000, dma addr: 0xfff5c000, obj addr: 0xffffff8108553000, size: 271296, aligned size: 274432, fd: 5, handle: 2, flags: 0x403, gem name: 2, iommu domain id: 0
+D RKNN: [13:17:49.371] subgraph0 regcmdbuffer size: 6656, taskbuffer size: 440
+D RKNN: [13:17:49.372] allocated memory, name: internal, virt addr: 0x7ff72fd000, dma addr: 0xfff12000, obj addr: 0xffffff8108550800, size: 301056, aligned size: 303104, fd: 6, handle: 3, flags: 0x403, gem name: 3, iommu domain id: 0
+D RKNN: [13:17:49.373] ------------------------------------------------------------------------------------------------------------------
+D RKNN: [13:17:49.373]                                       Feature Tensor Information Table                         
+D RKNN: [13:17:49.373] --------------------------------------------------------------------------------+---------------------------------
+D RKNN: [13:17:49.373] ID  User           Tensor   DataType  DataFormat   OrigShape     NativeShape    |     [Start       End)       Size
+D RKNN: [13:17:49.373] --------------------------------------------------------------------------------+---------------------------------
+D RKNN: [13:17:49.373] 1   Conv           input    FLOAT16   NC1HWC2      (1,256,14,14) (1,128,14,14,8) | 0xfff12000 0xfff2a800 0x00018800
+D RKNN: [13:17:49.373] 2   OutputOperator output   FLOAT16   NC1HWC2      (1,512,14,14) (1,256,14,14,8) | 0xfff2a800*0xfff5b800 0x00031000
+D RKNN: [13:17:49.373] --------------------------------------------------------------------------------+---------------------------------
+D RKNN: [13:17:49.373] -------------------------------------------------------------------------------
+D RKNN: [13:17:49.373]                           Const Tensor Information Table         
+D RKNN: [13:17:49.373] ---------------------------------------------+---------------------------------
+D RKNN: [13:17:49.373] ID  User Tensor      DataType  OrigShape     |     [Start       End)       Size
+D RKNN: [13:17:49.373] ---------------------------------------------+---------------------------------
+D RKNN: [13:17:49.373] 1   Conv conv.weight FLOAT16   (512,256,1,1) | 0xfff5c000 0xfff9c000 0x00040000
+D RKNN: [13:17:49.373] ---------------------------------------------+---------------------------------
+D RKNN: [13:17:49.373] ----------------------------------------
+D RKNN: [13:17:49.373] Total Internal Memory Size: 294KB
+D RKNN: [13:17:49.373] Total Weight Memory Size: 258KB
+D RKNN: [13:17:49.373] ----------------------------------------
+D RKNN: [13:17:49.373] The RKNN_FLAG_EXECUTE_FALLBACK_PRIOR_DEVICE_GPU is not set and without GPU op in Graphs, OpenCL will not be initialized
+  Native input type: FP16, format: NC1HWC2
+  Native input dims: 1 32 14 14 8
+  Native input size: 100352, size_with_stride: 100352, w_stride: 14
+  Native output type: FP16, format: NC1HWC2
+  Native output dims: 1 64 14 14 8
+  Native output size: 200704, size_with_stride: 200704, w_stride: 0
+GEM 1: handle=1 size=4096 map_offset=0x100000000
+  task_like_entries=11
+  task_like[0] off=0x0000 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=108 regcfg_offset=0 regcmd_addr=0x00000000fff9c800
+  task_like[1] off=0x0028 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x00000000fff9cb80
+  task_like[2] off=0x0050 flags=0x00000000 op_idx=1 enable_mask=0x00000060 int_mask=0x00000c00 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=26 regcfg_offset=0 regcmd_addr=0x00000000fff9cf00
+  task_like[3] off=0x0078 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x00000000fff9d000
+  task_like[4] off=0x00a0 flags=0x00000000 op_idx=1 enable_mask=0x00000060 int_mask=0x00000c00 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=26 regcfg_offset=0 regcmd_addr=0x00000000fff9d380
+  task_like[5] off=0x00c8 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x00000000fff9d480
+  task_like[6] off=0x00f0 flags=0x00000000 op_idx=1 enable_mask=0x00000060 int_mask=0x00000c00 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=26 regcfg_offset=0 regcmd_addr=0x00000000fff9d800
+  task_like[7] off=0x0118 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x00000000fff9d900
+  task_like[8] off=0x0140 flags=0x00000000 op_idx=1 enable_mask=0x00000060 int_mask=0x00000c00 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=26 regcfg_offset=0 regcmd_addr=0x00000000fff9dc80
+  task_like[9] off=0x0168 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x00000000fff9dd80
+  task_like[10] off=0x0190 flags=0x00000000 op_idx=1 enable_mask=0x00000060 int_mask=0x00000c00 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=26 regcfg_offset=0 regcmd_addr=0x00000000fff9e100
+GEM 2: handle=2 size=274432 map_offset=0x100001000
+  task_like_entries=39
+  task_like[0] off=0x40010 flags=0x01010101 op_idx=16843009 enable_mask=0x01010101 int_mask=0x01010101 int_clear=0x00000000 int_status=0x00000000 regcfg_amount=1585 regcfg_offset=0 regcmd_addr=0x0000005590e3b7b0
+  task_like[1] off=0x40038 flags=0x8b601b70 op_idx=127 enable_mask=0x00000000 int_mask=0x00000000 int_clear=0x00000000 int_status=0x00000000 regcfg_amount=48 regcfg_offset=0 regcmd_addr=0x0000000000000040
+  task_like[2] off=0x40218 flags=0x00000021 op_idx=0 enable_mask=0x90e420f0 int_mask=0x00000055 int_clear=0x90e413f0 int_status=0x00000055 regcfg_amount=144 regcfg_offset=0 regcmd_addr=0x0000000000000040
+  task_like[3] off=0x40330 flags=0x90e3b7b0 op_idx=85 enable_mask=0x8b601b70 int_mask=0x0000007f int_clear=0x00000000 int_status=0x00000000 regcfg_amount=0 regcfg_offset=0 regcmd_addr=0x0000000000000030
+  task_like[4] off=0x40358 flags=0x00000040 op_idx=0 enable_mask=0x95bd1951 int_mask=0x00000055 int_clear=0x00000000 int_status=0x00000000 regcfg_amount=5 regcfg_offset=0 regcmd_addr=0x0000005590e41700
+  task_like[5] off=0x40380 flags=0x56607290 op_idx=127 enable_mask=0x90e41720 int_mask=0x00000055 int_clear=0x00000000 int_status=0x00000000 regcfg_amount=33 regcfg_offset=0 regcmd_addr=0x0000005590e420f0
+  task_like[6] off=0x40588 flags=0x00000000 op_idx=0 enable_mask=0x00000000 int_mask=0x00000000 int_clear=0x00000000 int_status=0x00000000 regcfg_amount=0 regcfg_offset=0 regcmd_addr=0x0000007f8170b570
+  task_like[7] off=0x40790 flags=0x00000000 op_idx=0 enable_mask=0x00000001 int_mask=0x00000000 int_clear=0x90e3d9f8 int_status=0x00000055 regcfg_amount=1 regcfg_offset=0 regcmd_addr=0x0000005590e3e0b0
+  task_like[8] off=0x407e0 flags=0x00000000 op_idx=0 enable_mask=0x00000000 int_mask=0x00000000 int_clear=0x00000000 int_status=0x00000000 regcfg_amount=0 regcfg_offset=0 regcmd_addr=0x0201000000841040
+  task_like[9] off=0x408a8 flags=0x0000105c op_idx=33619969 enable_mask=0x00001060 int_mask=0x02010000 int_clear=0x00001064 int_status=0x02010000 regcfg_amount=4200 regcfg_offset=33619968 regcmd_addr=0x0201ffef90001070
+  task_like[10] off=0x40ab0 flags=0x00004090 op_idx=268500992 enable_mask=0x00004094 int_mask=0x10010000 int_clear=0x00004098 int_status=0x10010000 regcfg_amount=16540 regcfg_offset=268500992 regcmd_addr=0x10010000000040a0
+  task_like[11] off=0x40b00 flags=0x00004100 op_idx=268500992 enable_mask=0x00004104 int_mask=0x10010000 int_clear=0x00004108 int_status=0x10010000 regcfg_amount=16652 regcfg_offset=268500992 regcmd_addr=0x1001000000004110
+  task_like[12] off=0x40b50 flags=0x00004128 op_idx=268500992 enable_mask=0x0000412c int_mask=0x10010000 int_clear=0x00000000 int_status=0x00000000 regcfg_amount=20 regcfg_offset=16842752 regcmd_addr=0x0041000000000000
+  task_like[13] off=0x40bf0 flags=0x00001050 op_idx=33619969 enable_mask=0x00001054 int_mask=0x02010001 int_clear=0x00001058 int_status=0x02010001 regcfg_amount=4188 regcfg_offset=33619969 regcmd_addr=0x0201000000001060
+  task_like[14] off=0x40cb8 flags=0x00001160 op_idx=33619968 enable_mask=0x00001164 int_mask=0x02010000 int_clear=0x00001168 int_status=0x02010000 regcfg_amount=4460 regcfg_offset=33619968 regcmd_addr=0x0201000000001170
+  task_like[15] off=0x40d08 flags=0x02003010 op_idx=134283264 enable_mask=0x000d3014 int_mask=0x0801000d int_clear=0x00ff3018 int_status=0x08010000 regcfg_amount=12316 regcfg_offset=134283264 regcmd_addr=0x0801000000003030
+  task_like[16] off=0x41118 flags=0x00001150 op_idx=33619968 enable_mask=0x00001154 int_mask=0x02010000 int_clear=0x00001158 int_status=0x02010000 regcfg_amount=4444 regcfg_offset=33619968 regcmd_addr=0x0201000000001160
+  task_like[17] off=0x41168 flags=0x00001178 op_idx=33619968 enable_mask=0x0000117c int_mask=0x02010000 int_clear=0x00001180 int_status=0x02010000 regcfg_amount=4484 regcfg_offset=33619968 regcmd_addr=0x0801000002003010
+  task_like[18] off=0x41258 flags=0x03834070 op_idx=268500992 enable_mask=0x00004074 int_mask=0x10010000 int_clear=0x00014078 int_status=0x10010000 regcfg_amount=16508 regcfg_offset=268500992 regcmd_addr=0x1001000000004080
+  task_like[19] off=0x41320 flags=0x00004120 op_idx=268500992 enable_mask=0x00004124 int_mask=0x10010000 int_clear=0x00004128 int_status=0x10010000 regcfg_amount=16684 regcfg_offset=268500992 regcmd_addr=0x0101fff9d3800010
+  task_like[20] off=0x41398 flags=0x00006010 op_idx=1073807360 enable_mask=0x001f6014 int_mask=0x40010000 int_clear=0x00006018 int_status=0x40010000 regcfg_amount=24604 regcfg_offset=1073807360 regcmd_addr=0x40010000001f6020
+  task_like[21] off=0x413c0 flags=0x00116024 op_idx=1073807360 enable_mask=0x00006034 int_mask=0x40010000 int_clear=0x00006038 int_status=0x40010000 regcfg_amount=24636 regcfg_offset=1073807360 regcmd_addr=0x4001000000006040
+  task_like[22] off=0x41550 flags=0x00051084 op_idx=33619982 enable_mask=0x01001088 int_mask=0x02010000 int_clear=0x00001100 int_status=0x02010000 regcfg_amount=4356 regcfg_offset=33619968 regcmd_addr=0x0201fff5c0001110
+  task_like[23] off=0x41578 flags=0x00001140 op_idx=33619968 enable_mask=0x00001144 int_mask=0x02010000 int_clear=0x00001148 int_status=0x02010000 regcfg_amount=4428 regcfg_offset=33619968 regcmd_addr=0x0201000000001150
+  task_like[24] off=0x416b8 flags=0x00534060 op_idx=268500992 enable_mask=0x00004064 int_mask=0x10010000 int_clear=0x00004068 int_status=0x10010000 regcfg_amount=16492 regcfg_offset=268500992 regcmd_addr=0x1001000003834070
+  task_like[25] off=0x41730 flags=0x000040a0 op_idx=268500992 enable_mask=0x000040a4 int_mask=0x10010000 int_clear=0x000040a8 int_status=0x10010000 regcfg_amount=16556 regcfg_offset=268500992 regcmd_addr=0x10010000188040c0
+  task_like[26] off=0x41780 flags=0x00004110 op_idx=268500992 enable_mask=0x00004114 int_mask=0x10010000 int_clear=0x00004118 int_status=0x10010000 regcfg_amount=16668 regcfg_offset=268500992 regcmd_addr=0x1001000000004120
+  task_like[27] off=0x417f8 flags=0x00000000 op_idx=0 enable_mask=0x000e6004 int_mask=0x40010000 int_clear=0x000e7004 int_status=0x80010000 regcfg_amount=24588 regcfg_offset=1073807360 regcmd_addr=0x4001000000006010
+  task_like[28] off=0x418c0 flags=0x00107028 op_idx=2147549184 enable_mask=0x00017030 int_mask=0x80010000 int_clear=0x00000000 int_status=0x00000000 regcfg_amount=20 regcfg_offset=16842752 regcmd_addr=0x0041000000000000
+  task_like[29] off=0x41988 flags=0x0000105c op_idx=33619969 enable_mask=0x00001060 int_mask=0x02010000 int_clear=0x00001064 int_status=0x02010000 regcfg_amount=4200 regcfg_offset=33619968 regcmd_addr=0x0201ffef94601070
+  task_like[30] off=0x41b90 flags=0x00004090 op_idx=268500992 enable_mask=0x00004094 int_mask=0x10010000 int_clear=0x00004098 int_status=0x10010000 regcfg_amount=16540 regcfg_offset=268500992 regcmd_addr=0x10010000000040a0
+  task_like[31] off=0x41be0 flags=0x00004100 op_idx=268500992 enable_mask=0x00004104 int_mask=0x10010000 int_clear=0x00004108 int_status=0x10010000 regcfg_amount=16652 regcfg_offset=268500992 regcmd_addr=0x1001000000004110
+  task_like[32] off=0x41ed8 flags=0x00001170 op_idx=33619968 enable_mask=0x00001174 int_mask=0x02010000 int_clear=0x00001178 int_status=0x02010000 regcfg_amount=4476 regcfg_offset=33619968 regcmd_addr=0x0201000000001180
+  task_like[33] off=0x41f28 flags=0x00003030 op_idx=134283264 enable_mask=0x01e4400c int_mask=0x10010000 int_clear=0x00024010 int_status=0x10014800 regcfg_amount=16404 regcfg_offset=268500992 regcmd_addr=0x1001ffec88c04020
+  task_like[34] off=0x41f78 flags=0x00534040 op_idx=268500992 enable_mask=0x00004044 int_mask=0x10010000 int_clear=0x00004048 int_status=0x10010000 regcfg_amount=16460 regcfg_offset=268500992 regcmd_addr=0x1001000001264050
+  task_like[35] off=0x41ff0 flags=0x0000407c op_idx=268500992 enable_mask=0x00004080 int_mask=0x10010000 int_clear=0x00014084 int_status=0x10010001 regcfg_amount=16520 regcfg_offset=268500992 regcmd_addr=0x1001000000004090
+  task_like[36] off=0x42040 flags=0x000040a8 op_idx=268500992 enable_mask=0x000040ac int_mask=0x10010000 int_clear=0x188040c0 int_status=0x10010000 regcfg_amount=16580 regcfg_offset=268500992 regcmd_addr=0x1001000000004100
+  task_like[37] off=0x42158 flags=0x0000603c op_idx=1073807360 enable_mask=0x00006040 int_mask=0x40010000 int_clear=0x00006044 int_status=0x40010000 regcfg_amount=24648 regcfg_offset=1073807360 regcmd_addr=0x4001fff9c0006070
+  task_like[38] off=0x42180 flags=0x0010607c op_idx=1073807360 enable_mask=0x00106084 int_mask=0x40010000 int_clear=0x000360dc int_status=0x40010000 regcfg_amount=28684 regcfg_offset=2147549184 regcmd_addr=0x8001000000007010
+  QWORD_WINDOW off=0x25000 count=832
+  regcmd_qword[0] off=0x25000 value=0xbc7d3fbfb232bede
+  regcmd_qword[1] off=0x25008 value=0xba4db08c34b83054
+  regcmd_qword[2] off=0x25010 value=0x3d743d8935dcbc83
+  regcmd_qword[3] off=0x25018 value=0xbdcb3fc5bafbb5c5
+  regcmd_qword[4] off=0x25020 value=0x3ad8be4fbe3abfc9
+  regcmd_qword[5] off=0x25028 value=0xa801bcb43a28b63c
+  regcmd_qword[6] off=0x25030 value=0xbcb1babebf71bf00
+  regcmd_qword[7] off=0x25038 value=0xbca5b9f1bdf33453
+  regcmd_qword[8] off=0x25040 value=0x3e282a6b2c0dbd67
+  regcmd_qword[9] off=0x25048 value=0x3dc0bcf2b35f3e86
+  regcmd_qword[10] off=0x25050 value=0xbe093be8b572bcd8
+  regcmd_qword[11] off=0x25058 value=0xb32c350bbd07b5b5
+  regcmd_qword[12] off=0x25060 value=0xbdc33fbe360fbcd9
+  regcmd_qword[13] off=0x25068 value=0xb9613a153df2bc6b
+  regcmd_qword[14] off=0x25070 value=0x3f7ebe3bb8df386b
+  regcmd_qword[15] off=0x25078 value=0xbe75b71b3f0d3a02
+  regcmd_qword[16] off=0x25080 value=0xb765bfc2bb123e75
+  regcmd_qword[17] off=0x25088 value=0xba1fbf313f15ba0b
+  regcmd_qword[18] off=0x25090 value=0xbfb73d673b13bef4
+  regcmd_qword[19] off=0x25098 value=0xb1dd35ac3e13af5d
+  regcmd_qword[20] off=0x250a0 value=0x3f2bad1839a22dd3
+  regcmd_qword[21] off=0x250a8 value=0x3f5ea350aff52a93
+  regcmd_qword[22] off=0x250b0 value=0x3c5bbf4dbbf83dbe
+  regcmd_qword[23] off=0x250b8 value=0xbe903d0c39cf377f
+  regcmd_qword[24] off=0x250c0 value=0xbea7279e3f1f3f06
+  regcmd_qword[25] off=0x250c8 value=0xba073bd4b60f3ef6
+  regcmd_qword[26] off=0x250d0 value=0x3ef73c6f3fa7ad34
+  regcmd_qword[27] off=0x250d8 value=0x331b3e0cbc4d3990
+  regcmd_qword[28] off=0x250e0 value=0x3dffbea33ec8380b
+  regcmd_qword[29] off=0x250e8 value=0x3780ae21bc17bbfc
+  regcmd_qword[30] off=0x250f0 value=0x3fb63f3535a8b89a
+  regcmd_qword[31] off=0x250f8 value=0x3f6c3cf13d703d7d
+  regcmd_qword[32] off=0x25100 value=0xb1863ce5bb17bc7b
+  regcmd_qword[33] off=0x25108 value=0x37903d283cf2bfbb
+  regcmd_qword[34] off=0x25110 value=0x378eb266bfc62dc0
+  regcmd_qword[35] off=0x25118 value=0x3cb1b6a9bf483cd6
+  regcmd_qword[36] off=0x25120 value=0x3fa73f5d3973bc2e
+  regcmd_qword[37] off=0x25128 value=0xbee9be8d3e5b39a1
+  regcmd_qword[38] off=0x25130 value=0x3e83bec03da92ce9
+  regcmd_qword[39] off=0x25138 value=0x3bdc3d1c38ae341a
+  regcmd_qword[40] off=0x25140 value=0x303bbbfe3a7cb489
+  regcmd_qword[41] off=0x25148 value=0x3fe5bcbd3636b8ad
+  regcmd_qword[42] off=0x25150 value=0xbec4bfcbbf803cb2
+  regcmd_qword[43] off=0x25158 value=0x38583e89bdcfbf25
+  regcmd_qword[44] off=0x25160 value=0xbf713e9a3c89ba9c
+  regcmd_qword[45] off=0x25168 value=0xbe6c3b46bfa4bf75
+  regcmd_qword[46] off=0x25170 value=0x3fa8b92b3fcc3ce8
+  regcmd_qword[47] off=0x25178 value=0x3ef4bc8abddfbd83
+  regcmd_qword[48] off=0x25180 value=0xbd8e27ef3ec83cc0
+  regcmd_qword[49] off=0x25188 value=0x3a3b3f483e6dbda5
+  regcmd_qword[50] off=0x25190 value=0x3fe9b707b6ad319c
+  regcmd_qword[51] off=0x25198 value=0xbcabb627b9cd3e95
+  regcmd_qword[52] off=0x251a0 value=0x38943f21bd833c2a
+  regcmd_qword[53] off=0x251a8 value=0x33ee3f0f3c633e6e
+  regcmd_qword[54] off=0x251b0 value=0xbf753a163c2fb904
+  regcmd_qword[55] off=0x251b8 value=0x3e53bf27bb6eb543
+  regcmd_qword[56] off=0x251c0 value=0xbf3a3acd3b0fb9be
+  regcmd_qword[57] off=0x251c8 value=0xba8ebb01b6213e1b
+  regcmd_qword[58] off=0x251d0 value=0xb1c4390237603f28
+  regcmd_qword[59] off=0x251d8 value=0x380e34e8b4c23973
+  regcmd_qword[60] off=0x251e0 value=0xbb9cbe603d723d57
+  regcmd_qword[61] off=0x251e8 value=0xbd41bfd4b625b5f7
+  regcmd_qword[62] off=0x251f0 value=0x3dadab1ab5d1b80a
+  regcmd_qword[63] off=0x251f8 value=0x39852ca63f6e355e
+  regcmd_qword[64] off=0x25200 value=0x376a3df8368eae33
+  regcmd_qword[65] off=0x25208 value=0xbf89bdb33d9a3888
+  regcmd_qword[66] off=0x25210 value=0xbc2f3e7fbca639af
+  regcmd_qword[67] off=0x25218 value=0x3b133b5bb9a6b747
+  regcmd_qword[68] off=0x25220 value=0x3fa2b6883e18bf2b
+  regcmd_qword[69] off=0x25228 value=0xbfb13c933db1bc3c
+  regcmd_qword[70] off=0x25230 value=0xbe2fb705b9f83f8e
+  regcmd_qword[71] off=0x25238 value=0xbec5bb803bba3db8
+  regcmd_qword[72] off=0x25240 value=0xaea3bdd03b0eb822
+  regcmd_qword[73] off=0x25248 value=0x38b5bfdf3dd93d88
+  regcmd_qword[74] off=0x25250 value=0xbfae3d13bd4c3bfa
+  regcmd_qword[75] off=0x25258 value=0x3916bef9afc5be7a
+  regcmd_qword[76] off=0x25260 value=0xbdc13af0bb773d4e
+  regcmd_qword[77] off=0x25268 value=0x320ebd1abe97badc
+  regcmd_qword[78] off=0x25270 value=0xbf94b9eabd9bbd81
+  regcmd_qword[79] off=0x25278 value=0x3e98382b36813e88
+  regcmd_qword[80] off=0x25280 value=0x350b3a2ebc553ddf
+  regcmd_qword[81] off=0x25288 value=0x3c5a3ea9b8c43713
+  regcmd_qword[82] off=0x25290 value=0x3f3839053cde1e87
+  regcmd_qword[83] off=0x25298 value=0xbe6f3de93c4cb492
+  regcmd_qword[84] off=0x252a0 value=0xbe48bd293e4cb531
+  regcmd_qword[85] off=0x252a8 value=0xbf043d45bed83b9c
+  regcmd_qword[86] off=0x252b0 value=0x39ce3e9f3ff5b8b2
+  regcmd_qword[87] off=0x252b8 value=0x3e1ab3dc3f4735f2
+  regcmd_qword[88] off=0x252c0 value=0x22cd39febd78ba0f
+  regcmd_qword[89] off=0x252c8 value=0x3333b4f3bfe33abb
+  regcmd_qword[90] off=0x252d0 value=0xba67bcea3d5b2669
+  regcmd_qword[91] off=0x252d8 value=0xb23d35c83f3dbcce
+  regcmd_qword[92] off=0x252e0 value=0x3e563c4db4fcbf74
+  regcmd_qword[93] off=0x252e8 value=0xbb0cba89bc3d3cb8
+  regcmd_qword[94] off=0x252f0 value=0x2fd63ef43fb0b4a3
+  regcmd_qword[95] off=0x252f8 value=0x39d631fdbd553995
+  regcmd_qword[96] off=0x25300 value=0xb1ae3930bfc3bcb4
+  regcmd_qword[97] off=0x25308 value=0x3b09b435bcbb2dbf
+  regcmd_qword[98] off=0x25310 value=0xbc08be48bd67bdfd
+  regcmd_qword[99] off=0x25318 value=0x39533f96bfc9bca4
+  regcmd_qword[100] off=0x25320 value=0x3c2eb462be343911
+  regcmd_qword[101] off=0x25328 value=0xb033ba293f7abd51
+  regcmd_qword[102] off=0x25330 value=0xba24bd04b1613a03
+  regcmd_qword[103] off=0x25338 value=0x32f9adbe3ce13e2b
+  regcmd_qword[104] off=0x25340 value=0xbc7fb99a39ea3e3b
+  regcmd_qword[105] off=0x25348 value=0xbccbb6343d31bd59
+  regcmd_qword[106] off=0x25350 value=0xb8c0ba5e3d3fbdb9
+  regcmd_qword[107] off=0x25358 value=0xb880b767b5e43c60
+  regcmd_qword[108] off=0x25360 value=0x38a33901bce2b942
+  regcmd_qword[109] off=0x25368 value=0xb0cba91ebca13456
+  regcmd_qword[110] off=0x25370 value=0x3c60b689bccb3f8c
+  regcmd_qword[111] off=0x25378 value=0x3dfcbe8eba69bfa2
+  regcmd_qword[112] off=0x25380 value=0xb877bfed3f15b974
+  regcmd_qword[113] off=0x25388 value=0x3e2fb9cd3cc8bb2a
+  regcmd_qword[114] off=0x25390 value=0xb910b992b8b832c2
+  regcmd_qword[115] off=0x25398 value=0x3dc13e96b7023caa
+  regcmd_qword[116] off=0x253a0 value=0xbcddbdb1bc53be99
+  regcmd_qword[117] off=0x253a8 value=0x3ca4b646bc5cbcd1
+  regcmd_qword[118] off=0x253b0 value=0xbfc3320d3d51be5b
+  regcmd_qword[119] off=0x253b8 value=0xb8153de3bec8bb7f
+  regcmd_qword[120] off=0x253c0 value=0xb7873e05bce43510
+  regcmd_qword[121] off=0x253c8 value=0xa02bbf7d3f57b2c4
+  regcmd_qword[122] off=0x253d0 value=0x2c1138c73e593b23
+  regcmd_qword[123] off=0x253d8 value=0xbf802c31b4c2bf2f
+  regcmd_qword[124] off=0x253e0 value=0x38483d6cb6d13c75
+  regcmd_qword[125] off=0x253e8 value=0x335e3fa63ea12de4
+  regcmd_qword[126] off=0x253f0 value=0xb5ea3a743a10368a
+  regcmd_qword[127] off=0x253f8 value=0xb8403d1b3a813373
+  regcmd_qword[128] off=0x25400 value=0xb533b827bc3b3e63
+  regcmd_qword[129] off=0x25408 value=0xbc86bfac3c8cbaa7
+  regcmd_qword[130] off=0x25410 value=0xbc683d413e233c8b
+  regcmd_qword[131] off=0x25418 value=0x2ff3380626ac3974
+  regcmd_qword[132] off=0x25420 value=0x394fb989b431b980
+  regcmd_qword[133] off=0x25428 value=0xbe5a32d839703d35
+  regcmd_qword[134] off=0x25430 value=0xb58abd4b2d323ce4
+  regcmd_qword[135] off=0x25438 value=0x3cbfbd77b8cab8e5
+  regcmd_qword[136] off=0x25440 value=0xbf5b3ebd39233f46
+  regcmd_qword[137] off=0x25448 value=0x3df8becc3a28bf16
+  regcmd_qword[138] off=0x25450 value=0x3e9b3638be56b444
+  regcmd_qword[139] off=0x25458 value=0x3af8b6373b17befd
+  regcmd_qword[140] off=0x25460 value=0x3daa39bc3a3dba8e
+  regcmd_qword[141] off=0x25468 value=0xb8ab34cbbd323dbd
+  regcmd_qword[142] off=0x25470 value=0x3d0cbc7f39c9be5d
+  regcmd_qword[143] off=0x25478 value=0x30acbe9b382f1493
+  regcmd_qword[144] off=0x25480 value=0xbf2a3a6bbbcb3d42
+  regcmd_qword[145] off=0x25488 value=0xbae5bc353e8dbc1d
+  regcmd_qword[146] off=0x25490 value=0x34df3ced3cc63fb4
+  regcmd_qword[147] off=0x25498 value=0x3a9eb157b87938e8
+  regcmd_qword[148] off=0x254a0 value=0x3a7835d3326d3af2
+  regcmd_qword[149] off=0x254a8 value=0x2a502ec1b47f390e
+  regcmd_qword[150] off=0x254b0 value=0xb96b3f3abbbab938
+  regcmd_qword[151] off=0x254b8 value=0x3ccabe73bf4cbf23
+  regcmd_qword[152] off=0x254c0 value=0xb5b63b7dbf8d3ed2
+  regcmd_qword[153] off=0x254c8 value=0x2e043f73be20b6b1
+  regcmd_qword[154] off=0x254d0 value=0xbd18bf1f3d0cbda8
+  regcmd_qword[155] off=0x254d8 value=0xbde9bb762b1b2ddc
+  regcmd_qword[156] off=0x254e0 value=0x3fcd3a17bfd9bcda
+  regcmd_qword[157] off=0x254e8 value=0xb604bd3b3eddbcf6
+  regcmd_qword[158] off=0x254f0 value=0x3f933ad33aa3b76e
+  regcmd_qword[159] off=0x254f8 value=0xbdb6a4413c28bc1a
+  regcmd_qword[160] off=0x25500 value=0x3ec8bd57bf973604
+  regcmd_qword[161] off=0x25508 value=0x3e3dbd17b7493ea3
+  regcmd_qword[162] off=0x25510 value=0xbea5bfc43845bfc2
+  regcmd_qword[163] off=0x25518 value=0xa69b3fdfb5d2b615
+  regcmd_qword[164] off=0x25520 value=0xb819be1db8883d1f
+  regcmd_qword[165] off=0x25528 value=0xbf83bdf4b6223cdc
+  regcmd_qword[166] off=0x25530 value=0x3b1bbfb33b6fbee3
+  regcmd_qword[167] off=0x25538 value=0xba77ba363e7f36a5
+  regcmd_qword[168] off=0x25540 value=0x3c75b6bb3dd924a4
+  regcmd_qword[169] off=0x25548 value=0xb1dc374ebc74bdcf
+  regcmd_qword[170] off=0x25550 value=0x3c383cec31082b08
+  regcmd_qword[171] off=0x25558 value=0xbeeebc1939033e4b
+  regcmd_qword[172] off=0x25560 value=0xbdd13b8ebedbb1f0
+  regcmd_qword[173] off=0x25568 value=0xac733ca0bd2cbed4
+  regcmd_qword[174] off=0x25570 value=0x3805bd473cb2bcb6
+  regcmd_qword[175] off=0x25578 value=0xbeb43c41bf253f8a
+  regcmd_qword[176] off=0x25580 value=0x24f5b6913eb1b00f
+  regcmd_qword[177] off=0x25588 value=0x3d43bf34bfcb38c0
+  regcmd_qword[178] off=0x25590 value=0xb65bbca7b5bf3e3b
+  regcmd_qword[179] off=0x25598 value=0xbc59331d3c14bf93
+  regcmd_qword[180] off=0x255a0 value=0x3f26b8c9ba3bb85f
+  regcmd_qword[181] off=0x255a8 value=0xbfb0b658bc94b9ba
+  regcmd_qword[182] off=0x255b0 value=0x3e1cbcef3c1d3e81
+  regcmd_qword[183] off=0x255b8 value=0xb92fa571bca2be06
+  regcmd_qword[184] off=0x255c0 value=0x33573fc53e8bbda0
+  regcmd_qword[185] off=0x255c8 value=0x3c89bd633b633b59
+  regcmd_qword[186] off=0x255d0 value=0xbd8cbee2393bbd4b
+  regcmd_qword[187] off=0x255d8 value=0x39e93c25ba413d0f
+  regcmd_qword[188] off=0x255e0 value=0x30c33ccbbf7bbcee
+  regcmd_qword[189] off=0x255e8 value=0xaf7b3d0237c03e9b
+  regcmd_qword[190] off=0x255f0 value=0xb6c1bea535363d28
+  regcmd_qword[191] off=0x255f8 value=0x3d93b6d13eb43cfe
+  regcmd_qword[192] off=0x25600 value=0x3a373f503660b2a6
+  regcmd_qword[193] off=0x25608 value=0xbe22be8cb41a3889
+  regcmd_qword[194] off=0x25610 value=0xb98d37af3ae7bc00
+  regcmd_qword[195] off=0x25618 value=0x3fd536f93e403f82
+  regcmd_qword[196] off=0x25620 value=0x3c7cb2393b7a3890
+  regcmd_qword[197] off=0x25628 value=0xbf1a3ae4bb66b8a9
+  regcmd_qword[198] off=0x25630 value=0x3d403cb5394a3b0f
+  regcmd_qword[199] off=0x25638 value=0x3c833fb4be97b23a
+  regcmd_qword[200] off=0x25640 value=0x34f9384c345ebb38
+  regcmd_qword[201] off=0x25648 value=0x319ebe7b3dd0bbd4
+  regcmd_qword[202] off=0x25650 value=0x3e012f84b983b70c
+  regcmd_qword[203] off=0x25658 value=0x3f45b950bd39bcf2
+  regcmd_qword[204] off=0x25660 value=0xbe323de3321035ca
+  regcmd_qword[205] off=0x25668 value=0xbcdfbeabaeb838f5
+  regcmd_qword[206] off=0x25670 value=0x3af23d3bb56a3f8c
+  regcmd_qword[207] off=0x25678 value=0xbe423c07bfabbdad
+  regcmd_qword[208] off=0x25680 value=0x269232bebd34bc41
+  regcmd_qword[209] off=0x25688 value=0xbc483a013dcd3e50
+  regcmd_qword[210] off=0x25690 value=0xb710bff837133a9b
+  regcmd_qword[211] off=0x25698 value=0x3e19b58134702c91
+  regcmd_qword[212] off=0x256a0 value=0xbcbd3268ba9434be
+  regcmd_qword[213] off=0x256a8 value=0xbe3bbef73dd73f96
+  regcmd_qword[214] off=0x256b0 value=0xb3803d543c0e3b49
+  regcmd_qword[215] off=0x256b8 value=0x3e5a3f953c12b937
+  regcmd_qword[216] off=0x256c0 value=0x32ba3ee93e6eb9ff
+  regcmd_qword[217] off=0x256c8 value=0xaaefba583e563f34
+  regcmd_qword[218] off=0x256d0 value=0x3c21bd763538b59b
+  regcmd_qword[219] off=0x256d8 value=0x3ced3fbbbab83f15
+  regcmd_qword[220] off=0x256e0 value=0xbfce3712b84d35ae
+  regcmd_qword[221] off=0x256e8 value=0xbdb73f24bcefb83a
+  regcmd_qword[222] off=0x256f0 value=0x3b522e9e3cd831e6
+  regcmd_qword[223] off=0x256f8 value=0x3df53e16bc7330da
+  regcmd_qword[224] off=0x25700 value=0xbec1aed4bf8f3883
+  regcmd_qword[225] off=0x25708 value=0xbe783cd33fbbb692
+  regcmd_qword[226] off=0x25710 value=0x3c9cb9f234a4b7db
+  regcmd_qword[227] off=0x25718 value=0xb88c3cfebc2b3a9e
+  regcmd_qword[228] off=0x25720 value=0x3c8f3e7dbccabaee
+  regcmd_qword[229] off=0x25728 value=0x3c2d33553ef433c2
+  regcmd_qword[230] off=0x25730 value=0x38b1283abfe632b5
+  regcmd_qword[231] off=0x25738 value=0xb7cfbd26b96c3fa9
+  regcmd_qword[232] off=0x25740 value=0x382fa6a1b2d2bf49
+  regcmd_qword[233] off=0x25748 value=0xbb2d3b04b75a3edf
+  regcmd_qword[234] off=0x25750 value=0xbe51bef0b4dc3e0b
+  regcmd_qword[235] off=0x25758 value=0xbf60bba9394d3ecd
+  regcmd_qword[236] off=0x25760 value=0xbc7a3f3934a6bee0
+  regcmd_qword[237] off=0x25768 value=0xbc703dcea0ecbf44
+  regcmd_qword[238] off=0x25770 value=0xb49bbea83e9cbd20
+  regcmd_qword[239] off=0x25778 value=0x30e9b9af3ca5bee6
+  regcmd_qword[240] off=0x25780 value=0xb98a3fa03dcb30a4
+  regcmd_qword[241] off=0x25788 value=0xb670ade933a535be
+  regcmd_qword[242] off=0x25790 value=0x3ad93e1e3fa73fa9
+  regcmd_qword[243] off=0x25798 value=0xbd563da7b9acbde0
+  regcmd_qword[244] off=0x257a0 value=0xbb3c3b43bae2bd26
+  regcmd_qword[245] off=0x257a8 value=0xb40cbc572cbb3b5b
+  regcmd_qword[246] off=0x257b0 value=0xb17e3963bc9b3ed9
+  regcmd_qword[247] off=0x257b8 value=0x3a6eb462347ebadc
+  regcmd_qword[248] off=0x257c0 value=0x36613c133b2bbaee
+  regcmd_qword[249] off=0x257c8 value=0xbda9ba763edebd9c
+  regcmd_qword[250] off=0x257d0 value=0x3e8aba083ff2b0f3
+  regcmd_qword[251] off=0x257d8 value=0x3d75bda13ff23e7b
+  regcmd_qword[252] off=0x257e0 value=0x3e81be7e3941bd4f
+  regcmd_qword[253] off=0x257e8 value=0x3c37b5863412bd86
+  regcmd_qword[254] off=0x257f0 value=0xbdb6b4f6b2a53d0f
+  regcmd_qword[255] off=0x257f8 value=0xb241b9d131f0bf91
+  regcmd_qword[256] off=0x25800 value=0xbd85b3ddb845bd93
+  regcmd_qword[257] off=0x25808 value=0xbfb83ddb39b938da
+  regcmd_qword[258] off=0x25810 value=0x341bbcf5bd743fdd
+  regcmd_qword[259] off=0x25818 value=0x3d2e3f38396db7b2
+  regcmd_qword[260] off=0x25820 value=0xb9c1b122bd7e39e7
+  regcmd_qword[261] off=0x25828 value=0xb5a43a95be2238f6
+  regcmd_qword[262] off=0x25830 value=0xbcbcb10739bebd63
+  regcmd_qword[263] off=0x25838 value=0xbf473faeba59bb1c
+  regcmd_qword[264] off=0x25840 value=0xaebbbb8ebe0abebb
+  regcmd_qword[265] off=0x25848 value=0xbe402e173a83bbb9
+  regcmd_qword[266] off=0x25850 value=0xb44fbf60bc0fbaee
+  regcmd_qword[267] off=0x25858 value=0x3e46baa138023c07
+  regcmd_qword[268] off=0x25860 value=0x3a86b9fc2c7d3eb8
+  regcmd_qword[269] off=0x25868 value=0x3cd7bc29387d3f6a
+  regcmd_qword[270] off=0x25870 value=0xbdeb3e4e3fb33f69
+  regcmd_qword[271] off=0x25878 value=0x3e0eb6bebc2bbc8c
+  regcmd_qword[272] off=0x25880 value=0x3e4db9ebbf1b3fb4
+  regcmd_qword[273] off=0x25888 value=0x3f35bd733e1bbe38
+  regcmd_qword[274] off=0x25890 value=0x3ddd37663f67bed3
+  regcmd_qword[275] off=0x25898 value=0x3ebe3e29bf273ad4
+  regcmd_qword[276] off=0x258a0 value=0xbe0b3ae4bd91be91
+  regcmd_qword[277] off=0x258a8 value=0xbfebb73cb949a07e
+  regcmd_qword[278] off=0x258b0 value=0xb9de2d77bcfa3ae0
+  regcmd_qword[279] off=0x258b8 value=0x3257bd0dbcf0b4ea
+  regcmd_qword[280] off=0x258c0 value=0xbce2b6e734233827
+  regcmd_qword[281] off=0x258c8 value=0xbbc0bd04bf71aead
+  regcmd_qword[282] off=0x258d0 value=0xa9b13ff3b964373d
+  regcmd_qword[283] off=0x258d8 value=0xba022f463dbc3e3c
+  regcmd_qword[284] off=0x258e0 value=0x3c9e35903f203df4
+  regcmd_qword[285] off=0x258e8 value=0xbf55bf0e3d5dbfde
+  regcmd_qword[286] off=0x258f0 value=0x3b5cbf18bd9a3c95
+  regcmd_qword[287] off=0x258f8 value=0x3d31bce2b8fdb8fe
+  regcmd_qword[288] off=0x25900 value=0x3ae8bd92b40f3a4b
+  regcmd_qword[289] off=0x25908 value=0xbe1d3ed4bf01be2d
+  regcmd_qword[290] off=0x25910 value=0x3c71b5923e353c02
+  regcmd_qword[291] off=0x25918 value=0x3c3330d93eb0bc66
+  regcmd_qword[292] off=0x25920 value=0xb0db3ff43d36bf69
+  regcmd_qword[293] off=0x25928 value=0xb44abed43ff538a4
+  regcmd_qword[294] off=0x25930 value=0xbcfead12bdb13d47
+  regcmd_qword[295] off=0x25938 value=0x3c253898bd6b3990
+  regcmd_qword[296] off=0x25940 value=0xbeadbfc43fa0bfe0
+  regcmd_qword[297] off=0x25948 value=0x3a343520b5cbbc8e
+  regcmd_qword[298] off=0x25950 value=0xbc103ce4be2639f7
+  regcmd_qword[299] off=0x25958 value=0xbc6ab591bce0b767
+  regcmd_qword[300] off=0x25960 value=0xba5dbc2db2d83a47
+  regcmd_qword[301] off=0x25968 value=0x3f15bf0abc90bf16
+  regcmd_qword[302] off=0x25970 value=0xbf83b66e3eb23bda
+  regcmd_qword[303] off=0x25978 value=0x397bab7538c53c93
+  regcmd_qword[304] off=0x25980 value=0x3cdfba63bff0b4ae
+  regcmd_qword[305] off=0x25988 value=0x3d90399ebf652c69
+  regcmd_qword[306] off=0x25990 value=0x2ca0be45bf7e3c34
+  regcmd_qword[307] off=0x25998 value=0x3db53fc4bff0b07f
+  regcmd_qword[308] off=0x259a0 value=0xb01dbd26b8773e08
+  regcmd_qword[309] off=0x259a8 value=0x1e7cbf5d31383e32
+  regcmd_qword[310] off=0x259b0 value=0xbf843c27bc1e30db
+  regcmd_qword[311] off=0x259b8 value=0xb7d03caaba1ebfd7
+  regcmd_qword[312] off=0x259c0 value=0xba0a39bc3f3f3a76
+  regcmd_qword[313] off=0x259c8 value=0x3c5dbac9b5a9b859
+  regcmd_qword[314] off=0x259d0 value=0x3a4f36b339fa3d30
+  regcmd_qword[315] off=0x259d8 value=0x29a9bd9db83a3d73
+  regcmd_qword[316] off=0x259e0 value=0x2cdab889b7d82d3a
+  regcmd_qword[317] off=0x259e8 value=0x393bb3f43dc0359b
+  regcmd_qword[318] off=0x259f0 value=0x3f5a3c3f3f273c5b
+  regcmd_qword[319] off=0x259f8 value=0xbcbabc8dbc68bcbe
+  regcmd_qword[320] off=0x25a00 value=0x393f39ad3797bc45
+  regcmd_qword[321] off=0x25a08 value=0xbc37bce03b31bfc0
+  regcmd_qword[322] off=0x25a10 value=0xbdd73b692eac34fe
+  regcmd_qword[323] off=0x25a18 value=0xbec7bf98bfa6bd00
+  regcmd_qword[324] off=0x25a20 value=0xb6a5b8a23ee63aba
+  regcmd_qword[325] off=0x25a28 value=0x3da03529bea8bf21
+  regcmd_qword[326] off=0x25a30 value=0xbe98bafebed23c2d
+  regcmd_qword[327] off=0x25a38 value=0xb1a2bdf5bf69b2ec
+  regcmd_qword[328] off=0x25a40 value=0x35352e0bb631329e
+  regcmd_qword[329] off=0x25a48 value=0xafe7bfe033e23808
+  regcmd_qword[330] off=0x25a50 value=0x3573b18328d93d52
+  regcmd_qword[331] off=0x25a58 value=0xb6dcb4e9bae4b0f8
+  regcmd_qword[332] off=0x25a60 value=0x38e6bd71be7eb1b6
+  regcmd_qword[333] off=0x25a68 value=0x3c51bf72bcfdb7f5
+  regcmd_qword[334] off=0x25a70 value=0xbc4bbe7b2bb4be66
+  regcmd_qword[335] off=0x25a78 value=0x3d76b855372338e0
+  regcmd_qword[336] off=0x25a80 value=0xbdc33a1dbc56b89e
+  regcmd_qword[337] off=0x25a88 value=0x3d983d133d973cd8
+  regcmd_qword[338] off=0x25a90 value=0xbff2b8be2de53f05
+  regcmd_qword[339] off=0x25a98 value=0xbc60b99433fcbe98
+  regcmd_qword[340] off=0x25aa0 value=0xbc0d2814395cbab0
+  regcmd_qword[341] off=0x25aa8 value=0x3e99bb49bb503fb8
+  regcmd_qword[342] off=0x25ab0 value=0x34f938033fd13cb4
+  regcmd_qword[343] off=0x25ab8 value=0xbe433daf3fc2ba1d
+  regcmd_qword[344] off=0x25ac0 value=0x3a7e3ba5ba69bfcb
+  regcmd_qword[345] off=0x25ac8 value=0x3706bd2fb9cfb783
+  regcmd_qword[346] off=0x25ad0 value=0xba4f3c463a0d3c59
+  regcmd_qword[347] off=0x25ad8 value=0x3f0dbe63399abd65
+  regcmd_qword[348] off=0x25ae0 value=0x3bd63fe9366c30fe
+  regcmd_qword[349] off=0x25ae8 value=0x3d033ec2bed5b15d
+  regcmd_qword[350] off=0x25af0 value=0x33a8be57bbb13fcf
+  regcmd_qword[351] off=0x25af8 value=0xb936bc15ba7db902
+  regcmd_qword[352] off=0x25b00 value=0x3486be36bd663d71
+  regcmd_qword[353] off=0x25b08 value=0xa7273b19381ebe1a
+  regcmd_qword[354] off=0x25b10 value=0xbe50bc4db1cbbe8e
+  regcmd_qword[355] off=0x25b18 value=0x30c93832a2733e0c
+  regcmd_qword[356] off=0x25b20 value=0x39f83bf13e983fa0
+  regcmd_qword[357] off=0x25b28 value=0x376e35212eb53cf5
+  regcmd_qword[358] off=0x25b30 value=0xbb80b79839ecb9ad
+  regcmd_qword[359] off=0x25b38 value=0xbc643ae638bfbd53
+  regcmd_qword[360] off=0x25b40 value=0xbc0d3a6832debfdb
+  regcmd_qword[361] off=0x25b48 value=0xb44dbece3d33b612
+  regcmd_qword[362] off=0x25b50 value=0x3f083d1328a5bf62
+  regcmd_qword[363] off=0x25b58 value=0x2e2e3bbc385e3ce5
+  regcmd_qword[364] off=0x25b60 value=0xbf59bf2dbc34bbe6
+  regcmd_qword[365] off=0x25b68 value=0xaecbbf24ac123f00
+  regcmd_qword[366] off=0x25b70 value=0x3deb3fd7ba7bbae3
+  regcmd_qword[367] off=0x25b78 value=0x3c323c653c5dbafa
+  regcmd_qword[368] off=0x25b80 value=0xbfe7bff7b867bd2a
+  regcmd_qword[369] off=0x25b88 value=0x3cb2be31becfb844
+  regcmd_qword[370] off=0x25b90 value=0xbceb3dbd3f04bfa8
+  regcmd_qword[371] off=0x25b98 value=0xb37eb744baf9aa2a
+  regcmd_qword[372] off=0x25ba0 value=0x3eeb3ce43b8aad55
+  regcmd_qword[373] off=0x25ba8 value=0x389fb852bd7a3d26
+  regcmd_qword[374] off=0x25bb0 value=0xb6a73d4db458b262
+  regcmd_qword[375] off=0x25bb8 value=0x3ad7bffbba6c3dbc
+  regcmd_qword[376] off=0x25bc0 value=0xbede31343ebe3a20
+  regcmd_qword[377] off=0x25bc8 value=0xb320a9433a483ae6
+  regcmd_qword[378] off=0x25bd0 value=0xb88b392bb42333d0
+  regcmd_qword[379] off=0x25bd8 value=0xbe76bd41be253c98
+  regcmd_qword[380] off=0x25be0 value=0xbe22b9773c5ebee8
+  regcmd_qword[381] off=0x25be8 value=0x3bc83b922dd33ba5
+  regcmd_qword[382] off=0x25bf0 value=0xbf7aa337bedabe44
+  regcmd_qword[383] off=0x25bf8 value=0xbebb3672bcd2b4a9
+  regcmd_qword[384] off=0x25c00 value=0x3684312ebd942120
+  regcmd_qword[385] off=0x25c08 value=0x3a45353c3dccbcea
+  regcmd_qword[386] off=0x25c10 value=0xb629bf722e233ce3
+  regcmd_qword[387] off=0x25c18 value=0x3270b8d338e2bdb2
+  regcmd_qword[388] off=0x25c20 value=0xbec03f75b44ebcf6
+  regcmd_qword[389] off=0x25c28 value=0x348dbc473ef6b531
+  regcmd_qword[390] off=0x25c30 value=0xb9fd3d853522a856
+  regcmd_qword[391] off=0x25c38 value=0xbcd33d59b570bca2
+  regcmd_qword[392] off=0x25c40 value=0x3cedbc763e563f2c
+  regcmd_qword[393] off=0x25c48 value=0xb86d3ddcbfd3bcc1
+  regcmd_qword[394] off=0x25c50 value=0x3b70be9bb403b9e1
+  regcmd_qword[395] off=0x25c58 value=0xbe433d65b8b83e52
+  regcmd_qword[396] off=0x25c60 value=0x3b443c363f513c92
+  regcmd_qword[397] off=0x25c68 value=0x3e623aad33062f79
+  regcmd_qword[398] off=0x25c70 value=0xb55d3a47bfb33b7a
+  regcmd_qword[399] off=0x25c78 value=0x2d3c3bc13d193e3c
+  regcmd_qword[400] off=0x25c80 value=0x3e1ebdf8b5503e3c
+  regcmd_qword[401] off=0x25c88 value=0xba003e733c2fabf1
+  regcmd_qword[402] off=0x25c90 value=0x3b092a75acbe3e60
+  regcmd_qword[403] off=0x25c98 value=0x32a1b29a3a5ebbd4
+  regcmd_qword[404] off=0x25ca0 value=0x3fa9ba25bba23db5
+  regcmd_qword[405] off=0x25ca8 value=0xbc183b20ba133b59
+  regcmd_qword[406] off=0x25cb0 value=0x3e1bb48f3e05bd6e
+  regcmd_qword[407] off=0x25cb8 value=0x3bcbbfa9bf703f5f
+  regcmd_qword[408] off=0x25cc0 value=0x3fcbbb20bb20bb2c
+  regcmd_qword[409] off=0x25cc8 value=0x3dd03848bfafbab6
+  regcmd_qword[410] off=0x25cd0 value=0x3a37bdf5bbbebb7f
+  regcmd_qword[411] off=0x25cd8 value=0x3b7ebba9bb4abf57
+  regcmd_qword[412] off=0x25ce0 value=0xb9b4350037a3bdce
+  regcmd_qword[413] off=0x25ce8 value=0xb6a7be1a3f2ebd6d
+  regcmd_qword[414] off=0x25cf0 value=0xbf6e3fe6b67fbfd4
+  regcmd_qword[415] off=0x25cf8 value=0xbed9bf3038033d30
+  regcmd_qword[416] off=0x25d00 value=0x3c7abd06b6643f66
+  regcmd_qword[417] off=0x25d08 value=0xb539be453c8d3f0a
+  regcmd_qword[418] off=0x25d10 value=0xb7183febbfcdbebf
+  regcmd_qword[419] off=0x25d18 value=0x2ecd39dd3e8c3db1
+  regcmd_qword[420] off=0x25d20 value=0x30823ec13c64b121
+  regcmd_qword[421] off=0x25d28 value=0xbe1ebca53f60b4e4
+  regcmd_qword[422] off=0x25d30 value=0x2acfb636a9b73970
+  regcmd_qword[423] off=0x25d38 value=0x2582befdbe91378c
+  regcmd_qword[424] off=0x25d40 value=0x2e113e6e326fb2bf
+  regcmd_qword[425] off=0x25d48 value=0x346d3f1139be3c19
+  regcmd_qword[426] off=0x25d50 value=0x317c36a92110b9e5
+  regcmd_qword[427] off=0x25d58 value=0xbfcbb1e739f73a4d
+  regcmd_qword[428] off=0x25d60 value=0x3cf2bfc53886bae3
+  regcmd_qword[429] off=0x25d68 value=0x3d3c34b139d8bdde
+  regcmd_qword[430] off=0x25d70 value=0xbb003650b91ead93
+  regcmd_qword[431] off=0x25d78 value=0x3d77ba783ecc3de6
+  regcmd_qword[432] off=0x25d80 value=0xb76cbd69bc383dc4
+  regcmd_qword[433] off=0x25d88 value=0xbdbca88a3d2cbd16
+  regcmd_qword[434] off=0x25d90 value=0xb924bcd4b4f43f34
+  regcmd_qword[435] off=0x25d98 value=0x3e32bf39bb4fafeb
+  regcmd_qword[436] off=0x25da0 value=0x29b73bc2b1d43eee
+  regcmd_qword[437] off=0x25da8 value=0x3ff83d01387435f6
+  regcmd_qword[438] off=0x25db0 value=0xb552bab13c852fa0
+  regcmd_qword[439] off=0x25db8 value=0xb9603cabb612b517
+  regcmd_qword[440] off=0x25dc0 value=0xb12139cb3e79ba17
+  regcmd_qword[441] off=0x25dc8 value=0x36b2b3d9b88c3f31
+  regcmd_qword[442] off=0x25dd0 value=0x2e95b98f3ca03e22
+  regcmd_qword[443] off=0x25dd8 value=0x2f8332503eb73fc7
+  regcmd_qword[444] off=0x25de0 value=0xb4b8b53cbdb4bf10
+  regcmd_qword[445] off=0x25de8 value=0xb8c239b53e4b3931
+  regcmd_qword[446] off=0x25df0 value=0xaa9abd5939333c99
+  regcmd_qword[447] off=0x25df8 value=0xb7013d06bffcbf3f
+  regcmd_qword[448] off=0x25e00 value=0xb7df355939403c04
+  regcmd_qword[449] off=0x25e08 value=0xa8f1bc69be98b9ec
+  regcmd_qword[450] off=0x25e10 value=0x3d033bb03db53e36
+  regcmd_qword[451] off=0x25e18 value=0xb2e9357a38753ced
+  regcmd_qword[452] off=0x25e20 value=0x3fe4b9e03d2dbff4
+  regcmd_qword[453] off=0x25e28 value=0xbf74381a353a3d3a
+  regcmd_qword[454] off=0x25e30 value=0xbc2a3da42d3e34c9
+  regcmd_qword[455] off=0x25e38 value=0x3a9cbb78b8f0bf7d
+  regcmd_qword[456] off=0x25e40 value=0x3d35b649bc7cbd66
+  regcmd_qword[457] off=0x25e48 value=0x3c2e3d39be00b949
+  regcmd_qword[458] off=0x25e50 value=0x3fc13bb0b239bc3a
+  regcmd_qword[459] off=0x25e58 value=0x3de4b6873825bc13
+  regcmd_qword[460] off=0x25e60 value=0xb2d3be6e3cd33bdc
+  regcmd_qword[461] off=0x25e68 value=0xbdbc39c2ba1c3f17
+  regcmd_qword[462] off=0x25e70 value=0x36403c18b6c532c6
+  regcmd_qword[463] off=0x25e78 value=0x3638b91c3debbbab
+  regcmd_qword[464] off=0x25e80 value=0xb7d7baad3a98b684
+  regcmd_qword[465] off=0x25e88 value=0x3f3b3d413bb4b9f0
+  regcmd_qword[466] off=0x25e90 value=0x3f7dbdfa3fa2347a
+  regcmd_qword[467] off=0x25e98 value=0x3c753537b4c53d88
+  regcmd_qword[468] off=0x25ea0 value=0x39673c13bd913d9f
+  regcmd_qword[469] off=0x25ea8 value=0x3c7e3d80388fba09
+  regcmd_qword[470] off=0x25eb0 value=0x3f653907b781351e
+  regcmd_qword[471] off=0x25eb8 value=0x3d6d330c373f356d
+  regcmd_qword[472] off=0x25ec0 value=0x3c27b69caedebda8
+  regcmd_qword[473] off=0x25ec8 value=0x3482bea7bfa83c90
+  regcmd_qword[474] off=0x25ed0 value=0xbd5e3ff639dbae61
+  regcmd_qword[475] off=0x25ed8 value=0x3861b14235d9ac6a
+  regcmd_qword[476] off=0x25ee0 value=0x3c223f29bf27ba9c
+  regcmd_qword[477] off=0x25ee8 value=0xbd08b394b0233fba
+  regcmd_qword[478] off=0x25ef0 value=0xbed0bf2f3a10a79d
+  regcmd_qword[479] off=0x25ef8 value=0xbfc32f13b61cb368
+  regcmd_qword[480] off=0x25f00 value=0x38a93b4dbc0339b2
+  regcmd_qword[481] off=0x25f08 value=0x38983493334a3983
+  regcmd_qword[482] off=0x25f10 value=0xb3703f6c3a5cb0af
+  regcmd_qword[483] off=0x25f18 value=0xbb3bbe84bc99b99b
+  regcmd_qword[484] off=0x25f20 value=0xb4473c3e382ebeb9
+  regcmd_qword[485] off=0x25f28 value=0x3719b8182ffd3d8e
+  regcmd_qword[486] off=0x25f30 value=0xb7f5be61bfe6ba29
+  regcmd_qword[487] off=0x25f38 value=0xbf47b279bdf8b9db
+  regcmd_qword[488] off=0x25f40 value=0xbc4cbea238ddbbf1
+  regcmd_qword[489] off=0x25f48 value=0xb3ac3badb67db7c2
+  regcmd_qword[490] off=0x25f50 value=0x3c79bda338fbbf23
+  regcmd_qword[491] off=0x25f58 value=0x3cb9adce3d063711
+  regcmd_qword[492] off=0x25f60 value=0x34debe0c3cc33f4b
+  regcmd_qword[493] off=0x25f68 value=0x3fadbceebcaabf23
+  regcmd_qword[494] off=0x25f70 value=0x3874bf5dba70be55
+  regcmd_qword[495] off=0x25f78 value=0xbda1beb0350a38a4
+  regcmd_qword[496] off=0x25f80 value=0x3d81bbcbbc6fbbbe
+  regcmd_qword[497] off=0x25f88 value=0x3d1bbcad3b87b6a4
+  regcmd_qword[498] off=0x25f90 value=0xbf87bb4eb4753b9c
+  regcmd_qword[499] off=0x25f98 value=0x3a92b877b19f34a0
+  regcmd_qword[500] off=0x25fa0 value=0xbce1b5bf32f43fe0
+  regcmd_qword[501] off=0x25fa8 value=0xbc6cbbfcbfb23dfb
+  regcmd_qword[502] off=0x25fb0 value=0x3e4ebeb5ba323a4a
+  regcmd_qword[503] off=0x25fb8 value=0x2bcc3ac8bec3bcd5
+  regcmd_qword[504] off=0x25fc0 value=0x3fcb3f9b347b3a5e
+  regcmd_qword[505] off=0x25fc8 value=0xb816bda0beafbce5
+  regcmd_qword[506] off=0x25fd0 value=0x3b013c553e79b827
+  regcmd_qword[507] off=0x25fd8 value=0xbcf23cba312635a6
+  regcmd_qword[508] off=0x25fe0 value=0x33b02ca23a35bd18
+  regcmd_qword[509] off=0x25fe8 value=0x3fc6b9c03ed73ef9
+  regcmd_qword[510] off=0x25ff0 value=0xb0f4b9db36c13ea4
+  regcmd_qword[511] off=0x25ff8 value=0x3e52bd09bc413e1f
+  regcmd_qword[512] off=0x26000 value=0xbfb03ae6334c3653
+  regcmd_qword[513] off=0x26008 value=0xb8e83b313d4735f5
+  regcmd_qword[514] off=0x26010 value=0xbe693660bfd23704
+  regcmd_qword[515] off=0x26018 value=0x34033e3cbc41b88c
+  regcmd_qword[516] off=0x26020 value=0x39683ca23c033b34
+  regcmd_qword[517] off=0x26028 value=0xb67abe8a38f33538
+  regcmd_qword[518] off=0x26030 value=0xbce9b9e33f29b0db
+  regcmd_qword[519] off=0x26038 value=0x382baa02b1153f38
+  regcmd_qword[520] off=0x26040 value=0xb5acab4dbe78be00
+  regcmd_qword[521] off=0x26048 value=0xbf19bdc3bd50b838
+  regcmd_qword[522] off=0x26050 value=0xb854b1c7b9e6bef8
+  regcmd_qword[523] off=0x26058 value=0xbab93dcc3ec2ba44
+  regcmd_qword[524] off=0x26060 value=0xb5fc9d4cb27e3b09
+  regcmd_qword[525] off=0x26068 value=0x3e82ba67390c3c0a
+  regcmd_qword[526] off=0x26070 value=0xbcc83be4bd4dbeb9
+  regcmd_qword[527] off=0x26078 value=0xbf4dbdc6bfaab69b
+  regcmd_qword[528] off=0x26080 value=0xbfd6bdbe39783ecd
+  regcmd_qword[529] off=0x26088 value=0x3d9c31e8bea425fd
+  regcmd_qword[530] off=0x26090 value=0x3ec43de3b271bde3
+  regcmd_qword[531] off=0x26098 value=0xb459bba63d95bc70
+  regcmd_qword[532] off=0x260a0 value=0x3d3f3d9e3e2eb653
+  regcmd_qword[533] off=0x260a8 value=0x370835c631f4ab82
+  regcmd_qword[534] off=0x260b0 value=0x3f78ad26b17f3ab6
+  regcmd_qword[535] off=0x260b8 value=0xbc4d35b4b4843f95
+  regcmd_qword[536] off=0x260c0 value=0x3b03ba12b467bc61
+  regcmd_qword[537] off=0x260c8 value=0xbb5e299238993c23
+  regcmd_qword[538] off=0x260d0 value=0x3de03f303ff73dff
+  regcmd_qword[539] off=0x260d8 value=0x3d50bb3d3a0db2f0
+  regcmd_qword[540] off=0x260e0 value=0x34fab71cb7223662
+  regcmd_qword[541] off=0x260e8 value=0xbc073df7375e3b49
+  regcmd_qword[542] off=0x260f0 value=0xb27f3a73b8d3bd3c
+  regcmd_qword[543] off=0x260f8 value=0x38ad3a073b2438f1
+  regcmd_qword[544] off=0x26100 value=0xbf79bdbeba9eb60d
+  regcmd_qword[545] off=0x26108 value=0xbaee3db3b805bc0e
+  regcmd_qword[546] off=0x26110 value=0x389632efadb5b9e8
+  regcmd_qword[547] off=0x26118 value=0x3ce534dabc2137d3
+  regcmd_qword[548] off=0x26120 value=0x3f8ab8c93cc13411
+  regcmd_qword[549] off=0x26128 value=0x3f63b7f5bd213917
+  regcmd_qword[550] off=0x26130 value=0x3d7d3fc7264d3c63
+  regcmd_qword[551] off=0x26138 value=0x3e08bc3f3ebcbe86
+  regcmd_qword[552] off=0x26140 value=0x3e1ebd853e29386a
+  regcmd_qword[553] off=0x26148 value=0xbc473622bc74bd3b
+  regcmd_qword[554] off=0x26150 value=0x3ab9ba4ebe563d1b
+  regcmd_qword[555] off=0x26158 value=0x39833cc9bdad3ad9
+  regcmd_qword[556] off=0x26160 value=0x3d5bbe44be623f2c
+  regcmd_qword[557] off=0x26168 value=0xbea8b679b569beaf
+  regcmd_qword[558] off=0x26170 value=0xbb0cbf0d3cb8bdf3
+  regcmd_qword[559] off=0x26178 value=0xbe7cbd27b82f3ca0
+  regcmd_qword[560] off=0x26180 value=0x344437ac3e133d9b
+  regcmd_qword[561] off=0x26188 value=0x3eab37473b8cb814
+  regcmd_qword[562] off=0x26190 value=0x39a6b777bf03b9b5
+  regcmd_qword[563] off=0x26198 value=0xba513ff63b013cd0
+  regcmd_qword[564] off=0x261a0 value=0xb1413525befe3c41
+  regcmd_qword[565] off=0x261a8 value=0xaf2ebd84bde83f90
+  regcmd_qword[566] off=0x261b0 value=0x3fa5aab9bc4fbdc5
+  regcmd_qword[567] off=0x261b8 value=0xbdd5bb3abbd836cd
+  regcmd_qword[568] off=0x261c0 value=0x3c633de6bff8bcfb
+  regcmd_qword[569] off=0x261c8 value=0x2ff53b05ae08b01e
+  regcmd_qword[570] off=0x261d0 value=0xbe713f9239abb717
+  regcmd_qword[571] off=0x261d8 value=0x3e74baadbd063e22
+  regcmd_qword[572] off=0x261e0 value=0x3c7e3e97be2fb902
+  regcmd_qword[573] off=0x261e8 value=0x397a3980bee2bb2c
+  regcmd_qword[574] off=0x261f0 value=0x386d98f539b03ef5
+  regcmd_qword[575] off=0x261f8 value=0xbe1a3812b949b4af
+  regcmd_qword[576] off=0x26200 value=0xbe4ab6933643b266
+  regcmd_qword[577] off=0x26208 value=0x3d10bf1b3d873cb2
+  regcmd_qword[578] off=0x26210 value=0xb4eebda339ae3e35
+  regcmd_qword[579] off=0x26218 value=0x3c013c07b2993563
+  regcmd_qword[580] off=0x26220 value=0x2d25bc471d78b548
+  regcmd_qword[581] off=0x26228 value=0x3ccdb27f3c6337ab
+  regcmd_qword[582] off=0x26230 value=0x3ea53caab6d5b738
+  regcmd_qword[583] off=0x26238 value=0xbf583d11385fb8c8
+  regcmd_qword[584] off=0x26240 value=0xbccfb2813ca1a939
+  regcmd_qword[585] off=0x26248 value=0xb67f382932ca3eb5
+  regcmd_qword[586] off=0x26250 value=0x3071be1c3e94bd85
+  regcmd_qword[587] off=0x26258 value=0x3c43be00375b3b49
+  regcmd_qword[588] off=0x26260 value=0x3cecbea53e49bc44
+  regcmd_qword[589] off=0x26268 value=0xb88c383d3d44ae9d
+  regcmd_qword[590] off=0x26270 value=0x2ce23a0dbc60aa16
+  regcmd_qword[591] off=0x26278 value=0x34773f38ad4635ca
+  regcmd_qword[592] off=0x26280 value=0x3b01bb5dbd48bebc
+  regcmd_qword[593] off=0x26288 value=0x36473a333c2ebe4b
+  regcmd_qword[594] off=0x26290 value=0x3dfbb1803e1d3323
+  regcmd_qword[595] off=0x26298 value=0x3c9cad50b971bfa2
+  regcmd_qword[596] off=0x262a0 value=0xba153bc93e153ca1
+  regcmd_qword[597] off=0x262a8 value=0xaf9c34f0bd63b86e
+  regcmd_qword[598] off=0x262b0 value=0xbdf89f4fac653e45
+  regcmd_qword[599] off=0x262b8 value=0xbfd0bf793dccbfbe
+  regcmd_qword[600] off=0x262c0 value=0x3e29b315bec1386e
+  regcmd_qword[601] off=0x262c8 value=0x39e0b5b13a4ab881
+  regcmd_qword[602] off=0x262d0 value=0xbc2234a439e43fa8
+  regcmd_qword[603] off=0x262d8 value=0x3d2f3947b92cbd54
+  regcmd_qword[604] off=0x262e0 value=0x3c763c593833bcc5
+  regcmd_qword[605] off=0x262e8 value=0xbf51bbc53093bdb6
+  regcmd_qword[606] off=0x262f0 value=0x37e43754baf93c3e
+  regcmd_qword[607] off=0x262f8 value=0xbbc93d993c11bdeb
+  regcmd_qword[608] off=0x26300 value=0x3e8d3c7f3c53b30b
+  regcmd_qword[609] off=0x26308 value=0x3ddf3c9839c73b91
+  regcmd_qword[610] off=0x26310 value=0x3f073dc3bc8cbf77
+  regcmd_qword[611] off=0x26318 value=0xbbd43dc2393ab970
+  regcmd_qword[612] off=0x26320 value=0x3fbdb5223895bda7
+  regcmd_qword[613] off=0x26328 value=0xbf3932143a6b3ca1
+  regcmd_qword[614] off=0x26330 value=0x3d423b5dbf3a3be7
+  regcmd_qword[615] off=0x26338 value=0xbcc33f95b597b9a2
+  regcmd_qword[616] off=0x26340 value=0x34bdb4523cea3c7f
+  regcmd_qword[617] off=0x26348 value=0x35cf392ab672b87a
+  regcmd_qword[618] off=0x26350 value=0x2f6b30623fa73b42
+  regcmd_qword[619] off=0x26358 value=0x3e98bcacbca9bad0
+  regcmd_qword[620] off=0x26360 value=0x32c93b37bc3235ef
+  regcmd_qword[621] off=0x26368 value=0x3c9037e6be54a946
+  regcmd_qword[622] off=0x26370 value=0x3d623eebba9b388c
+  regcmd_qword[623] off=0x26378 value=0xbb10394e3f633d67
+  regcmd_qword[624] off=0x26380 value=0xbce8387f2c27bdda
+  regcmd_qword[625] off=0x26388 value=0x3f42b43abc423e5a
+  regcmd_qword[626] off=0x26390 value=0x3a8d3c6eba1a3f02
+  regcmd_qword[627] off=0x26398 value=0xb8733637396fafd2
+  regcmd_qword[628] off=0x263a0 value=0x376f2e6e38d73caa
+  regcmd_qword[629] off=0x263a8 value=0xb59baf15b58cbd1b
+  regcmd_qword[630] off=0x263b0 value=0x3cbc3f7bb33b3ca9
+  regcmd_qword[631] off=0x263b8 value=0x35493c53b92cb9f3
+  regcmd_qword[632] off=0x263c0 value=0x3f673ca43536abf0
+  regcmd_qword[633] off=0x263c8 value=0x3aab3db9b8c639a2
+  regcmd_qword[634] off=0x263d0 value=0xbb3f3bcb396f361b
+  regcmd_qword[635] off=0x263d8 value=0xa798bcf63d5dbcb4
+  regcmd_qword[636] off=0x263e0 value=0x362f3d6739cf391d
+  regcmd_qword[637] off=0x263e8 value=0xbd343d72bd06bf5c
+  regcmd_qword[638] off=0x263f0 value=0xbe0734dd3fc63fe9
+  regcmd_qword[639] off=0x263f8 value=0x3767397eb8acb9b5
+  regcmd_qword[640] off=0x26400 value=0x398bbc5bbda73e31
+  regcmd_qword[641] off=0x26408 value=0xbdf9be5c39a4bce8
+  regcmd_qword[642] off=0x26410 value=0xbc103dc3be7cbf1d
+  regcmd_qword[643] off=0x26418 value=0xb156bc833cad39e3
+  regcmd_qword[644] off=0x26420 value=0xbe68bed4b8263f57
+  regcmd_qword[645] off=0x26428 value=0xb829bbd738b1b052
+  regcmd_qword[646] off=0x26430 value=0x3ed73d5439553e8a
+  regcmd_qword[647] off=0x26438 value=0x3d78bc5fbe27bce2
+  regcmd_qword[648] off=0x26440 value=0x3ee73c9838fdbaf3
+  regcmd_qword[649] off=0x26448 value=0x3c263d4dbcc13f6e
+  regcmd_qword[650] off=0x26450 value=0xbc11bc38390ebc4b
+  regcmd_qword[651] off=0x26458 value=0x31da3cb43ca7be59
+  regcmd_qword[652] off=0x26460 value=0x3ec1388f3fdf3b41
+  regcmd_qword[653] off=0x26468 value=0xbeffbcad3ba93aa0
+  regcmd_qword[654] off=0x26470 value=0x3c2438eebfb13e9e
+  regcmd_qword[655] off=0x26478 value=0x38dfbd85b593bd82
+  regcmd_qword[656] off=0x26480 value=0x260b3f19bf1e3a87
+  regcmd_qword[657] off=0x26488 value=0x3d2e3748bcdd361d
+  regcmd_qword[658] off=0x26490 value=0x3d8639323f023dd6
+  regcmd_qword[659] off=0x26498 value=0xb79abdf83d11be3e
+  regcmd_qword[660] off=0x264a0 value=0x3b693cb6bc353a58
+  regcmd_qword[661] off=0x264a8 value=0xba65bc41bd403fed
+  regcmd_qword[662] off=0x264b0 value=0xbea72db6b7823ec3
+  regcmd_qword[663] off=0x264b8 value=0x28cdbc18aa5bbe3e
+  regcmd_qword[664] off=0x264c0 value=0x3b8a37f8bb01be22
+  regcmd_qword[665] off=0x264c8 value=0x3b733762383b3820
+  regcmd_qword[666] off=0x264d0 value=0xbf9fb9d1373e3d18
+  regcmd_qword[667] off=0x264d8 value=0xba513a353af6bf76
+  regcmd_qword[668] off=0x264e0 value=0xbd943acbbf0a3a9e
+  regcmd_qword[669] off=0x264e8 value=0x367fb98ebf9aa405
+  regcmd_qword[670] off=0x264f0 value=0x38c93850bbd83cb6
+  regcmd_qword[671] off=0x264f8 value=0xbdeebe2d32da3e82
+  regcmd_qword[672] off=0x26500 value=0xbe26be3a3cc7bfba
+  regcmd_qword[673] off=0x26508 value=0xb81ab72f3d60baa7
+  regcmd_qword[674] off=0x26510 value=0xb3eab0d83e183cbc
+  regcmd_qword[675] off=0x26518 value=0x3ef93bb92e6eb8bf
+  regcmd_qword[676] off=0x26520 value=0xbd50ba6bbf8db225
+  regcmd_qword[677] off=0x26528 value=0xbc9f3eceb9fbb878
+  regcmd_qword[678] off=0x26530 value=0x3d63bde93c1138ea
+  regcmd_qword[679] off=0x26538 value=0x2c44b5e23ca3bba9
+  regcmd_qword[680] off=0x26540 value=0x3ad3b79838c6b386
+  regcmd_qword[681] off=0x26548 value=0xbfd43fc430f03703
+  regcmd_qword[682] off=0x26550 value=0xbea836e83c92ba57
+  regcmd_qword[683] off=0x26558 value=0x3b503b7f273939fa
+  regcmd_qword[684] off=0x26560 value=0x3715bf87be4938e7
+  regcmd_qword[685] off=0x26568 value=0x3ea93d8fbb56b594
+  regcmd_qword[686] off=0x26570 value=0xbea239cc3ed62e2a
+  regcmd_qword[687] off=0x26578 value=0x3d9fb99db1e1bcec
+  regcmd_qword[688] off=0x26580 value=0x3fa53e55325d354b
+  regcmd_qword[689] off=0x26588 value=0x3eaa3cc2b65e3eec
+  regcmd_qword[690] off=0x26590 value=0xb8c237253dc9be1c
+  regcmd_qword[691] off=0x26598 value=0xbdedbb373e8639d9
+  regcmd_qword[692] off=0x265a0 value=0x3cdbbff63fc1bfed
+  regcmd_qword[693] off=0x265a8 value=0xbaf7be773e6ebfe4
+  regcmd_qword[694] off=0x265b0 value=0xbf7b3e2eba333f78
+  regcmd_qword[695] off=0x265b8 value=0x3d5ab7f73ec33d31
+  regcmd_qword[696] off=0x265c0 value=0x3e95b401b2a13e37
+  regcmd_qword[697] off=0x265c8 value=0xbf41362238573c9e
+  regcmd_qword[698] off=0x265d0 value=0x3aefb980304c36e0
+  regcmd_qword[699] off=0x265d8 value=0xbce73cb9348c22a5
+  regcmd_qword[700] off=0x265e0 value=0x31c439663efdb6ec
+  regcmd_qword[701] off=0x265e8 value=0xb56137023f583cf8
+  regcmd_qword[702] off=0x265f0 value=0x3ed2b5cfbf99bf71
+  regcmd_qword[703] off=0x265f8 value=0xbc1abdfd3c46bcd7
+  regcmd_qword[704] off=0x26600 value=0xbdd83a553884bf6f
+  regcmd_qword[705] off=0x26608 value=0xbb222b6e3f6638fc
+  regcmd_qword[706] off=0x26610 value=0x3d483d413d43b9f1
+  regcmd_qword[707] off=0x26618 value=0x3688bd2fbd7bb961
+  regcmd_qword[708] off=0x26620 value=0x3a9d37d93309350b
+  regcmd_qword[709] off=0x26628 value=0xbfd33f2c3cf2bb85
+  regcmd_qword[710] off=0x26630 value=0x3dc33ee23446ba4b
+  regcmd_qword[711] off=0x26638 value=0xb2cbbef02fce2df9
+  regcmd_qword[712] off=0x26640 value=0x32dfb6b2b8f63ccb
+  regcmd_qword[713] off=0x26648 value=0xb27fbacc3a9e3835
+  regcmd_qword[714] off=0x26650 value=0x3f613f56bb723f42
+  regcmd_qword[715] off=0x26658 value=0x389cbd80b918b844
+  regcmd_qword[716] off=0x26660 value=0x35283f4439d6bfe8
+  regcmd_qword[717] off=0x26668 value=0x3a27bf39b92cbe39
+  regcmd_qword[718] off=0x26670 value=0xbd7fbc4bbfacb8b1
+  regcmd_qword[719] off=0x26678 value=0xbe1bbee33de8bac8
+  regcmd_qword[720] off=0x26680 value=0xb5ebba10bcd43f11
+  regcmd_qword[721] off=0x26688 value=0x388f3b453cbebc7c
+  regcmd_qword[722] off=0x26690 value=0x3c4e3bf13c84b962
+  regcmd_qword[723] off=0x26698 value=0xbf5bbe433f04b510
+  regcmd_qword[724] off=0x266a0 value=0x3d1b3f98bcf73e5e
+  regcmd_qword[725] off=0x266a8 value=0x3ca5b87539513ea9
+  regcmd_qword[726] off=0x266b0 value=0x39ae3f9bbeac36f8
+  regcmd_qword[727] off=0x266b8 value=0xbe0ebde0bce1bfd4
+  regcmd_qword[728] off=0x266c0 value=0xbf053c573c8b3e97
+  regcmd_qword[729] off=0x266c8 value=0xbb27bec6bf723667
+  regcmd_qword[730] off=0x266d0 value=0x3e5fb68fbc6dbd0a
+  regcmd_qword[731] off=0x266d8 value=0xbb83bc1dbfabba44
+  regcmd_qword[732] off=0x266e0 value=0x37d8b12f3d1db51e
+  regcmd_qword[733] off=0x266e8 value=0x3cb0be8abdc9b9ae
+  regcmd_qword[734] off=0x266f0 value=0x31da3a20b767982f
+  regcmd_qword[735] off=0x266f8 value=0xbd243e7bba7dac05
+  regcmd_qword[736] off=0x26700 value=0x3f2fbafcbce2bf7b
+  regcmd_qword[737] off=0x26708 value=0x3d98be54b6d63ee1
+  regcmd_qword[738] off=0x26710 value=0xbdc4b9973ff0356d
+  regcmd_qword[739] off=0x26718 value=0x2c943a4cbbc13f61
+  regcmd_qword[740] off=0x26720 value=0x3d7ab25e3e583c74
+  regcmd_qword[741] off=0x26728 value=0xb60db93c305e30e7
+  regcmd_qword[742] off=0x26730 value=0xbdb2be693be73ab7
+  regcmd_qword[743] off=0x26738 value=0xacb13e3b3d33bf4a
+  regcmd_qword[744] off=0x26740 value=0x3dbe3f21ba53be6a
+  regcmd_qword[745] off=0x26748 value=0xbe4d3a55313138e6
+  regcmd_qword[746] off=0x26750 value=0xbd6f3e163f0736fc
+  regcmd_qword[747] off=0x26758 value=0x37833fa7be29bdfb
+  regcmd_qword[748] off=0x26760 value=0x3d49b6a8380e3619
+  regcmd_qword[749] off=0x26768 value=0xb9bfbf6cb5833e24
+  regcmd_qword[750] off=0x26770 value=0x38edb4c53d403bb6
+  regcmd_qword[751] off=0x26778 value=0x3eee3e4baded39ac
+  regcmd_qword[752] off=0x26780 value=0x3e552f4f300929f1
+  regcmd_qword[753] off=0x26788 value=0x3d883097bae7abcf
+  regcmd_qword[754] off=0x26790 value=0x3a81bd99304b3837
+  regcmd_qword[755] off=0x26798 value=0xbecbbe96b1b53fe8
+  regcmd_qword[756] off=0x267a0 value=0xb8bb2f65bd19a406
+  regcmd_qword[757] off=0x267a8 value=0xbea2bca0b5ebbd7f
+  regcmd_qword[758] off=0x267b0 value=0xba81bf983cadaad3
+  regcmd_qword[759] off=0x267b8 value=0x3fadb713b5c13e87
+  regcmd_qword[760] off=0x267c0 value=0xbf123d6bb8843ce2
+  regcmd_qword[761] off=0x267c8 value=0xbc3931293f613d47
+  regcmd_qword[762] off=0x267d0 value=0xbc583ef53d55bfe7
+  regcmd_qword[763] off=0x267d8 value=0xbf9935f03aa6bf56
+  regcmd_qword[764] off=0x267e0 value=0x3f95b9c036243a33
+  regcmd_qword[765] off=0x267e8 value=0xb5cd35a4375dbfa4
+  regcmd_qword[766] off=0x267f0 value=0xba7a38b03aebb0a8
+  regcmd_qword[767] off=0x267f8 value=0xbd86bd033ea53535
+  regcmd_qword[768] off=0x26800 value=0xb51d3b5d39213a46
+  regcmd_qword[769] off=0x26808 value=0x3870bea23be5be62
+  regcmd_qword[770] off=0x26810 value=0x3d74b8b63e7eb531
+  regcmd_qword[771] off=0x26818 value=0x399139c1bdb4bd80
+  regcmd_qword[772] off=0x26820 value=0xbdfe3b5d3e27be37
+  regcmd_qword[773] off=0x26828 value=0x3edab9563c41b823
+  regcmd_qword[774] off=0x26830 value=0x3853b6423b9aadaf
+  regcmd_qword[775] off=0x26838 value=0x397cbbd4aeaa33ad
+  regcmd_qword[776] off=0x26840 value=0xac60bdb63812bc91
+  regcmd_qword[777] off=0x26848 value=0xbb64bc08bf16bfd6
+  regcmd_qword[778] off=0x26850 value=0x3d08bd123dae3c15
+  regcmd_qword[779] off=0x26858 value=0x28a7bbb7b1e83922
+  regcmd_qword[780] off=0x26860 value=0x3c5c3f6e3ea13c1a
+  regcmd_qword[781] off=0x26868 value=0x3ec03f0a3ea438dd
+  regcmd_qword[782] off=0x26870 value=0xbcf13c0e3f1f39a4
+  regcmd_qword[783] off=0x26878 value=0x3ea8318eb6f7ba99
+  regcmd_qword[784] off=0x26880 value=0x3916b8083f163dcb
+  regcmd_qword[785] off=0x26888 value=0xbf66adbebe4cbb01
+  regcmd_qword[786] off=0x26890 value=0xa1013d4b3bb83eae
+  regcmd_qword[787] off=0x26898 value=0xbaf3372a347ab94f
+  regcmd_qword[788] off=0x268a0 value=0xbea5bcbda2ae2da8
+  regcmd_qword[789] off=0x268a8 value=0x3b273e8c3b40bcd0
+  regcmd_qword[790] off=0x268b0 value=0xbc0d377a34be3599
+  regcmd_qword[791] off=0x268b8 value=0x3f543cbebcaa38d4
+  regcmd_qword[792] off=0x268c0 value=0xbd06b58d3c8a37e8
+  regcmd_qword[793] off=0x268c8 value=0xbcd624c0ab8e3f6b
+  regcmd_qword[794] off=0x268d0 value=0x3d962f56bc78b8bd
+  regcmd_qword[795] off=0x268d8 value=0xbbd9bf0c3addbfa8
+  regcmd_qword[796] off=0x268e0 value=0xbf66b65435d5aad6
+  regcmd_qword[797] off=0x268e8 value=0xbe533f6935cc3fb2
+  regcmd_qword[798] off=0x268f0 value=0xb94a3594bf3f3aeb
+  regcmd_qword[799] off=0x268f8 value=0x3818b7d82f103a0d
+  regcmd_qword[800] off=0x26900 value=0x3e14bb2ebc37bb2c
+  regcmd_qword[801] off=0x26908 value=0x36463f96baf6b6d6
+  regcmd_qword[802] off=0x26910 value=0xbfdb3abbb486bf89
+  regcmd_qword[803] off=0x26918 value=0xbf32b8163cf93fcb
+  regcmd_qword[804] off=0x26920 value=0xb3923503bcf63c74
+  regcmd_qword[805] off=0x26928 value=0xb6ed3cb5bddabfac
+  regcmd_qword[806] off=0x26930 value=0x3657b2e8b8a53f8d
+  regcmd_qword[807] off=0x26938 value=0x1667331dba09bc28
+  regcmd_qword[808] off=0x26940 value=0x3f1ab8b4bd163c01
+  regcmd_qword[809] off=0x26948 value=0x3853be643eba3b64
+  regcmd_qword[810] off=0x26950 value=0xba38bc423eebad67
+  regcmd_qword[811] off=0x26958 value=0xa441b5e9b6e53660
+  regcmd_qword[812] off=0x26960 value=0x3e1a3c39be0439cd
+  regcmd_qword[813] off=0x26968 value=0xb878bcb5bf1bbdd0
+  regcmd_qword[814] off=0x26970 value=0xbedb37be3c60b81b
+  regcmd_qword[815] off=0x26978 value=0x32613f81ae443663
+  regcmd_qword[816] off=0x26980 value=0x3aea3db42b0a3e0f
+  regcmd_qword[817] off=0x26988 value=0x3e0827a83d403d96
+  regcmd_qword[818] off=0x26990 value=0x3bca37743e132cb9
+  regcmd_qword[819] off=0x26998 value=0x3a9f37f3318e3de4
+  regcmd_qword[820] off=0x269a0 value=0x3d4834d0b7dbbdc9
+  regcmd_qword[821] off=0x269a8 value=0xb7e0b3f3ac8a3815
+  regcmd_qword[822] off=0x269b0 value=0x3ec83d623993be94
+  regcmd_qword[823] off=0x269b8 value=0x302dbf7b3f5f3935
+  regcmd_qword[824] off=0x269c0 value=0xbe273edeb86d390d
+  regcmd_qword[825] off=0x269c8 value=0x3a70351ebdd13fae
+  regcmd_qword[826] off=0x269d0 value=0xbad3b7edbab1a9b7
+  regcmd_qword[827] off=0x269d8 value=0xbe85b478350c3fd9
+  regcmd_qword[828] off=0x269e0 value=0x3c77bb403d573e7a
+  regcmd_qword[829] off=0x269e8 value=0xba02b5eead01bc1f
+  regcmd_qword[830] off=0x269f0 value=0xb9c13ef83cfbb568
+  regcmd_qword[831] off=0x269f8 value=0x2afdbaa438883cb9
+GEM 3: handle=3 size=303104 map_offset=0x100044000
+  task_like_entries=0
+GEM 4: handle=4 size=102400 map_offset=0x10008e000
+  task_like_entries=0
+GEM 5: handle=5 size=200704 map_offset=0x1000a7000
+  task_like_entries=0
+GEM 6: unavailable: [Errno 2] No such file or directory
+submit #1: task_number=3 task_obj_addr=0xffffff8108552c00
+D RKNN: [13:17:49.378] allocated memory, name: input, virt addr: 0x7ff72b2000, dma addr: 0xffef9000, obj addr: 0xffffff8108553800, size: 100352, aligned size: 102400, fd: 7, handle: 4, flags: 0x403, gem name: 4, iommu domain id: 0
+D RKNN: [13:17:49.380] allocated memory, name: output, virt addr: 0x7ff7281000, dma addr: 0xffec8000, obj addr: 0xffffff8108551400, size: 200704, aligned size: 200704, fd: 8, handle: 5, flags: 0x403, gem name: 5, iommu domain id: 0
+D RKNN: [13:17:49.380] normalize target: CPU
+W RKNN: [13:17:49.383] Failed to get NPU freq, take 1000MHz as default NPU freq
+D RKNN: [13:17:49.383] Get DDR frequency: 528MHz
+D RKNN: [13:17:49.384] dump npy tensor to: dumps/000_InputOperator_input_shape_1_256_14_14_float.npy
+D RKNN: [13:17:49.491] dump npy tensor to: dumps/001_Conv_output_shape_1_512_14_14_float.npy
+D RKNN: [13:17:49.495] dump npy tensor to: dumps/002_OutputOperator_output_shape_1_512_14_14_float.npy
+D RKNN: [13:17:49.503] ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+D RKNN: [13:17:49.503]                                                                           Network Layer Information Table                                                                                
+D RKNN: [13:17:49.503] ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+D RKNN: [13:17:49.503] ID   OpType             DataType Target InputShape                               OutputShape            Cycles(DDR/NPU/Total)    Time(us)     MacUsage(%)          WorkLoad(0/1/2)      RW(KB)       FullName        
+D RKNN: [13:17:49.503] ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+D RKNN: [13:17:49.503] 1    InputOperator      FLOAT16  CPU    \                                        (1,256,14,14)          0/0/0                    14                                0.0%/0.0%/0.0%       0            InputOperator:input
+D RKNN: [13:17:49.503] 2    Conv               FLOAT16  NPU    (1,256,14,14),(512,256,1,1)              (1,512,14,14)          95232/53248/95232        103466       0.05/0.00/0.00       100.0%/0.0%/0.0%     354          Conv:/conv/Conv 
+D RKNN: [13:17:49.503] 3    OutputOperator     FLOAT16  CPU    (1,512,14,14)                            \                      0/0/0                    430                               0.0%/0.0%/0.0%       196          OutputOperator:output
+D RKNN: [13:17:49.503] ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+D RKNN: [13:17:49.503] Total Operator Elapsed Per Frame Time(us): 103910
+D RKNN: [13:17:49.503] Total Memory Read/Write Per Frame Size(KB): 550.00
+D RKNN: [13:17:49.503] ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+D RKNN: [13:17:49.503] ---------------------------------------------------------------------------------------------------
+D RKNN: [13:17:49.503]                                  Operator Time Consuming Ranking Table            
+D RKNN: [13:17:49.503] ---------------------------------------------------------------------------------------------------
+D RKNN: [13:17:49.503] OpType             CallNumber   CPUTime(us)  GPUTime(us)  NPUTime(us)  TotalTime(us)  TimeRatio(%)  
+D RKNN: [13:17:49.503] ---------------------------------------------------------------------------------------------------
+D RKNN: [13:17:49.503] Conv               1            0            0            103466       103466         99.57%        
+D RKNN: [13:17:49.503] OutputOperator     1            430          0            0            430            0.41%         
+D RKNN: [13:17:49.503] InputOperator      1            14           0            0            14             0.01%         
+D RKNN: [13:17:49.503] ---------------------------------------------------------------------------------------------------
+D RKNN: [13:17:49.503] Total                           444          0            103466       103910        
+D RKNN: [13:17:49.503] ---------------------------------------------------------------------------------------------------
+D RKNN: [13:17:49.503] Output(output): size_with_stride larger than model origin size, if need run OutputOperator in NPU, please call rknn_create_memory using size_with_stride.
+  Output shape: 1x512x14x14
+D RKNN: [13:17:49.633] free memory, name: internal, virt addr: 0x7ff72fd000, dma addr: 0xfff12000, obj addr: 0xffffff8108550800, size: 301056, aligned size: 303104, fd: 6, handle: 3, flags: 0x403, gem name: 3, iommu domain id: 0
+D RKNN: [13:17:49.633] free memory, name: weight, virt addr: 0x7ff7347000, dma addr: 0xfff5c000, obj addr: 0xffffff8108553000, size: 271296, aligned size: 274432, fd: 5, handle: 2, flags: 0x403, gem name: 2, iommu domain id: 0
+D RKNN: [13:17:49.634] free memory, name: task, virt addr: 0x7ff7ff6000, dma addr: 0xfff9f000, obj addr: 0xffffff8108552c00, size: 440, aligned size: 4096, fd: 4, handle: 1, flags: 0x40b, gem name: 1, iommu domain id: 0
+D RKNN: [13:17:49.634] free memory, name: input, virt addr: 0x7ff72b2000, dma addr: 0xffef9000, obj addr: 0xffffff8108553800, size: 100352, aligned size: 102400, fd: 7, handle: 4, flags: 0x403, gem name: 4, iommu domain id: 0
+D RKNN: [13:17:49.635] free memory, name: output, virt addr: 0x7ff7281000, dma addr: 0xffec8000, obj addr: 0xffffff8108551400, size: 200704, aligned size: 200704, fd: 8, handle: 5, flags: 0x403, gem name: 5, iommu domain id: 0
+
+  ✓ PASSED (max error: 0.0377502)
+
+################################################################################
+TEST SUMMARY
+################################################################################
+Total tests: 1
+Passed: 1
+Failed: 0
+################################################################################
+[Inferior 1 (process 14684) exited normally]

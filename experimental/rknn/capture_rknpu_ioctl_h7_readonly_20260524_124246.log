@@ -1,0 +1,184 @@
+Function "ioctl" not defined.
+Breakpoint 1 (ioctl) pending.
+Function "mmap" not defined.
+Breakpoint 2 (mmap) pending.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/aarch64-linux-gnu/libthread_db.so.1".
+ACTION flags=0x00000000 value=0xffffffff
+IOCTL_RET #1 ACTION flags=0x00000000 ret=0
+ACTION flags=0x00000001 value=0x00000000
+IOCTL_RET #2 ACTION flags=0x00000001 ret=0
+ACTION flags=0x00000014 value=0x00000000
+IOCTL_RET #3 ACTION flags=0x00000014 ret=-1
+ACTION flags=0x00000013 value=0xffffffed
+IOCTL_RET #4 ACTION flags=0x00000013 ret=0
+ACTION flags=0x00000001 value=0x00000000
+IOCTL_RET #5 ACTION flags=0x00000001 ret=0
+ACTION flags=0x00000012 value=0x00000000
+IOCTL_RET #6 ACTION flags=0x00000012 ret=0
+MEM_CREATE #1 size=440 flags=0x0000040b handle=0x0 obj=0x0 dma=0x0 sram=0
+IOCTL_RET #7 MEM_CREATE #1 ret=0
+MEM_CREATE_RET #1 handle=0x1 obj=0xffffff8134cec000 dma=0xfffa9000 sram=0
+MEM_MAP #1 handle=0x1 reserved=0x0 offset=0x0
+IOCTL_RET #8 MEM_MAP #1 ret=0
+MEM_MAP_RET #1 handle=0x1 reserved=0x0 offset=0x100000000
+MMAP #1 maps=1 addr=0x0 length=440 prot=0x3 flags=0x1 fd=3 offset=0x100000000
+MMAP_RET #1 addr=0x7ff7ff6000
+MEM_SYNC flags=0x00000003 obj=0xffffff8134cec000 offset=0 size=440
+IOCTL_RET #9 MEM_SYNC flags=0x00000003 ret=0
+ACTION flags=0x00000012 value=0x00000000
+IOCTL_RET #10 ACTION flags=0x00000012 ret=0
+MEM_CREATE #2 size=930752 flags=0x00000403 handle=0x0 obj=0x0 dma=0x0 sram=0
+IOCTL_RET #11 MEM_CREATE #2 ret=0
+MEM_CREATE_RET #2 handle=0x2 obj=0xffffff8134cea800 dma=0xffec5000 sram=0
+MEM_MAP #2 handle=0x2 reserved=0x0 offset=0x0
+IOCTL_RET #12 MEM_MAP #2 ret=0
+MEM_MAP_RET #2 handle=0x2 reserved=0x0 offset=0x100001000
+MMAP #2 maps=2 addr=0x0 length=930752 prot=0x3 flags=0x1 fd=3 offset=0x100001000
+MMAP_RET #2 addr=0x7ff7206000
+MEM_SYNC flags=0x00000003 obj=0xffffff8134cea800 offset=0 size=930752
+IOCTL_RET #13 MEM_SYNC flags=0x00000003 ret=0
+MEM_SYNC flags=0x00000001 obj=0xffffff8134cea800 offset=0 size=930752
+IOCTL_RET #14 MEM_SYNC flags=0x00000001 ret=0
+ACTION flags=0x00000001 value=0x00000000
+IOCTL_RET #15 ACTION flags=0x00000001 ret=0
+MEM_SYNC flags=0x00000001 obj=0xffffff8134cec000 offset=0 size=440
+IOCTL_RET #16 MEM_SYNC flags=0x00000001 ret=0
+ACTION flags=0x00000012 value=0x00000000
+IOCTL_RET #17 ACTION flags=0x00000012 ret=0
+MEM_CREATE #3 size=34560 flags=0x00000403 handle=0x0 obj=0x0 dma=0x0 sram=0
+IOCTL_RET #18 MEM_CREATE #3 ret=0
+MEM_CREATE_RET #3 handle=0x3 obj=0xffffff8137a25000 dma=0xffebc000 sram=0
+MEM_MAP #3 handle=0x3 reserved=0x0 offset=0x0
+IOCTL_RET #19 MEM_MAP #3 ret=0
+MEM_MAP_RET #3 handle=0x3 reserved=0x0 offset=0x1000e5000
+MMAP #3 maps=3 addr=0x0 length=34560 prot=0x3 flags=0x1 fd=3 offset=0x1000e5000
+MMAP_RET #3 addr=0x7ff7fed000
+MEM_SYNC flags=0x00000003 obj=0xffffff8137a25000 offset=0 size=34560
+IOCTL_RET #20 MEM_SYNC flags=0x00000003 ret=0
+I RKNN: [12:42:47.021] RKNN Runtime Information, librknnrt version: 2.3.0 (c949ad889d@2024-11-07T11:35:33)
+I RKNN: [12:42:47.022] RKNN Driver Information, version: 0.9.8
+I RKNN: [12:42:47.023] RKNN Model Information, version: 6, toolkit version: 2.3.2(compiler version: 2.3.2 (@2025-04-03T08:26:16)), target: RKNPU v2, target platform: rk3588, framework name: ONNX, framework layout: NCHW, model inference type: static_shape
+D RKNN: [12:42:47.026] allocated memory, name: task, virt addr: 0x7ff7ff6000, dma addr: 0xfffa9000, obj addr: 0xffffff8134cec000, size: 440, aligned size: 4096, fd: 4, handle: 1, flags: 0x40b, gem name: 1, iommu domain id: 0
+D RKNN: [12:42:47.032] allocated memory, name: weight, virt addr: 0x7ff7206000, dma addr: 0xffec5000, obj addr: 0xffffff8134cea800, size: 930752, aligned size: 933888, fd: 5, handle: 2, flags: 0x403, gem name: 2, iommu domain id: 0
+D RKNN: [12:42:47.035] subgraph0 regcmdbuffer size: 6656, taskbuffer size: 440
+D RKNN: [12:42:47.039] allocated memory, name: internal, virt addr: 0x7ff7fed000, dma addr: 0xffebc000, obj addr: 0xffffff8137a25000, size: 34560, aligned size: 36864, fd: 6, handle: 3, flags: 0x403, gem name: 3, iommu domain id: 0
+D RKNN: [12:42:47.040] ---------------------------------------------------------------------------------------------------------------
+D RKNN: [12:42:47.040]                                      Feature Tensor Information Table                       
+D RKNN: [12:42:47.040] -----------------------------------------------------------------------------+---------------------------------
+D RKNN: [12:42:47.040] ID  User           Tensor   DataType  DataFormat   OrigShape    NativeShape  |     [Start       End)       Size
+D RKNN: [12:42:47.040] -----------------------------------------------------------------------------+---------------------------------
+D RKNN: [12:42:47.040] 1   Conv           input    FLOAT16   NC1HWC2      (1,160,7,7)  (1,84,7,7,8) | 0xffebc000 0xffec0100 0x00004100
+D RKNN: [12:42:47.040] 2   OutputOperator output   FLOAT16   NC1HWC2      (1,320,5,5)  (1,178,5,5,8) | 0xffec0100*0xffec4700 0x00004600
+D RKNN: [12:42:47.040] -----------------------------------------------------------------------------+---------------------------------
+D RKNN: [12:42:47.040] -------------------------------------------------------------------------------
+D RKNN: [12:42:47.040]                           Const Tensor Information Table         
+D RKNN: [12:42:47.040] ---------------------------------------------+---------------------------------
+D RKNN: [12:42:47.040] ID  User Tensor      DataType  OrigShape     |     [Start       End)       Size
+D RKNN: [12:42:47.040] ---------------------------------------------+---------------------------------
+D RKNN: [12:42:47.040] 1   Conv conv.weight FLOAT16   (320,160,3,3) | 0xffec5000 0xfffa6000 0x000e1000
+D RKNN: [12:42:47.040] ---------------------------------------------+---------------------------------
+D RKNN: [12:42:47.040] ----------------------------------------
+D RKNN: [12:42:47.040] Total Internal Memory Size: 33.75KB
+D RKNN: [12:42:47.040] Total Weight Memory Size: 902KB
+D RKNN: [12:42:47.040] ----------------------------------------
+D RKNN: [12:42:47.041] The RKNN_FLAG_EXECUTE_FALLBACK_PRIOR_DEVICE_GPU is not set and without GPU op in Graphs, OpenCL will not be initialized
+inputs=1 outputs=1
+Input[0] dims=1x7x7x160 size=15680 type=1
+ACTION flags=0x00000012 value=0x00000000
+IOCTL_RET #21 ACTION flags=0x00000012 ret=0
+MEM_CREATE #4 size=16640 flags=0x00000403 handle=0x0 obj=0x0 dma=0x0 sram=0
+IOCTL_RET #22 MEM_CREATE #4 ret=0
+MEM_CREATE_RET #4 handle=0x4 obj=0xffffff8137a22c00 dma=0xffeb7000 sram=0
+MEM_MAP #4 handle=0x4 reserved=0x0 offset=0x0
+IOCTL_RET #23 MEM_MAP #4 ret=0
+MEM_MAP_RET #4 handle=0x4 reserved=0x0 offset=0x1000ee000
+MMAP #4 maps=4 addr=0x0 length=16640 prot=0x3 flags=0x1 fd=3 offset=0x1000ee000
+MMAP_RET #4 addr=0x7ff768b000
+MEM_SYNC flags=0x00000003 obj=0xffffff8137a22c00 offset=0 size=16640
+IOCTL_RET #24 MEM_SYNC flags=0x00000003 ret=0
+ACTION flags=0x00000012 value=0x00000000
+IOCTL_RET #25 ACTION flags=0x00000012 ret=0
+MEM_CREATE #5 size=17920 flags=0x00000403 handle=0x0 obj=0x0 dma=0x0 sram=0
+IOCTL_RET #26 MEM_CREATE #5 ret=0
+MEM_CREATE_RET #5 handle=0x5 obj=0xffffff8137a23c00 dma=0xffeb2000 sram=0
+MEM_MAP #5 handle=0x5 reserved=0x0 offset=0x0
+IOCTL_RET #27 MEM_MAP #5 ret=0
+MEM_MAP_RET #5 handle=0x5 reserved=0x0 offset=0x1000f3000
+MMAP #5 maps=5 addr=0x0 length=17920 prot=0x3 flags=0x1 fd=3 offset=0x1000f3000
+MMAP_RET #5 addr=0x7ff7686000
+MEM_SYNC flags=0x00000003 obj=0xffffff8137a23c00 offset=0 size=17920
+IOCTL_RET #28 MEM_SYNC flags=0x00000003 ret=0
+MEM_SYNC flags=0x00000001 obj=0xffffff8134cea800 offset=923648 size=6656
+IOCTL_RET #29 MEM_SYNC flags=0x00000001 ret=0
+MEM_SYNC flags=0x00000001 obj=0xffffff8137a22c00 offset=0 size=16640
+IOCTL_RET #30 MEM_SYNC flags=0x00000001 ret=0
+MEM_SYNC flags=0x00000002 obj=0xffffff8137a22c00 offset=0 size=16640
+IOCTL_RET #31 MEM_SYNC flags=0x00000002 ret=0
+MEM_SYNC flags=0x00000001 obj=0xffffff8134cea800 offset=923648 size=6656
+IOCTL_RET #32 MEM_SYNC flags=0x00000001 ret=0
+
+=== DRM_IOCTL_RKNPU_SUBMIT #1 cmd=0xc0686441 size=104 arg=0x7fffff9320 ===
+  flags=0x00000005 timeout=6000 task_start=0 task_number=3
+  task_counter=0 priority=0 task_obj_addr=0xffffff8134cec000
+  regcfg_obj_addr=0x0 task_base_addr=0x0 user_data=0x0
+  core_mask=0x00000000 fence_fd=-1
+  subcore_task[0]={task_start=0, task_number=1}
+  subcore_task[1]={task_start=0, task_number=1}
+  subcore_task[2]={task_start=0, task_number=1}
+  subcore_task[3]={task_start=0, task_number=0}
+  subcore_task[4]={task_start=0, task_number=0}
+  task_obj_mem_create_matches=1
+    match size=4096 handle=0x1 dma=0xfffa9000 flags=0x0000040b
+  task_obj_mem_sync_matches=2
+    sync flags=0x00000003 offset=0 size=440
+    sync flags=0x00000001 offset=0 size=440
+IOCTL_RET #33 SUBMIT #1 ret=0
+MEM_SYNC flags=0x00000002 obj=0xffffff8137a23c00 offset=0 size=17920
+IOCTL_RET #34 MEM_SYNC flags=0x00000002 ret=0
+MEM_SYNC flags=0x00000002 obj=0xffffff8137a23c00 offset=0 size=17920
+IOCTL_RET #35 MEM_SYNC flags=0x00000002 ret=0
+MEM_SYNC flags=0x00000002 obj=0xffffff8137a23c00 offset=0 size=17920
+IOCTL_RET #36 MEM_SYNC flags=0x00000002 ret=0
+D RKNN: [12:42:47.046] allocated memory, name: input, virt addr: 0x7ff768b000, dma addr: 0xffeb7000, obj addr: 0xffffff8137a22c00, size: 16640, aligned size: 20480, fd: 7, handle: 4, flags: 0x403, gem name: 4, iommu domain id: 0
+D RKNN: [12:42:47.050] allocated memory, name: output, virt addr: 0x7ff7686000, dma addr: 0xffeb2000, obj addr: 0xffffff8137a23c00, size: 17920, aligned size: 20480, fd: 8, handle: 5, flags: 0x403, gem name: 5, iommu domain id: 0
+D RKNN: [12:42:47.051] normalize target: CPU
+W RKNN: [12:42:47.053] Failed to get NPU freq, take 1000MHz as default NPU freq
+D RKNN: [12:42:47.053] Get DDR frequency: 528MHz
+D RKNN: [12:42:47.054] dump npy tensor to: dumps/000_InputOperator_input_shape_1_160_7_7_float.npy
+D RKNN: [12:42:47.057] dump npy tensor to: dumps/001_Conv_output_shape_1_320_5_5_float.npy
+D RKNN: [12:42:47.059] dump npy tensor to: dumps/002_OutputOperator_output_shape_1_320_5_5_float.npy
+D RKNN: [12:42:47.060] ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+D RKNN: [12:42:47.060]                                                                           Network Layer Information Table                                                                                
+D RKNN: [12:42:47.060] ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+D RKNN: [12:42:47.060] ID   OpType             DataType Target InputShape                               OutputShape            Cycles(DDR/NPU/Total)    Time(us)     MacUsage(%)          WorkLoad(0/1/2)      RW(KB)       FullName        
+D RKNN: [12:42:47.060] ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+D RKNN: [12:42:47.060] 1    InputOperator      FLOAT16  CPU    \                                        (1,160,7,7)            0/0/0                    10                                0.0%/0.0%/0.0%       0            InputOperator:input
+D RKNN: [12:42:47.060] 2    Conv               FLOAT16  NPU    (1,160,7,7),(320,160,3,3)                (1,320,5,5)            161191/28800/161191      1876         1.20/0.00/0.00       100.0%/0.0%/0.0%     915          Conv:/conv/Conv 
+D RKNN: [12:42:47.060] 3    OutputOperator     FLOAT16  CPU    (1,320,5,5)                              \                      0/0/0                    763                               0.0%/0.0%/0.0%       15           OutputOperator:output
+D RKNN: [12:42:47.060] ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+D RKNN: [12:42:47.060] Total Operator Elapsed Per Frame Time(us): 2649
+D RKNN: [12:42:47.060] Total Memory Read/Write Per Frame Size(KB): 930.94
+D RKNN: [12:42:47.060] ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+D RKNN: [12:42:47.060] ---------------------------------------------------------------------------------------------------
+D RKNN: [12:42:47.060]                                  Operator Time Consuming Ranking Table            
+D RKNN: [12:42:47.060] ---------------------------------------------------------------------------------------------------
+D RKNN: [12:42:47.060] OpType             CallNumber   CPUTime(us)  GPUTime(us)  NPUTime(us)  TotalTime(us)  TimeRatio(%)  
+D RKNN: [12:42:47.060] ---------------------------------------------------------------------------------------------------
+D RKNN: [12:42:47.060] Conv      MEM_SYNC flags=0x00000002 obj=0xffffff8137a23c00 offset=0 size=17920
+IOCTL_RET #37 MEM_SYNC flags=0x00000002 ret=0
+         1            0            0            1876         1876           70.82%        
+D RKNN: [12:42:47.060] OutputOperator     1            763          0            0            763            28.80%        
+D RKNN: [12:42:47.060] InputOperator      1            10           0            0            10             0.38%         
+D RKNN: [12:42:47.060] ---------------------------------------------------------------------------------------------------
+D RKNN: [12:42:47.060] Total                           773          0            1876         2649          
+D RKNN: [12:42:47.060] ---------------------------------------------------------------------------------------------------
+rknn_run OK
+ACTION flags=0x00000015 value=0x00000000
+IOCTL_RET #38 ACTION flags=0x00000015 ret=-1
+D RKNN: [12:42:47.061] free memory, name: internal, virt addr: 0x7ff7fed000, dma addr: 0xffebc000, obj addr: 0xffffff8137a25000, size: 34560, aligned size: 36864, fd: 6, handle: 3, flags: 0x403, gem name: 3, iommu domain id: 0
+D RKNN: [12:42:47.062] free memory, name: weight, virt addr: 0x7ff7206000, dma addr: 0xffec5000, obj addr: 0xffffff8134cea800, size: 930752, aligned size: 933888, fd: 5, handle: 2, flags: 0x403, gem name: 2, iommu domain id: 0
+D RKNN: [12:42:47.063] free memory, name: task, virt addr: 0x7ff7ff6000, dma addr: 0xfffa9000, obj addr: 0xffffff8134cec000, size: 440, aligned size: 4096, fd: 4, handle: 1, flags: 0x40b, gem name: 1, iommu domain id: 0
+D RKNN: [12:42:47.063] free memory, name: input, virt addr: 0x7ff768b000, dma addr: 0xffeb7000, obj addr: 0xffffff8137a22c00, size: 16640, aligned size: 20480, fd: 7, handle: 4, flags: 0x403, gem name: 4, iommu domain id: 0
+D RKNN: [12:42:47.064] free memory, name: output, virt addr: 0x7ff7686000, dma addr: 0xffeb2000, obj addr: 0xffffff8137a23c00, size: 17920, aligned size: 20480, fd: 8, handle: 5, flags: 0x403, gem name: 5, iommu domain id: 0
+[Inferior 1 (process 12356) exited normally]

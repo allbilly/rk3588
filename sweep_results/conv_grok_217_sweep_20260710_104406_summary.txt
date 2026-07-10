@@ -1,0 +1,8 @@
+timestamp=20260710_104406
+total=5 counts={'PASS': 5}
+pre_health_rc=0 post_health_rc=0
+PASS b1_c1_h4_w4_oc6_wic1_k1x1_g1
+PASS b1_c3_h4_w4_oc3_wic3_k1x1_g1
+PASS b1_c4_h4_w4_oc2_wic4_k1x1_g1
+PASS conv2d_b1_c4_h9_w9_oc4_wic4_k1x1_g1
+PASS conv2d_b1_c3_h52_w52_oc6_wic3_k1x1_g1

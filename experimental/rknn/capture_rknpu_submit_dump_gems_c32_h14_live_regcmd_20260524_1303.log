@@ -1,0 +1,116 @@
+Function "ioctl" not defined.
+Breakpoint 1 (ioctl) pending.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/aarch64-linux-gnu/libthread_db.so.1".
+I RKNN: [13:03:18.736] RKNN Runtime Information, librknnrt version: 2.3.0 (c949ad889d@2024-11-07T11:35:33)
+I RKNN: [13:03:18.736] RKNN Driver Information, version: 0.9.8
+I RKNN: [13:03:18.737] RKNN Model Information, version: 6, toolkit version: 2.3.2(compiler version: 2.3.2 (@2025-04-03T08:26:16)), target: RKNPU v2, target platform: rk3588, framework name: ONNX, framework layout: NCHW, model inference type: static_shape
+D RKNN: [13:03:18.738] allocated memory, name: task, virt addr: 0x7ff7ff6000, dma addr: 0xfffa7000, obj addr: 0xffffff8108543c00, size: 440, aligned size: 4096, fd: 4, handle: 1, flags: 0x40b, gem name: 1, iommu domain id: 0
+D RKNN: [13:03:18.740] allocated memory, name: weight, virt addr: 0x7ff73bb000, dma addr: 0xfff92000, obj addr: 0xffffff8108540000, size: 82880, aligned size: 86016, fd: 5, handle: 2, flags: 0x403, gem name: 2, iommu domain id: 0
+D RKNN: [13:03:18.742] subgraph0 regcmdbuffer size: 6656, taskbuffer size: 440
+D RKNN: [13:03:18.743] allocated memory, name: internal, virt addr: 0x7ff74a3000, dma addr: 0xfff85000, obj addr: 0xffffff8108541000, size: 49408, aligned size: 53248, fd: 6, handle: 3, flags: 0x403, gem name: 3, iommu domain id: 0
+D RKNN: [13:03:18.743] ------------------------------------------------------------------------------------------------------------------
+D RKNN: [13:03:18.743]                                       Feature Tensor Information Table                         
+D RKNN: [13:03:18.743] --------------------------------------------------------------------------------+---------------------------------
+D RKNN: [13:03:18.743] ID  User           Tensor   DataType  DataFormat   OrigShape     NativeShape    |     [Start       End)       Size
+D RKNN: [13:03:18.743] --------------------------------------------------------------------------------+---------------------------------
+D RKNN: [13:03:18.743] 1   Conv           input    FLOAT16   NC1HWC2      (1,32,14,14)  (1,16,14,14,8) | 0xfff85000 0xfff88100 0x00003100
+D RKNN: [13:03:18.743] 2   OutputOperator output   FLOAT16   NC1HWC2      (1,128,12,12) (1,64,12,12,8) | 0xfff88100*0xfff91100 0x00009000
+D RKNN: [13:03:18.743] --------------------------------------------------------------------------------+---------------------------------
+D RKNN: [13:03:18.743] ------------------------------------------------------------------------------
+D RKNN: [13:03:18.743]                           Const Tensor Information Table         
+D RKNN: [13:03:18.743] --------------------------------------------+---------------------------------
+D RKNN: [13:03:18.743] ID  User Tensor      DataType  OrigShape    |     [Start       End)       Size
+D RKNN: [13:03:18.743] --------------------------------------------+---------------------------------
+D RKNN: [13:03:18.743] 1   Conv conv.weight FLOAT16   (128,32,3,3) | 0xfff92000 0xfffa4000 0x00012000
+D RKNN: [13:03:18.743] --------------------------------------------+---------------------------------
+D RKNN: [13:03:18.744] ----------------------------------------
+D RKNN: [13:03:18.744] Total Internal Memory Size: 48.25KB
+D RKNN: [13:03:18.744] Total Weight Memory Size: 74KB
+D RKNN: [13:03:18.744] ----------------------------------------
+D RKNN: [13:03:18.744] The RKNN_FLAG_EXECUTE_FALLBACK_PRIOR_DEVICE_GPU is not set and without GPU op in Graphs, OpenCL will not be initialized
+inputs=1 outputs=1
+Input[0] dims=1x14x14x32 size=12544 type=1
+GEM 1: handle=1 size=4096 map_offset=0x100000000
+  task_like_entries=11
+  task_like[0] off=0x0000 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=108 regcfg_offset=0 regcmd_addr=0x00000000fffa4800
+  task_like[1] off=0x0028 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x00000000fffa4b80
+  task_like[2] off=0x0050 flags=0x00000000 op_idx=1 enable_mask=0x00000060 int_mask=0x00000c00 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=26 regcfg_offset=0 regcmd_addr=0x00000000fffa4f00
+  task_like[3] off=0x0078 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x00000000fffa5000
+  task_like[4] off=0x00a0 flags=0x00000000 op_idx=1 enable_mask=0x00000060 int_mask=0x00000c00 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=26 regcfg_offset=0 regcmd_addr=0x00000000fffa5380
+  task_like[5] off=0x00c8 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x00000000fffa5480
+  task_like[6] off=0x00f0 flags=0x00000000 op_idx=1 enable_mask=0x00000060 int_mask=0x00000c00 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=26 regcfg_offset=0 regcmd_addr=0x00000000fffa5800
+  task_like[7] off=0x0118 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x00000000fffa5900
+  task_like[8] off=0x0140 flags=0x00000000 op_idx=1 enable_mask=0x00000060 int_mask=0x00000c00 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=26 regcfg_offset=0 regcmd_addr=0x00000000fffa5c80
+  task_like[9] off=0x0168 flags=0x00000000 op_idx=1 enable_mask=0x0000000d int_mask=0x00000300 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=104 regcfg_offset=0 regcmd_addr=0x00000000fffa5d80
+  task_like[10] off=0x0190 flags=0x00000000 op_idx=1 enable_mask=0x00000060 int_mask=0x00000c00 int_clear=0x0001ffff int_status=0x00000000 regcfg_amount=26 regcfg_offset=0 regcmd_addr=0x00000000fffa6100
+GEM 2: handle=2 size=86016 map_offset=0x100001000
+  task_like_entries=49
+  task_like[0] off=0x121d8 flags=0x00000000 op_idx=0 enable_mask=0x00000000 int_mask=0x00000000 int_clear=0x00000000 int_status=0x00000000 regcfg_amount=0 regcfg_offset=0 regcmd_addr=0x0000000700000000
+  task_like[1] off=0x12228 flags=0xa7ad03a0 op_idx=85 enable_mask=0x7ffc7290 int_mask=0x0000007f int_clear=0xa7abc600 int_status=0x00000055 regcfg_amount=64 regcfg_offset=0 regcmd_addr=0x0000000000000e90
+  task_like[2] off=0x12408 flags=0x01010101 op_idx=16843009 enable_mask=0x01010101 int_mask=0x01010101 int_clear=0x01010101 int_status=0x01010101 regcfg_amount=1 regcfg_offset=0 regcmd_addr=0x0000000200000000
+  task_like[3] off=0x12548 flags=0x00000000 op_idx=0 enable_mask=0x00000000 int_mask=0x00000000 int_clear=0x00000000 int_status=0x00000000 regcfg_amount=12 regcfg_offset=0 regcmd_addr=0x0000000100000000
+  task_like[4] off=0x125c0 flags=0x00000000 op_idx=1060807272 enable_mask=0x00000001 int_mask=0x00000000 int_clear=0x00000000 int_status=0x00000002 regcfg_amount=1 regcfg_offset=3208155814 regcmd_addr=0x0000000000000000
+  task_like[5] off=0x126d8 flags=0x00000000 op_idx=0 enable_mask=0x00000000 int_mask=0x00000000 int_clear=0x00000000 int_status=0x00000000 regcfg_amount=0 regcfg_offset=0 regcmd_addr=0x0000000000000040
+  task_like[6] off=0x12728 flags=0x00000006 op_idx=3204448256 enable_mask=0x00000000 int_mask=0x00000000 int_clear=0x00000000 int_status=0x00000000 regcfg_amount=0 regcfg_offset=0 regcmd_addr=0x3f00000000000000
+  task_like[7] off=0x127f0 flags=0x00000000 op_idx=0 enable_mask=0x00000000 int_mask=0x00000000 int_clear=0x00b11040 int_status=0x02010000 regcfg_amount=4356 regcfg_offset=33619968 regcmd_addr=0x0201000000001100
+  task_like[8] off=0x12890 flags=0x00001050 op_idx=33619969 enable_mask=0x00001054 int_mask=0x02010001 int_clear=0x00001058 int_status=0x02010001 regcfg_amount=4188 regcfg_offset=33619969 regcmd_addr=0x0201000000001060
+  task_like[9] off=0x12958 flags=0x00001160 op_idx=33619968 enable_mask=0x00001164 int_mask=0x02010000 int_clear=0x00001168 int_status=0x02010000 regcfg_amount=4460 regcfg_offset=33619968 regcmd_addr=0x0201000000001170
+  task_like[10] off=0x129a8 flags=0x02003010 op_idx=134283264 enable_mask=0x000b3014 int_mask=0x0801000b int_clear=0x007f3018 int_status=0x08010000 regcfg_amount=12316 regcfg_offset=134283264 regcmd_addr=0x0801000000003030
+  task_like[11] off=0x12c50 flags=0x000e1084 op_idx=33619982 enable_mask=0x00201088 int_mask=0x02010000 int_clear=0x00001100 int_status=0x02010000 regcfg_amount=4356 regcfg_offset=33619968 regcmd_addr=0x0201fff920001110
+  task_like[12] off=0x12c78 flags=0x00001140 op_idx=33619968 enable_mask=0x00001144 int_mask=0x02010000 int_clear=0x00001148 int_status=0x02010000 regcfg_amount=4428 regcfg_offset=33619968 regcmd_addr=0x0201000000001150
+  task_like[13] off=0x12db8 flags=0x00534060 op_idx=268500992 enable_mask=0x00004064 int_mask=0x10010000 int_clear=0x00004068 int_status=0x10010000 regcfg_amount=16492 regcfg_offset=268500992 regcmd_addr=0x1001000003834070
+  task_like[14] off=0x12e30 flags=0x000040a0 op_idx=268500992 enable_mask=0x000040a4 int_mask=0x10010000 int_clear=0x000040a8 int_status=0x10010000 regcfg_amount=16556 regcfg_offset=268500992 regcmd_addr=0x10010000120040c0
+  task_like[15] off=0x12e80 flags=0x00004110 op_idx=268500992 enable_mask=0x00004114 int_mask=0x10010000 int_clear=0x00004118 int_status=0x10010000 regcfg_amount=16668 regcfg_offset=268500992 regcmd_addr=0x1001000000004120
+  task_like[16] off=0x12ef8 flags=0x00000000 op_idx=0 enable_mask=0x000e6004 int_mask=0x40010000 int_clear=0x000e7004 int_status=0x80010000 regcfg_amount=24588 regcfg_offset=1073807360 regcmd_addr=0x4001000000006010
+  task_like[17] off=0x12fc0 flags=0x00107028 op_idx=2147549184 enable_mask=0x00017030 int_mask=0x80010000 int_clear=0x00000000 int_status=0x00000000 regcfg_amount=20 regcfg_offset=16842752 regcmd_addr=0x0041000000000000
+  task_like[18] off=0x13088 flags=0x0000105c op_idx=33619969 enable_mask=0x00001060 int_mask=0x02010000 int_clear=0x00001064 int_status=0x02010000 regcfg_amount=4200 regcfg_offset=33619968 regcmd_addr=0x0201fff810001070
+  task_like[19] off=0x13290 flags=0x00004090 op_idx=268500992 enable_mask=0x00004094 int_mask=0x10010000 int_clear=0x00004098 int_status=0x10010000 regcfg_amount=16540 regcfg_offset=268500992 regcmd_addr=0x10010000000040a0
+  task_like[20] off=0x132e0 flags=0x00004100 op_idx=268500992 enable_mask=0x00004104 int_mask=0x10010000 int_clear=0x00004108 int_status=0x10010000 regcfg_amount=16652 regcfg_offset=268500992 regcmd_addr=0x1001000000004110
+  task_like[21] off=0x135d8 flags=0x00001170 op_idx=33619968 enable_mask=0x00001174 int_mask=0x02010000 int_clear=0x00001178 int_status=0x02010000 regcfg_amount=4476 regcfg_offset=33619968 regcmd_addr=0x0201000000001180
+  task_like[22] off=0x13628 flags=0x00003030 op_idx=134283264 enable_mask=0x01e4400c int_mask=0x10010000 int_clear=0x00024010 int_status=0x10014800 regcfg_amount=16404 regcfg_offset=268500992 regcmd_addr=0x1001fff780004020
+  task_like[23] off=0x13678 flags=0x00534040 op_idx=268500992 enable_mask=0x00004044 int_mask=0x10010000 int_clear=0x00004048 int_status=0x10010000 regcfg_amount=16460 regcfg_offset=268500992 regcmd_addr=0x1001000001264050
+  task_like[24] off=0x136f0 flags=0x0000407c op_idx=268500992 enable_mask=0x00004080 int_mask=0x10010000 int_clear=0x00014084 int_status=0x10010001 regcfg_amount=16520 regcfg_offset=268500992 regcmd_addr=0x1001000000004090
+  task_like[25] off=0x13740 flags=0x000040a8 op_idx=268500992 enable_mask=0x000040ac int_mask=0x10010000 int_clear=0x120040c0 int_status=0x10010000 regcfg_amount=16580 regcfg_offset=268500992 regcmd_addr=0x1001000000004100
+  task_like[26] off=0x13858 flags=0x0000603c op_idx=1073807360 enable_mask=0x00006040 int_mask=0x40010000 int_clear=0x00006044 int_status=0x40010000 regcfg_amount=24648 regcfg_offset=1073807360 regcmd_addr=0x4001fffa40006070
+  task_like[27] off=0x13880 flags=0x0010607c op_idx=1073807360 enable_mask=0x00106084 int_mask=0x40010000 int_clear=0x000360dc int_status=0x40010000 regcfg_amount=28684 regcfg_offset=2147549184 regcmd_addr=0x8001000000007010
+  task_like[28] off=0x13970 flags=0x00001050 op_idx=33619969 enable_mask=0x00001054 int_mask=0x02010001 int_clear=0x00001058 int_status=0x02010001 regcfg_amount=4188 regcfg_offset=33619969 regcmd_addr=0x0201000000001060
+  task_like[29] off=0x13a38 flags=0x00001160 op_idx=33619968 enable_mask=0x00001164 int_mask=0x02010000 int_clear=0x00001168 int_status=0x02010000 regcfg_amount=4460 regcfg_offset=33619968 regcmd_addr=0x0201000000001170
+  task_like[30] off=0x13a88 flags=0x02003010 op_idx=134283264 enable_mask=0x000b3014 int_mask=0x08010003 int_clear=0x007f3018 int_status=0x08010000 regcfg_amount=12316 regcfg_offset=134283264 regcmd_addr=0x0801000000003030
+  task_like[31] off=0x13e98 flags=0x00001150 op_idx=33619968 enable_mask=0x00001154 int_mask=0x02010000 int_clear=0x00001158 int_status=0x02010000 regcfg_amount=4444 regcfg_offset=33619968 regcmd_addr=0x0201000000001160
+  task_like[32] off=0x13ee8 flags=0x00001178 op_idx=33619968 enable_mask=0x0000117c int_mask=0x02010000 int_clear=0x00001180 int_status=0x02010000 regcfg_amount=4484 regcfg_offset=33619968 regcmd_addr=0x0801000002003010
+  task_like[33] off=0x13fd8 flags=0x03834070 op_idx=268500992 enable_mask=0x00004074 int_mask=0x10010000 int_clear=0x00014078 int_status=0x10010000 regcfg_amount=16508 regcfg_offset=268500992 regcmd_addr=0x1001000000004080
+  task_like[34] off=0x140a0 flags=0x00004120 op_idx=268500992 enable_mask=0x00004124 int_mask=0x10010000 int_clear=0x00004128 int_status=0x10010000 regcfg_amount=16684 regcfg_offset=268500992 regcmd_addr=0x0101fffa61000010
+  task_like[35] off=0x14118 flags=0x00006010 op_idx=1073807360 enable_mask=0x001f6014 int_mask=0x40010000 int_clear=0x00006018 int_status=0x40010000 regcfg_amount=24604 regcfg_offset=1073807360 regcmd_addr=0x40010000001f6020
+  task_like[36] off=0x14140 flags=0x00116024 op_idx=1073807360 enable_mask=0x00006034 int_mask=0x40010000 int_clear=0x00006038 int_status=0x40010000 regcfg_amount=24636 regcfg_offset=1073807360 regcmd_addr=0x4001000000006040
+  task_like[37] off=0x141e0 flags=0x00000000 op_idx=4259840 enable_mask=0x00600008 int_mask=0x00810000 int_clear=0x00000000 int_status=0x00000000 regcfg_amount=0 regcfg_offset=0 regcmd_addr=0x0000000100000000
+  task_like[38] off=0x14208 flags=0x0000000d op_idx=768 enable_mask=0x0001ffff int_mask=0x00000000 int_clear=0x0000006c int_status=0x00000000 regcfg_amount=0 regcfg_offset=0 regcmd_addr=0x0000000100000000
+  task_like[39] off=0x14230 flags=0x0000000d op_idx=768 enable_mask=0x0001ffff int_mask=0x00000000 int_clear=0x00000068 int_status=0x00000000 regcfg_amount=896 regcfg_offset=0 regcmd_addr=0x0000000100000000
+  task_like[40] off=0x14258 flags=0x00000060 op_idx=3072 enable_mask=0x0001ffff int_mask=0x00000000 int_clear=0x0000001a int_status=0x00000000 regcfg_amount=1792 regcfg_offset=0 regcmd_addr=0x0000000100000000
+  task_like[41] off=0x14280 flags=0x0000000d op_idx=768 enable_mask=0x0001ffff int_mask=0x00000000 int_clear=0x00000068 int_status=0x00000000 regcfg_amount=2048 regcfg_offset=0 regcmd_addr=0x0000000100000000
+  task_like[42] off=0x142a8 flags=0x00000060 op_idx=3072 enable_mask=0x0001ffff int_mask=0x00000000 int_clear=0x0000001a int_status=0x00000000 regcfg_amount=2944 regcfg_offset=0 regcmd_addr=0x0000000100000000
+  task_like[43] off=0x142d0 flags=0x0000000d op_idx=768 enable_mask=0x0001ffff int_mask=0x00000000 int_clear=0x00000068 int_status=0x00000000 regcfg_amount=3200 regcfg_offset=0 regcmd_addr=0x0000000100000000
+  task_like[44] off=0x142f8 flags=0x00000060 op_idx=3072 enable_mask=0x0001ffff int_mask=0x00000000 int_clear=0x0000001a int_status=0x00000000 regcfg_amount=4096 regcfg_offset=0 regcmd_addr=0x0000000100000000
+  task_like[45] off=0x14320 flags=0x0000000d op_idx=768 enable_mask=0x0001ffff int_mask=0x00000000 int_clear=0x00000068 int_status=0x00000000 regcfg_amount=4352 regcfg_offset=0 regcmd_addr=0x0000000100000000
+  task_like[46] off=0x14348 flags=0x00000060 op_idx=3072 enable_mask=0x0001ffff int_mask=0x00000000 int_clear=0x0000001a int_status=0x00000000 regcfg_amount=5248 regcfg_offset=0 regcmd_addr=0x0000000100000000
+  task_like[47] off=0x14370 flags=0x0000000d op_idx=768 enable_mask=0x0001ffff int_mask=0x00000000 int_clear=0x00000068 int_status=0x00000000 regcfg_amount=5504 regcfg_offset=0 regcmd_addr=0x0000000100000000
+  task_like[48] off=0x14398 flags=0x00000060 op_idx=3072 enable_mask=0x0001ffff int_mask=0x00000000 int_clear=0x0000001a int_status=0x00000000 regcfg_amount=6400 regcfg_offset=0 regcmd_addr=0x0000000000000000
+  QWORD_WINDOW off=0xe1800 count=832 unavailable size=86016
+GEM 3: handle=3 size=53248 map_offset=0x100016000
+  task_like_entries=0
+GEM 4: handle=4 size=16384 map_offset=0x100023000
+  task_like_entries=0
+GEM 5: handle=5 size=36864 map_offset=0x100027000
+  task_like_entries=0
+GEM 6: unavailable: [Errno 2] No such file or directory
+submit #1: task_number=3 task_obj_addr=0xffffff8108543c00
+D RKNN: [13:03:18.746] allocated memory, name: input, virt addr: 0x7ff7ff2000, dma addr: 0xfff81000, obj addr: 0xffffff8108545400, size: 12544, aligned size: 16384, fd: 7, handle: 4, flags: 0x403, gem name: 4, iommu domain id: 0
+D RKNN: [13:03:18.747] allocated memory, name: output, virt addr: 0x7ff7687000, dma addr: 0xfff78000, obj addr: 0xffffff8108541800, size: 36864, aligned size: 36864, fd: 8, handle: 5, flags: 0x403, gem name: 5, iommu domain id: 0
+D RKNN: [13:03:18.748] normalize target: CPU
+rknn_run OK
+D RKNN: [13:03:18.819] free memory, name: internal, virt addr: 0x7ff74a3000, dma addr: 0xfff85000, obj addr: 0xffffff8108541000, size: 49408, aligned size: 53248, fd: 6, handle: 3, flags: 0x403, gem name: 3, iommu domain id: 0
+D RKNN: [13:03:18.820] free memory, name: weight, virt addr: 0x7ff73bb000, dma addr: 0xfff92000, obj addr: 0xffffff8108540000, size: 82880, aligned size: 86016, fd: 5, handle: 2, flags: 0x403, gem name: 2, iommu domain id: 0
+D RKNN: [13:03:18.820] free memory, name: task, virt addr: 0x7ff7ff6000, dma addr: 0xfffa7000, obj addr: 0xffffff8108543c00, size: 440, aligned size: 4096, fd: 4, handle: 1, flags: 0x40b, gem name: 1, iommu domain id: 0
+D RKNN: [13:03:18.821] free memory, name: input, virt addr: 0x7ff7ff2000, dma addr: 0xfff81000, obj addr: 0xffffff8108545400, size: 12544, aligned size: 16384, fd: 7, handle: 4, flags: 0x403, gem name: 4, iommu domain id: 0
+D RKNN: [13:03:18.821] free memory, name: output, virt addr: 0x7ff7687000, dma addr: 0xfff78000, obj addr: 0xffffff8108541800, size: 36864, aligned size: 36864, fd: 8, handle: 5, flags: 0x403, gem name: 5, iommu domain id: 0
+[Inferior 1 (process 13532) exited normally]

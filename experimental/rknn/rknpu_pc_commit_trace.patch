@@ -1,0 +1,108 @@
+--- rknpu_job.c.orig	2026-05-24 11:49:50.619015807 +0800
++++ rknpu_job.c	2026-05-24 11:49:50.705681106 +0800
+@@ -311,6 +311,14 @@
+ 				REG_WRITE((0xe + 0x10000000 * i), 0x3004);
+ 			}
+ 		}
++		LOG_ERROR(
++			"pc commit prelude: core=%d core_mask=%#x use_core_num=%u task_status=%#x int_status=%#x int_raw=%#x enable_mask=%#x\n",
++			core_index, args->core_mask, job->use_core_num,
++			(REG_READ(rknpu_dev->config->pc_task_status_offset) &
++			 rknpu_dev->config->pc_task_number_mask),
++			REG_READ(RKNPU_OFFSET_INT_STATUS),
++			REG_READ(RKNPU_OFFSET_INT_RAW_STATUS),
++			REG_READ(RKNPU_OFFSET_ENABLE_MASK));
+ 
+ 		switch (job->use_core_num) {
+ 		case 1:
+@@ -340,6 +340,14 @@
+ 
+ 	first_task = &task_base[task_start];
+ 	last_task = &task_base[task_end];
++	LOG_ERROR(
++		"pc commit trace: core=%d submit_index=%d task_start=%d task_number=%d task_end=%d first_regcmd=%#llx first_amount=%u first_enable=%#x first_int=%#x last_int=%#x task_base_addr=%#llx flags=%#x use_core_num=%u\n",
++		core_index, submit_index, task_start, task_number, task_end,
++		(unsigned long long)first_task->regcmd_addr,
++		first_task->regcfg_amount, first_task->enable_mask,
++		first_task->int_mask, last_task->int_mask,
++		(unsigned long long)args->task_base_addr, args->flags,
++		job->use_core_num);
+ 
+ 	if (rknpu_dev->config->pc_dma_ctrl) {
+ 		spin_lock_irqsave(&rknpu_dev->irq_lock, flags);
+@@ -367,9 +375,27 @@
+ 	job->first_task = first_task;
+ 	job->last_task = last_task;
+ 	job->int_mask[core_index] = last_task->int_mask;
++	LOG_ERROR(
++		"pc commit regs: core=%d PC_DATA_ADDR=%#x PC_DATA_AMOUNT=%#x INT_MASK=%#x INT_RAW=%#x TASK_CONTROL=%#x DMA_BASE=%#x TASK_STATUS=%#x ENABLE_MASK=%#x\n",
++		core_index, REG_READ(RKNPU_OFFSET_PC_DATA_ADDR),
++		REG_READ(RKNPU_OFFSET_PC_DATA_AMOUNT),
++		REG_READ(RKNPU_OFFSET_INT_MASK),
++		REG_READ(RKNPU_OFFSET_INT_RAW_STATUS),
++		REG_READ(RKNPU_OFFSET_PC_TASK_CONTROL),
++		REG_READ(RKNPU_OFFSET_PC_DMA_BASE_ADDR),
++		(REG_READ(rknpu_dev->config->pc_task_status_offset) &
++		 rknpu_dev->config->pc_task_number_mask),
++		REG_READ(RKNPU_OFFSET_ENABLE_MASK));
+ 
+ 	REG_WRITE(0x1, RKNPU_OFFSET_PC_OP_EN);
+ 	REG_WRITE(0x0, RKNPU_OFFSET_PC_OP_EN);
++	LOG_ERROR(
++		"pc commit armed: core=%d PC_OP_EN=%#x INT_STATUS=%#x INT_RAW=%#x TASK_STATUS=%#x\n",
++		core_index, REG_READ(RKNPU_OFFSET_PC_OP_EN),
++		REG_READ(RKNPU_OFFSET_INT_STATUS),
++		REG_READ(RKNPU_OFFSET_INT_RAW_STATUS),
++		(REG_READ(rknpu_dev->config->pc_task_status_offset) &
++		 rknpu_dev->config->pc_task_number_mask));
+ 
+ 	return 0;
+ }
+@@ -599,6 +625,14 @@
+ 					 rknpu_dev->config->pc_task_number_mask),
+ 					ktime_us_delta(ktime_get(),
+ 						       job->timestamp));
++				LOG_ERROR(
++					"\tcore %d timeout pc regs: PC_DATA_ADDR=%#x PC_DATA_AMOUNT=%#x TASK_CONTROL=%#x DMA_BASE=%#x PC_OP_EN=%#x ENABLE_MASK=%#x\n",
++					i, REG_READ(RKNPU_OFFSET_PC_DATA_ADDR),
++					REG_READ(RKNPU_OFFSET_PC_DATA_AMOUNT),
++					REG_READ(RKNPU_OFFSET_PC_TASK_CONTROL),
++					REG_READ(RKNPU_OFFSET_PC_DMA_BASE_ADDR),
++					REG_READ(RKNPU_OFFSET_PC_OP_EN),
++					REG_READ(RKNPU_OFFSET_ENABLE_MASK));
+ 			}
+ 		}
+ 		rknpu_soft_reset(rknpu_dev);
+@@ -670,6 +704,14 @@
+ 			job->int_mask[core_index],
+ 			(REG_READ(rknpu_dev->config->pc_task_status_offset) &
+ 			 rknpu_dev->config->pc_task_number_mask));
++		LOG_ERROR(
++			"invalid irq pc regs: core=%d PC_DATA_ADDR=%#x PC_DATA_AMOUNT=%#x TASK_CONTROL=%#x DMA_BASE=%#x PC_OP_EN=%#x ENABLE_MASK=%#x\n",
++			core_index, REG_READ(RKNPU_OFFSET_PC_DATA_ADDR),
++			REG_READ(RKNPU_OFFSET_PC_DATA_AMOUNT),
++			REG_READ(RKNPU_OFFSET_PC_TASK_CONTROL),
++			REG_READ(RKNPU_OFFSET_PC_DMA_BASE_ADDR),
++			REG_READ(RKNPU_OFFSET_PC_OP_EN),
++			REG_READ(RKNPU_OFFSET_ENABLE_MASK));
+ 		REG_WRITE(RKNPU_INT_CLEAR, RKNPU_OFFSET_INT_CLEAR);
+ 		return IRQ_HANDLED;
+ 	}
+@@ -674,6 +716,17 @@
+ 	}
+ 
+ 	REG_WRITE(RKNPU_INT_CLEAR, RKNPU_OFFSET_INT_CLEAR);
++	LOG_ERROR(
++		"valid irq trace: core=%d status=%#x raw=%#x require=%#x task_counter=%#x PC_DATA_ADDR=%#x PC_DATA_AMOUNT=%#x TASK_CONTROL=%#x DMA_BASE=%#x ENABLE_MASK=%#x\n",
++		core_index, status, REG_READ(RKNPU_OFFSET_INT_RAW_STATUS),
++		job->int_mask[core_index],
++		(REG_READ(rknpu_dev->config->pc_task_status_offset) &
++		 rknpu_dev->config->pc_task_number_mask),
++		REG_READ(RKNPU_OFFSET_PC_DATA_ADDR),
++		REG_READ(RKNPU_OFFSET_PC_DATA_AMOUNT),
++		REG_READ(RKNPU_OFFSET_PC_TASK_CONTROL),
++		REG_READ(RKNPU_OFFSET_PC_DMA_BASE_ADDR),
++		REG_READ(RKNPU_OFFSET_ENABLE_MASK));
+ 
+ 	rknpu_job_done(job, 0, core_index);
+ 

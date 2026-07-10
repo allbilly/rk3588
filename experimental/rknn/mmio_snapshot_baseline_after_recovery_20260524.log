@@ -1,0 +1,2 @@
+MMIO_SNAPSHOT baseline_after_recovery
+  MMIO_UNAVAILABLE device=/dev/mem errno=13 error=Permission denied

@@ -14,8 +14,15 @@
 - WIP conv_expt/conv_tile_cpu.py conv_plan.md conv_tile_result.md
 - used prefix replay conv_expt/gdb/rknn_prefix_replay.gdb for RKNN and conv.py to pass diffcult shapes
 - but examples/conv.py has contains hex blob and a lot of special cases code again
-- are we on good progress use simple strategey to achieve clean conv.py with < 1000 lines? can we make examples/conv.py more generic and remove special cases? completely rewrite conv_expt/conv_plan.md 
 - we might not need to exactly replicate rknn tiling approach as seems it have so many pecial cases, is it better to think from first principal and design and write our own conv tiling strategery to pass all 217 test shapes?
+- now we have conv_expt/conv_1stprinciple.py passed all 217 shapes but it is 5000lines monstor now
+- explain is it still possible to achieve clean conv.py with < 1000 lines? can we make examples/conv.py more generic and remove special cases?  
+
+nv_full
+Atomic C = 64
+Atomic K = 32 
+
+Rk3588 atomicC=16, K=32
 
 # RK3588 
 

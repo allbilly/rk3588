@@ -1,0 +1,11 @@
+SYSFS_SNAPSHOT baseline_after_recovery
+  /sys/devices/platform/fdab0000.npu/power/runtime_status = suspended
+  /sys/devices/platform/fdab0000.npu/power/runtime_usage = 0
+  /sys/devices/platform/fdab0000.npu/power/runtime_active_time = 513509
+  /sys/devices/platform/fdab0000.npu/power/runtime_suspended_time = 17454790
+  /sys/devices/platform/fdab0000.npu/power/control = auto
+  /sys/class/devfreq/fdab0000.npu/cur_freq = 1000000000
+  /sys/class/devfreq/fdab0000.npu/target_freq = 1000000000
+  /sys/class/devfreq/fdab0000.npu/governor = rknpu_ondemand
+  /sys/class/devfreq/fdab0000.npu/load = 100@1000000000Hz
+  /sys/class/devfreq/fdab0000.npu/trans_stat = From  :   To\n           : 300000000 400000000 500000000 600000000 700000000 800000000 9000000001000000000   time(ms)\n  300000000:         0         0         0         0         0         0         0         0         0\n  400000000:         0         0         0         0         0         0         0         0         0\n  500000000:         0         0         0         0         0         0         0         0         0\n  600000000:         0         0         0         0         0         0         0         0         0\n  700000000:         0         0         0         0         0         0         0         0         0\n  800000000:         0         0         0         0         0         0         0         0         0\n  900000000:         0         0         0         0         0         0         0         0         0\n*1000000000:         0         0         0         0         0         0         0         0  17968276\nTotal transition : 0

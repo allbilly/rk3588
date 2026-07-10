@@ -1,0 +1,87 @@
+Function "ioctl" not defined.
+Breakpoint 1 (ioctl) pending.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/aarch64-linux-gnu/libthread_db.so.1".
+ACTION flags=0x00000000 value=0xffffffff
+ACTION flags=0x00000001 value=0x00000000
+ACTION flags=0x00000014 value=0x00000000
+ACTION flags=0x00000013 value=0xffffffed
+ACTION flags=0x00000001 value=0x00000000
+ACTION flags=0x00000012 value=0x00000000
+MEM_CREATE #1 size=680 flags=0x0000040b handle=0x0 obj=0x0 dma=0x0 sram=0
+MEM_SYNC flags=0x00000003 obj=0xffffff8102fc6800 offset=0 size=680
+ACTION flags=0x00000012 value=0x00000000
+MEM_CREATE #2 size=936384 flags=0x00000403 handle=0x0 obj=0x0 dma=0x0 sram=0
+MEM_SYNC flags=0x00000003 obj=0xffffff8102fc3400 offset=0 size=936384
+MEM_SYNC flags=0x00000001 obj=0xffffff8102fc3400 offset=0 size=936384
+ACTION flags=0x00000001 value=0x00000000
+MEM_SYNC flags=0x00000001 obj=0xffffff8102fc6800 offset=0 size=680
+ACTION flags=0x00000012 value=0x00000000
+MEM_CREATE #3 size=1436160 flags=0x00000403 handle=0x0 obj=0x0 dma=0x0 sram=0
+MEM_SYNC flags=0x00000003 obj=0xffffff8102fc3000 offset=0 size=1436160
+I RKNN: [09:47:39.279] RKNN Runtime Information, librknnrt version: 2.3.0 (c949ad889d@2024-11-07T11:35:33)
+I RKNN: [09:47:39.283] RKNN Driver Information, version: 0.9.8
+I RKNN: [09:47:39.293] RKNN Model Information, version: 6, toolkit version: 2.3.2(compiler version: 2.3.2 (@2025-04-03T08:26:16)), target: RKNPU v2, target platform: rk3588, framework name: ONNX, framework layout: NCHW, model inference type: static_shape
+D RKNN: [09:47:39.299] allocated memory, name: task, virt addr: 0x7ff7ff6000, dma addr: 0xffff5000, obj addr: 0xffffff8102fc6800, size: 680, aligned size: 4096, fd: 4, handle: 1, flags: 0x40b, gem name: 1, iommu domain id: 0
+D RKNN: [09:47:39.305] allocated memory, name: weight, virt addr: 0x7ff7203000, dma addr: 0xfff10000, obj addr: 0xffffff8102fc3400, size: 936384, aligned size: 937984, fd: 5, handle: 2, flags: 0x403, gem name: 2, iommu domain id: 0
+D RKNN: [09:47:39.315] subgraph0 regcmdbuffer size: 12032, taskbuffer size: 680
+D RKNN: [09:47:39.318] allocated memory, name: internal, virt addr: 0x7ff70a4000, dma addr: 0xffdb1000, obj addr: 0xffffff8102fc3000, size: 1436160, aligned size: 1437696, fd: 6, handle: 3, flags: 0x403, gem name: 3, iommu domain id: 0
+D RKNN: [09:47:39.319] ------------------------------------------------------------------------------------------------------------------
+D RKNN: [09:47:39.319]                                       Feature Tensor Information Table                         
+D RKNN: [09:47:39.319] --------------------------------------------------------------------------------+---------------------------------
+D RKNN: [09:47:39.319] ID  User           Tensor   DataType  DataFormat   OrigShape     NativeShape    |     [Start       End)       Size
+D RKNN: [09:47:39.319] --------------------------------------------------------------------------------+---------------------------------
+D RKNN: [09:47:39.319] 1   Conv           input    FLOAT16   NC1HWC2      (1,160,40,40) (1,80,40,40,8) | 0xffdb1000 0xffe2e000 0x0007d000
+D RKNN: [09:47:39.319] 2   OutputOperator output   FLOAT16   NC1HWC2      (1,320,38,38) (1,160,38,38,8) | 0xffe2e000*0xfff0fa00 0x000e1a00
+D RKNN: [09:47:39.319] --------------------------------------------------------------------------------+---------------------------------
+D RKNN: [09:47:39.319] -------------------------------------------------------------------------------
+D RKNN: [09:47:39.319]                           Const Tensor Information Table         
+D RKNN: [09:47:39.319] ---------------------------------------------+---------------------------------
+D RKNN: [09:47:39.319] ID  User Tensor      DataType  OrigShape     |     [Start       End)       Size
+D RKNN: [09:47:39.319] ---------------------------------------------+---------------------------------
+D RKNN: [09:47:39.319] 1   Conv conv.weight FLOAT16   (320,160,3,3) | 0xfff10000 0xffff1000 0x000e1000
+D RKNN: [09:47:39.319] ---------------------------------------------+---------------------------------
+D RKNN: [09:47:39.319] ----------------------------------------
+D RKNN: [09:47:39.319] Total Internal Memory Size: 1402.5KB
+D RKNN: [09:47:39.319] Total Weight Memory Size: 902KB
+D RKNN: [09:47:39.319] ----------------------------------------
+D RKNN: [09:47:39.353] The RKNN_FLAG_EXECUTE_FALLBACK_PRIOR_DEVICE_GPU is not set and without GPU op in Graphs, OpenCL will not be initialized
+inputs=1 outputs=1
+Input[0] dims=1x40x40x160 size=512000 type=1
+ACTION flags=0x00000012 value=0x00000000
+MEM_CREATE #4 size=512000 flags=0x00000403 handle=0x0 obj=0x0 dma=0x0 sram=0
+MEM_SYNC flags=0x00000003 obj=0xffffff8102fc4400 offset=0 size=512000
+ACTION flags=0x00000012 value=0x00000000
+MEM_CREATE #5 size=924160 flags=0x00000403 handle=0x0 obj=0x0 dma=0x0 sram=0
+MEM_SYNC flags=0x00000003 obj=0xffffff8102fc3800 offset=0 size=924160
+MEM_SYNC flags=0x00000001 obj=0xffffff8102fc3400 offset=923648 size=12032
+MEM_SYNC flags=0x00000001 obj=0xffffff8102fc4400 offset=0 size=512000
+MEM_SYNC flags=0x00000001 obj=0xffffff8102fc3400 offset=923648 size=12032
+
+=== DRM_IOCTL_RKNPU_SUBMIT #1 cmd=0xc0686441 size=104 arg=0x7fffff9390 ===
+  flags=0x00000005 timeout=6000 task_start=0 task_number=6
+  task_counter=0 priority=0 task_obj_addr=0xffffff8102fc6800
+  regcfg_obj_addr=0x0 task_base_addr=0x0 user_data=0x0
+  core_mask=0x00000000 fence_fd=-1
+  subcore_task[0]={task_start=0, task_number=2}
+  subcore_task[1]={task_start=0, task_number=2}
+  subcore_task[2]={task_start=0, task_number=2}
+  subcore_task[3]={task_start=0, task_number=0}
+  subcore_task[4]={task_start=0, task_number=0}
+  task_obj_mem_create_matches=0
+  task_obj_mem_sync_matches=2
+    sync flags=0x00000003 offset=0 size=680
+    sync flags=0x00000001 offset=0 size=680
+MEM_SYNC flags=0x00000002 obj=0xffffff8102fc3800 offset=0 size=924160
+MEM_SYNC flags=0x00000002 obj=0xffffff8102fc3800 offset=0 size=924160
+D RKNN: [09:47:39.357] allocated memory, name: input, virt addr: 0x7ff6fa9000, dma addr: 0xffd34000, obj addr: 0xffffff8102fc4400, size: 512000, aligned size: 512000, fd: 7, handle: 4, flags: 0x403, gem name: 4, iommu domain id: 0
+D RKNN: [09:47:39.360] allocated memory, name: output, virt addr: 0x7ff6ec7000, dma addr: 0xffc52000, obj addr: 0xffffff8102fc3800, size: 924160, aligned size: 925696, fd: 8, handle: 5, flags: 0x403, gem name: 5, iommu domain id: 0
+D RKNN: [09:47:39.362] normalize target: CPU
+rknn_run OK
+ACTION flags=0x00000015 value=0x00000000
+D RKNN: [09:47:39.385] free memory, name: internal, virt addr: 0x7ff70a4000, dma addr: 0xffdb1000, obj addr: 0xffffff8102fc3000, size: 1436160, aligned size: 1437696, fd: 6, handle: 3, flags: 0x403, gem name: 3, iommu domain id: 0
+D RKNN: [09:47:39.387] free memory, name: weight, virt addr: 0x7ff7203000, dma addr: 0xfff10000, obj addr: 0xffffff8102fc3400, size: 936384, aligned size: 937984, fd: 5, handle: 2, flags: 0x403, gem name: 2, iommu domain id: 0
+D RKNN: [09:47:39.388] free memory, name: task, virt addr: 0x7ff7ff6000, dma addr: 0xffff5000, obj addr: 0xffffff8102fc6800, size: 680, aligned size: 4096, fd: 4, handle: 1, flags: 0x40b, gem name: 1, iommu domain id: 0
+D RKNN: [09:47:39.388] free memory, name: input, virt addr: 0x7ff6fa9000, dma addr: 0xffd34000, obj addr: 0xffffff8102fc4400, size: 512000, aligned size: 512000, fd: 7, handle: 4, flags: 0x403, gem name: 4, iommu domain id: 0
+D RKNN: [09:47:39.389] free memory, name: output, virt addr: 0x7ff6ec7000, dma addr: 0xffc52000, obj addr: 0xffffff8102fc3800, size: 924160, aligned size: 925696, fd: 8, handle: 5, flags: 0x403, gem name: 5, iommu domain id: 0
+[Inferior 1 (process 4822) exited normally]

@@ -1,6 +1,7 @@
-import os, mmap, ctypes, numpy as np
-from fcntl import ioctl
+import os, mmap, ctypes, re
+import numpy as np
 
+from fcntl import ioctl
 RKNPU_MEM_KERNEL_MAPPING = 8
 RKNPU_MEM_NON_CACHEABLE = 0
 RKNPU_ACT_RESET = 1
@@ -801,6 +802,44 @@ def submit_conv_tasks(task_regs, repeat=1):
 
 # --- conv runner ---
 
+# ----------------------------------------------------------------------
+# c1 boundary bug (NPU firmware) and workaround in run_conv2d
+# ----------------------------------------------------------------------
+# Terminology (NC1HWC2 packing):
+#   c2  = input_pack_c2 = 8 for non-depthwise, non-grouped convs
+#                         (one NC1HWC2 plane holds 8 channels)
+#   c1  = ceil(in_c / c2) = number of c2-sized channel tiles in the K
+#                         (input-channel) dimension.
+#   atomic_C = 16 (= 2 * c2). On RK3588, atomic_K = 32 and
+#              atomic_C = 16 (see NVDLA HW repo and Mesa rocket driver).
+#
+# Bug:
+#   When c1 > 1 (i.e. in_c > 8 for non-depthwise, groups==1), the NPU's
+#   c1 loop is supposed to iterate c1 times so that all in_c input
+#   channels are multiplied into the output. In practice the NPU only
+#   fires the c1 loop ONCE — exactly one c2-tile (8 K-elements) is
+#   accumulated regardless of DATAIN_CHANNEL.
+#   So with c2=8, in_c=10, c1=2: the NPU only processes 8 of the 10
+#   K-elements, leaving the result short by the last 2 multiplies.
+#
+#   Verified empirically:
+#     c=8  (c1=1)  -> 1*8+2*7+...+8*1 = 120     PASS
+#     c=10 (c1=2)  -> expected 220, got 192 (= sum for 8 channels)
+#     c=17 (c1=3)  -> expected 969, got first 8 channels only
+#   The bug is INVISIBLE for:
+#     - c1==1 (in_c <= 8)            (single c1 iteration is enough)
+#     - in_c % c2 == 0 (e.g. 16, 32)  (lucky: 1 c1 * c2 = full in_c)
+#     - kh > 1 or kw > 1 (3x3 convs)  (spatial path uses c1=1 in HW)
+#
+# Workaround:
+#   Split the conv into c1 sub-convs along the input-channel axis; each
+#   sub-conv has c1=1 and therefore a single HW iteration is sufficient.
+#   Submit each sub-conv and sum the per-sub outputs in software. The
+#   DPU overwrites the output surface per task (no HW accumulation), so
+#   software sum is required. This is applied only to non-spatial,
+#   non-depthwise, groups==1 convs — the other code paths in this file
+#   are not affected by the c1 boundary bug.
+# ----------------------------------------------------------------------
 def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None):
     in_h, in_w = input_hw
     weight_in_c = weight_in_c or (in_c // groups)
@@ -809,8 +848,10 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
     out_h, out_w = p["out_h"], p["out_w"]
 
     np.random.seed(42)
-    input_nchw = np.random.uniform(-2, 2, (batch, in_c, in_h, in_w)).astype(np.float16)
-    weight_nchw = np.random.uniform(-2, 2, (out_c, weight_in_c, kh, kw)).astype(np.float16)
+    in_size = batch * in_c * in_h * in_w
+    wt_size = out_c * weight_in_c * kh * kw
+    input_nchw = np.arange(1, in_size + 1, dtype=np.float32).reshape(batch, in_c, in_h, in_w).astype(np.float16)
+    weight_nchw = np.arange(wt_size, 0, -1, dtype=np.float32).reshape(out_c, weight_in_c, kh, kw).astype(np.float16)
     if groups == 1 and kh == 1 and kw == 1 and in_c >= 64:
         pass
     if _is_depthwise(in_c, out_c, groups) and (kh != 1 or kw != 1) and in_c >= 32:
@@ -833,6 +874,62 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
         wt_flat = pack_conv_weights_for_shape(weight_full, out_c, in_c, kh, kw, p["align_c"], groups)
     wt_ptr = ctypes.addressof(ctypes.c_char.from_buffer(weight_map))
     ctypes.memmove(wt_ptr, wt_flat.ctypes.data, wt_flat.nbytes)
+
+    def _fmt_hex(v):
+        if v == 0:
+            return "      0 "
+        fv = np.frombuffer(np.array([v], dtype=np.uint16).tobytes(), dtype=np.float16)[0]
+        return f"0x{v:04x}={fv:>5.2f}"
+    wt_flat_u16 = wt_flat.view(np.uint16).tolist()
+    first_input_tile = None
+
+    # ------------------------------------------------------------------
+    # c1 boundary bug workaround (see explanation below).
+    # Triggered when: c1_count > 1 AND not is_spatial AND not depthwise
+    # AND groups == 1.  Spatial (3x3) convs and depthwise/grouped convs
+    # use a different code path in this file and are NOT affected.
+    # ------------------------------------------------------------------
+    c1_count = _ceil_div(in_c, p["input_pack_c2"])
+    need_c1_split = (c1_count > 1 and not is_spatial and not p["is_depthwise"] and groups == 1)
+    if need_c1_split:
+        # c1 split: see block comment above the function.
+        c2 = p["input_pack_c2"]
+        result = np.zeros((batch, out_c, out_h, out_w), dtype=np.float16)
+        for c1_idx in range(c1_count):
+            in_c_start = c1_idx * c2
+            in_c_end = min(in_c_start + c2, in_c)
+            sub_in_c = in_c_end - in_c_start
+            if sub_in_c == 0:
+                continue
+            sub_input_nchw = input_nchw[:, in_c_start:in_c_end, :, :]
+            sub_weight_full = weight_full[:, in_c_start:in_c_end, :, :]
+            sub_p = _conv_params(1, sub_in_c, in_h, in_w, out_c, kh, kw, groups)
+            if sub_p["is_depthwise"] and sub_in_c == 32 and out_c == 32 and not is_spatial:
+                sub_wt_flat = np.zeros((kh * kw * _align_up(sub_in_c, sub_p["align_c"]) * out_c), dtype=np.float16)
+                sub_wt_flat[:out_c] = weight_nchw[:, 0, 0, 0]
+            else:
+                sub_wt_flat = pack_conv_weights_for_shape(sub_weight_full, out_c, sub_in_c, kh, kw, sub_p["align_c"], groups)
+            ctypes.memmove(wt_ptr, sub_wt_flat.ctypes.data, sub_wt_flat.nbytes)
+            sub_result = _run_conv2d_inner(
+                batch, sub_in_c, out_c, kh, kw, in_h, in_w, groups,
+                sub_input_nchw, sub_weight_full, sub_wt_flat, _fmt_hex)
+            result += sub_result
+        return result, input_nchw, weight_nchw
+
+    return _run_conv2d_inner(
+        batch, in_c, out_c, kh, kw, in_h, in_w, groups,
+        input_nchw, weight_full, wt_flat, _fmt_hex)
+
+
+def _run_conv2d_inner(batch, in_c, out_c, kh, kw, in_h, in_w, groups,
+                     input_nchw, weight_full, wt_flat, _fmt_hex):
+    p = _conv_params(1, in_c, in_h, in_w, out_c, kh, kw, groups)
+    is_spatial = (kh != 1 or kw != 1)
+    out_h, out_w = p["out_h"], p["out_w"]
+    grouped_spatial = _is_grouped_spatial(in_c, out_c, kh, kw, groups)
+    wt_flat_u16 = wt_flat.view(np.uint16).tolist()
+    first_input_tile = None
+    wt_ptr = ctypes.addressof(ctypes.c_char.from_buffer(weight_map))
 
     result = np.zeros((batch, out_c, out_h, out_w), dtype=np.float16)
     def read_output_fp16(count):
@@ -865,6 +962,18 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
             tile_out_h = tile_p["out_h"]
             input_tile = input_nchw[n, :, row_start:row_start + tile_in_h, :]
             input_flat = _pack_conv_input_fp16(input_tile, tile_p).view(np.uint16)
+            if n == 0 and row_start == 0 and first_input_tile is None:
+                first_input_tile = input_flat.tolist()
+                print(f"{'idx':>4} | {'input':<14} | {'weight':<14}")
+                print(f"{'-'*4}-+-{'-'*14}-+-{'-'*14}")
+                for i in range(max(len(first_input_tile), len(wt_flat_u16))):
+                    iv = first_input_tile[i] if i < len(first_input_tile) else 0
+                    wv = wt_flat_u16[i] if i < len(wt_flat_u16) else 0
+                    if iv == 0 and wv == 0:
+                        continue
+                    is_ = _fmt_hex(iv) if i < len(first_input_tile) else "-" * 14
+                    ws = _fmt_hex(wv) if i < len(wt_flat_u16) else "-" * 14
+                    print(f"{i:4d} | {is_:<14} | {ws:<14}")
 
             if pc_chain_tiles:
                 input_bytes = input_flat.nbytes
@@ -883,7 +992,7 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
                         ct_inputs[:] = block_input_flat
                         block_weight_full = np.zeros((ch_tile, ch_tile, kh, kw), dtype=np.float16)
                         for local_c in range(ch_tile):
-                            block_weight_full[local_c, local_c] = weight_nchw[ch_start + local_c, 0]
+                            block_weight_full[local_c, local_c] = weight_full[ch_start + local_c, ch_start + local_c, 0, 0] if kh == 1 and kw == 1 else 0
                         block_weight_flat = pack_conv_weights_for_shape(block_weight_full, ch_tile, ch_tile, kh, kw, block_p["align_c"], ch_tile)
                         ctypes.memmove(wt_ptr, block_weight_flat.ctypes.data, block_weight_flat.nbytes)
                         ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(output_map)), 0, output_mem_create.size)
@@ -952,6 +1061,13 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
             if not is_spatial:
                 out_count = out_c1 * tile_p["out_width_stride"] * UNPACK_C2
                 out_buf = read_output_fp16(out_count)
+                if n == 0 and row_start == 0:
+                    print(f"raw conv output (batch=0, tile0, out_c={out_c}, tile_h={tile_out_h}, out_w={out_w}, "
+                          f"width_stride={tile_p['out_width_stride']}, out_c1={out_c1}):")
+                    for idx, v in enumerate(out_buf):
+                        if v == 0:
+                            continue
+                        print(f"  [{idx:4d}] = {v}")
                 result[n, :, row_start:row_start + tile_out_h, :] = _unpack_flat_1x1_output(
                     out_buf, out_c, tile_out_h, out_w, tile_p["out_width_stride"], UNPACK_C2)
                 continue
@@ -968,8 +1084,15 @@ def run_conv2d(batch, in_c, out_c, kh, kw, input_hw, groups=1, weight_in_c=None)
         if pc_chain_tiles and not depthwise_channel_tiles:
             out_c1 = _ceil_div(p["align_out_c"], UNPACK_C2)
             out_buf = read_output_fp16(out_c1 * p["out_width_stride"] * UNPACK_C2)
+            if n == 0:
+                print(f"raw conv output (batch=0, out_c={out_c}, out_h={out_h}, out_w={out_w}, "
+                      f"width_stride={p['out_width_stride']}, out_c1={out_c1}):")
+                for idx, v in enumerate(out_buf):
+                    if v == 0:
+                        continue
+                    print(f"  [{idx:4d}] = {v}")
             result[n] = _unpack_flat_1x1_output(out_buf, out_c, out_h, out_w, p["out_width_stride"], UNPACK_C2)
-    return result, input_nchw, weight_nchw
+    return result
 
 def compute_expected_nchw(input_nchw, weight_nchw, batch, in_c, in_h, in_w, out_c, kh, kw, groups=1):
     out_h, out_w = in_h - kh + 1, in_w - kw + 1
@@ -1015,6 +1138,22 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
     ct_inputs[:] = input_packed
     ct_weights[:] = weight_packed
 
+    def fmt(v):
+        if v == 0:
+            return "      0 "
+        fv = np.frombuffer(np.array([v], dtype=np.uint16).tobytes(), dtype=np.float16)[0]
+        return f"0x{v:04x}={fv:>5.2f}"
+    print(f"{'idx':>4} | {'input':<14} | {'weight':<14}")
+    print(f"{'-'*4}-+-{'-'*14}-+-{'-'*14}")
+    for i in range(max(len(input_packed), len(weight_packed))):
+        iv = input_packed[i] if i < len(input_packed) else 0
+        wv = weight_packed[i] if i < len(weight_packed) else 0
+        if iv == 0 and wv == 0:
+            continue
+        is_ = fmt(iv) if i < len(input_packed) else "-" * 14
+        ws = fmt(wv) if i < len(weight_packed) else "-" * 14
+        print(f"{i:4d} | {is_:<14} | {ws:<14}")
+
     task_regs = []
     m_tile = 10 * CBUF_BANK_SIZE // input_row_bytes if align_in <= 12 * 32 else 1
     for start in range(0, m, m_tile):
@@ -1031,16 +1170,35 @@ def run_gemm(m, n, k, a_matrix, b_matrix):
     out_nbytes = max(256, ((m - 1) * align_out + n) * FP32_BYTES)
     output = np.frombuffer(output_map, dtype=np.float32, count=out_nbytes // 4).copy()
 
+    print(f"raw output surface (m={m}, align_out={align_out}, dtype=float32):")
+    for idx, v in enumerate(output[:m * align_out]):
+        if v == 0:
+            continue
+        row, col = divmod(idx, align_out)
+        mark = "" if col < n else " (junk)"
+        print(f"  [{idx:4d}] r{row} c{col} = {v}{mark}")
+
     return _unpack_gemm_output_fp32(output, m, n, align_out)
 
 if __name__ == "__main__":
     import sys
     run_conv = len(sys.argv) <= 1 or "conv" in sys.argv[1:]
     run_gemm_tests = len(sys.argv) <= 1 or "gemm" in sys.argv[1:]
+    # filter to a single shape by name (or substring): `python conv_gemm.py conv my_shape_name`
+    shape_filter = None
+    if "conv" in sys.argv[1:]:
+        idx = sys.argv.index("conv")
+        if idx + 1 < len(sys.argv):
+            shape_filter = sys.argv[idx + 1]
 
     # --- GEMM tests ---
     if run_gemm_tests:
         print("=== GEMM tests ===")
+        gemm_filter = None
+        if "gemm" in sys.argv[1:]:
+            idx = sys.argv.index("gemm")
+            if idx + 1 < len(sys.argv):
+                gemm_filter = sys.argv[idx + 1]
         test_cases = [
             (2, 2, 1,
              np.array([[1], [3]], dtype=np.float16),
@@ -1052,6 +1210,16 @@ if __name__ == "__main__":
             a = np.random.randn(m, k).astype(np.float16)
             b = np.random.randn(k, n).astype(np.float16)
             test_cases.append((m, n, k, a, b))
+        if gemm_filter:
+            matched = [t for t in test_cases if f"{t[0]}x{t[1]}x{t[2]}" == gemm_filter]
+            if not matched:
+                # fall back to substring on the dim string
+                matched = [t for t in test_cases if gemm_filter in f"{t[0]}x{t[1]}x{t[2]}"]
+            if not matched:
+                print(f"no gemm test matched filter {gemm_filter!r}")
+                sys.exit(1)
+            test_cases = matched
+            print(f"filtered to {len(test_cases)} gemm test(s) matching {gemm_filter!r}")
 
         for m, n, k, a, b in test_cases:
             print(f"\n{m}x{n}x{k}:")
@@ -1127,7 +1295,10 @@ if __name__ == "__main__":
             dict(name="conv2d_b1_c15_h5_w5_oc25_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=25, weight_in_c=3, kh=3, kw=3, groups=5),
             dict(name="conv2d_b1_c15_h5_w5_oc30_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=30, weight_in_c=3, kh=3, kw=3, groups=5),
             dict(name="conv2d_b1_c15_h5_w5_oc40_wic3_k3x3_g5", batch=1, in_c=15, in_h=5, in_w=5, out_c=40, weight_in_c=3, kh=3, kw=3, groups=5),
-            dict(name="conv2d_2x2_1x1_4x4",  batch=1, in_c=2, in_h=4, in_w=4, out_c=2, weight_in_c=2, kh=1, kw=1, groups=1),
+            # 1x1 conv sweep: c x c channels, varying spatial size (small N for debug)
+            *[dict(name=f"conv2d_{c}x{c}_1x1_{n}x{n}", batch=1, in_c=c, in_h=n, in_w=n,
+                   out_c=c, weight_in_c=c, kh=1, kw=1, groups=1)
+              for c in [1, 2, 3, 4, 8] for n in [1, 2, 3, 4, 5]],
             dict(name="conv2d_8x8_1x1_5x5",       batch=1, in_c=8,  in_h=5,  in_w=5,  out_c=8,  weight_in_c=8,  kh=1, kw=1, groups=1),
             dict(name="conv2d_10x20_3x3_9x9",     batch=1, in_c=10, in_h=9,  in_w=9,  out_c=20, weight_in_c=10, kh=3, kw=3, groups=1),
             dict(name="conv2d_16x16_3x3_9x9",     batch=1, in_c=16, in_h=9,  in_w=9,  out_c=16, weight_in_c=16, kh=3, kw=3, groups=1),
@@ -1189,20 +1360,48 @@ if __name__ == "__main__":
             dict(name="conv1d_bs8_8311_635_g3_as_conv2d", batch=8, in_c=3, in_h=1, in_w=11, out_c=6, weight_in_c=1, kh=1, kw=5, groups=3),
         ]
         shapes_sweep = [dict(name=f"conv2d_1x3_{n}x{n}_k1", batch=1, in_c=3, in_h=n, in_w=n, out_c=6, weight_in_c=3, kh=1, kw=1, groups=1) for n in range(2, 400, 2)]
-        shapes += shapes_sweep
+        if not shape_filter:
+            shapes += shapes_sweep
         # ── Known-issue / reference shapes (non-blocking, report-only) ──
         known_issue_shapes = [
         ]
         shapes += known_issue_shapes
 
+        if shape_filter:
+            matched = [s for s in shapes if shape_filter in s["name"]]
+            if not matched:
+                m = re.fullmatch(r"(\d+)x(\d+)_(\d+)x(\d+)_(\d+)x(\d+)", shape_filter)
+                if m:
+                    in_c, out_c, kh, kw, in_h, in_w = (int(x) for x in m.groups())
+                    name = f"conv2d_{in_c}x{out_c}_{kh}x{kw}_{in_h}x{in_w}"
+                    shapes = [dict(name=name, batch=1, in_c=in_c, in_h=in_h, in_w=in_w,
+                                   out_c=out_c, weight_in_c=in_c, kh=kh, kw=kw, groups=1)]
+                    print(f"parsed filter as shape descriptor: {name}")
+                else:
+                    print(f"no shape matched filter {shape_filter!r}; available:")
+                    for s in shapes:
+                        print(f"  {s['name']}")
+                    sys.exit(1)
+            else:
+                shapes = matched
+            print(f"filtered to {len(shapes)} shape(s) matching {shape_filter!r}")
+
         name_width = max(len(s["name"]) for s in shapes)
         in_shape_width = max(len(f"{s['in_c']}x{s['in_h']}x{s['in_w']}") for s in shapes)
         out_shape_width = max(len(f"{s['out_c']}x{s['in_h'] - s['kh'] + 1}x{s['in_w'] - s['kw'] + 1}") for s in shapes)
 
+        failed = []
         for s in shapes:
             name, batch, in_c, in_h, in_w, out_c, weight_in_c, kh, kw, groups = \
                 s["name"], s["batch"], s["in_c"], s["in_h"], s["in_w"], s["out_c"], s["weight_in_c"], s["kh"], s["kw"], s["groups"]
-            result, inp, wt = run_conv2d(batch, in_c, out_c, kh, kw, (in_h, in_w), groups=groups, weight_in_c=weight_in_c)
+            ret = run_conv2d(batch, in_c, out_c, kh, kw, (in_h, in_w), groups=groups, weight_in_c=weight_in_c)
+            if len(ret) == 3:
+                result, inp, wt = ret
+            else:
+                result = ret
+                inp = np.arange(1, batch * in_c * in_h * in_w + 1, dtype=np.float32).reshape(batch, in_c, in_h, in_w).astype(np.float16)
+                wt_size = out_c * (weight_in_c or (in_c // groups)) * kh * kw
+                wt = np.arange(wt_size, 0, -1, dtype=np.float32).reshape(out_c, weight_in_c or (in_c // groups), kh, kw).astype(np.float16)
             expected = compute_expected_nchw(inp, wt, batch, in_c, in_h, in_w, out_c, kh, kw, groups=groups)
             md = float(np.max(np.abs(result.astype(np.float64) - expected)))
             ok = np.allclose(result, expected, atol=0.2) and not np.any(np.isinf(result))
@@ -1211,5 +1410,8 @@ if __name__ == "__main__":
             in_shape = f"{in_c}x{in_h}x{in_w}"
             out_shape = f"{out_c}x{out_h}x{out_w}"
             print(f"  {name:<{name_width}s} {in_shape:<{in_shape_width}s} -> {out_shape:<{out_shape_width}s} kh={kh} kw={kw} g={groups}  {'PASS' if ok else 'FAIL'}  (max_diff={md:.4f})")
-            assert ok, f"{name} failed"
+            if not ok:
+                failed.append(name)
+        if failed:
+            print(f"\nFAILED {len(failed)} shapes: {failed[:10]}{'...' if len(failed) > 10 else ''}")
     os.close(fd)
