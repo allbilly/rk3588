@@ -1,3 +1,13 @@
 *.pyc
 */dump/*
 dump/*
+ref
+sweep_results/conv_grok_217_batched_20260710_173928_detail.log
+sweep_results/conv_grok_217_batched_20260710_173928_summary.txt
+sweep_results/conv_grok_217_sweep_20260710_171115_detail.log
+sweep_results/conv_grok_217_sweep_20260710_171400_detail.log
+sweep_results/conv_grok_217_sweep_20260710_172456_detail.log
+sweep_results/conv_grok_217_sweep_20260710_180248_detail.log
+sweep_results/conv_grok_217_sweep_20260710_180248_summary.txt
+sweep_results/conv_grok_217_sweep_20260710_182610_detail.log
+sweep_results/conv_grok_217_sweep_20260710_182610_summary.txt

@@ -25,6 +25,7 @@ from sweep_217 import collect_shapes, normalize_shape_name  # noqa: E402
 
 from conv_grok.conv import (  # noqa: E402
     _is_depthwise,
+    plan_depthwise_rows,
     plan_local_serial_rows,
     run_shape,
     shape_from_name,
@@ -61,7 +62,7 @@ def shape_dict_for_run(raw: dict) -> dict:
 
 
 def estimate_depthwise_tasks(s: dict) -> int:
-    """Serial depthwise: one channel at a time, each with its own Y plan."""
+    """Serial depthwise (current): channels × Y windows."""
     base = dict(s, name=s["name"] + "_dw_est", batch=1, in_c=1, out_c=2, weight_in_c=1, groups=1)
     y_rows, _, _, _ = plan_local_serial_rows(base)
     return s["batch"] * s["out_c"] * max(1, len(y_rows))
