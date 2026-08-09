@@ -5,6 +5,8 @@ Observed RK3588 integer behavior:
   * MUL works for INT8 and INT16.  With INT32, its second operand is signed
     INT16 even though ERDMA is configured and packed as INT32.
   * DIV, FLOOR, and CEIL use floating-point semantics and are not integer ops.
+  * The captured FP16 comparison pipeline can write its 0/1 mask as INT16.
+  * INT16 EW results can be regrouped and written externally as INT32.
 
 The checks below prove supported behavior and deliberately prove the three
 unsupported integer ALU encodings by showing that they differ from ordinary
@@ -39,10 +41,27 @@ class reg:
     FEATURE_MODE_CFG = 0x400C
     DATA_FORMAT = 0x4010
     DST_BASE_ADDR = 0x4020
+    DST_SURF_STRIDE = 0x4024
     DATA_CUBE_WIDTH = 0x4030
+    DATA_CUBE_HEIGHT = 0x4034
+    DATA_CUBE_NOTCH = 0x4038
     DATA_CUBE_CHANNEL = 0x403C
+    BS_CFG = 0x4040
+    BS_ALU_CFG = 0x4044
+    BS_MUL_CFG = 0x4048
+    BS_OW_CFG = 0x4050
+    WDMA_SIZE_0 = 0x4058
+    WDMA_SIZE_1 = 0x405C
+    BN_CFG = 0x4060
+    BN_MUL_CFG = 0x4068
+    BN_RELUX_CMP_VALUE = 0x406C
     EW_CFG = 0x4070
+    EW_CVT_OFFSET_VALUE = 0x4074
     EW_CVT_SCALE_VALUE = 0x4078
+    OUT_CVT_OFFSET = 0x4080
+    OUT_CVT_SCALE = 0x4084
+    OUT_CVT_SHIFT = 0x4088
+    SURFACE_ADD = 0x40C0
 
     # --- DPU RDMA (0x5000) ---
     RDMA_DATA_CUBE_WIDTH = 0x500C
@@ -56,6 +75,7 @@ class reg:
 
 PRECISION_INT8 = 0
 PRECISION_INT16 = 1
+PRECISION_FP16 = 2
 PRECISION_INT32 = 4
 
 ERDMA_SIZE_INT8 = 1
@@ -434,6 +454,203 @@ def run_operation(
     return passed
 
 
+def prepare_and_run(
+    fd,
+    commands,
+    input_payloads,
+    output_dtype,
+    output_count,
+):
+    """Run one decoded-register boundary probe with the known-safe Rocket ABI."""
+    task_map, task_bo = mem_allocate(fd, 1024)
+    regcmd_map, regcmd_bo = mem_allocate(fd, 1024)
+    input_allocations = [mem_allocate(fd, 4 * 1024 * 1024) for _ in input_payloads]
+    output_map, output_bo = mem_allocate(fd, 4 * 1024 * 1024)
+
+    for (input_map, _), payload in zip(input_allocations, input_payloads):
+        input_map[: payload.nbytes] = payload.tobytes()
+    output_map[: output_count * np.dtype(output_dtype).itemsize] = bytes(
+        output_count * np.dtype(output_dtype).itemsize
+    )
+
+    input_bos = [allocation[1] for allocation in input_allocations]
+    resolved_commands = commands(output_bo, input_bos)
+    regcmds = (ctypes.c_uint64 * (regcmd_bo.size // 8)).from_buffer(regcmd_map)
+    for index, command in enumerate(resolved_commands):
+        regcmds[index] = command
+
+    tasks = ctypes.cast(
+        ctypes.addressof(ctypes.c_char.from_buffer(task_map)),
+        ctypes.POINTER(struct_rknpu_task),
+    )
+    tasks[0].flags = 0
+    tasks[0].op_idx = 4
+    tasks[0].enable_mask = 0x18
+    tasks[0].int_mask = 0x300
+    tasks[0].int_clear = 0x1FFFF
+    tasks[0].int_status = 0
+    tasks[0].regcfg_amount = len(resolved_commands)
+    tasks[0].regcfg_offset = 0
+    tasks[0].regcmd_addr = regcmd_bo.dma_addr
+
+    for bo in (regcmd_bo, *input_bos, output_bo):
+        ioctl(fd, DRM_IOCTL_ROCKET_FINI_BO, drm_rocket_fini_bo(handle=bo.handle))
+    submit_ret = rocket_submit(
+        fd,
+        tasks,
+        in_bos=[regcmd_bo, *input_bos],
+        out_bos=[output_bo],
+    )
+    ioctl(
+        fd,
+        DRM_IOCTL_ROCKET_PREP_BO,
+        drm_rocket_prep_bo(
+            handle=output_bo.handle,
+            timeout_ns=time.monotonic_ns() + 6_000_000_000,
+        ),
+    )
+    result = np.frombuffer(output_map, dtype=output_dtype, count=output_count).copy()
+    return submit_ret, result
+
+
+def run_fp16_compare_to_int16(fd):
+    """Prove that the captured FP16 comparison mask can cross into INT16."""
+    values = np.asarray(
+        [-2.0, -0.5, -0.0, 0.0, 0.25, 0.5, 1.0, 2.0],
+        dtype=np.float16,
+    )
+    expected = np.asarray([0, 0, 0, 0, 1, 1, 1, 1], dtype=np.int16)
+
+    def commands(output_bo, input_bos):
+        input_bo = input_bos[0]
+        compare_ew_bypass = (
+            (EW_DATA_MODE_PER_PIXEL << 28)
+            | (ERDMA_SIZE_INT16 << 22)
+            | (1 << 9)
+            | (1 << 7)
+            | (1 << 6)
+            | 1
+        )
+        return [
+            emit(reg.TARGET_DPU, reg.FEATURE_MODE_CFG, dpu_feature_mode()),
+            emit(
+                reg.TARGET_DPU,
+                reg.DATA_FORMAT,
+                (PRECISION_INT16 << 29)
+                | (PRECISION_FP16 << 26)
+                | PRECISION_FP16,
+            ),
+            emit(reg.TARGET_DPU, reg.DATA_CUBE_WIDTH, 0),
+            emit(reg.TARGET_DPU, reg.DATA_CUBE_HEIGHT, 0),
+            emit(reg.TARGET_DPU, reg.DATA_CUBE_NOTCH, 0),
+            emit(reg.TARGET_DPU, reg.DATA_CUBE_CHANNEL, dpu_cube_channel(7)),
+            # Captured positive-difference comparison: positive -> 1, else 0.
+            emit(reg.TARGET_DPU, reg.BS_CFG, (1 << 18) | (1 << 6)),
+            emit(reg.TARGET_DPU, reg.BS_ALU_CFG, 0x33800000),  # FP32 0.25.
+            emit(reg.TARGET_DPU, reg.BS_MUL_CFG, 0x40000000),  # FP32 2.0.
+            emit(reg.TARGET_DPU, reg.BS_OW_CFG, 1 << 1),
+            emit(reg.TARGET_DPU, reg.WDMA_SIZE_0, 7),
+            emit(reg.TARGET_DPU, reg.WDMA_SIZE_1, 0),
+            emit(reg.TARGET_DPU, reg.BN_CFG, (1 << 18) | (2 << 6) | (1 << 1)),
+            emit(reg.TARGET_DPU, reg.BN_MUL_CFG, 0x7C000000),  # FP16 +inf lane.
+            emit(reg.TARGET_DPU, reg.BN_RELUX_CMP_VALUE, 0x3F800000),  # FP32 1.0.
+            emit(reg.TARGET_DPU, reg.EW_CFG, compare_ew_bypass),
+            emit(reg.TARGET_DPU, reg.OUT_CVT_OFFSET, 0),
+            emit(reg.TARGET_DPU, reg.OUT_CVT_SCALE, 1),
+            emit(reg.TARGET_DPU, reg.OUT_CVT_SHIFT, 0),
+            emit(reg.TARGET_DPU, reg.SURFACE_ADD, 4 << 4),
+            emit(reg.TARGET_RDMA, reg.RDMA_DATA_CUBE_WIDTH, 0),
+            emit(reg.TARGET_RDMA, reg.RDMA_DATA_CUBE_HEIGHT, 0),
+            emit(reg.TARGET_RDMA, reg.RDMA_DATA_CUBE_CHANNEL, 7),
+            emit(reg.TARGET_RDMA, reg.RDMA_ERDMA_CFG, rdma_erdma_cfg(ERDMA_SIZE_INT16)),
+            emit(reg.TARGET_DPU, reg.DST_BASE_ADDR, output_bo.dma_addr),
+            emit(reg.TARGET_RDMA, reg.RDMA_SRC_BASE_ADDR, input_bo.dma_addr),
+            emit(reg.TARGET_RDMA, reg.RDMA_EW_BASE_ADDR, input_bo.dma_addr),
+            emit(
+                reg.TARGET_RDMA,
+                reg.RDMA_FEATURE_MODE_CFG,
+                rdma_feature_mode(PRECISION_FP16) | (1 << 3),
+            ),
+            emit(reg.TARGET_PC_REG, reg.PC_BASE_ADDRESS, 0),
+            emit(reg.TARGET_PC_REG, reg.PC_REGISTER_AMOUNTS, 0),
+            emit(reg.TARGET_VERSION, 0, 0),
+            emit(reg.TARGET_PC, reg.OPERATION_ENABLE, 0x18),
+        ]
+
+    submit_ret, result = prepare_and_run(fd, commands, [values], np.int16, 8)
+    passed = submit_ret == 0 and np.array_equal(result, expected)
+    print(f"FP16 CMP -> INT16 NPU={result} expected={expected} {'PASS' if passed else 'FAIL'}")
+    return passed
+
+
+def run_int16_add_to_int32(fd):
+    """Prove INT16 EW arithmetic followed by external INT32 writeback."""
+    a = np.asarray([-30000, -1200, -7, -1, 0, 1, 1200, 30000], dtype=np.int16)
+    b = np.asarray([1000, -30, 2, -1, 1, 2, -30, 1000], dtype=np.int16)
+    expected = a.astype(np.int32) + b.astype(np.int32)
+
+    def commands(output_bo, input_bos):
+        input_bo, ew_bo = input_bos
+        return [
+            emit(reg.TARGET_DPU, reg.FEATURE_MODE_CFG, dpu_feature_mode()),
+            emit(
+                reg.TARGET_DPU,
+                reg.DATA_FORMAT,
+                (PRECISION_INT32 << 29)
+                | (PRECISION_INT16 << 26)
+                | PRECISION_INT16,
+            ),
+            # The captured 16-to-32 layout emits two four-lane surfaces.
+            emit(reg.TARGET_DPU, reg.DST_SURF_STRIDE, 1 << 4),
+            emit(reg.TARGET_DPU, reg.DATA_CUBE_WIDTH, 0),
+            emit(reg.TARGET_DPU, reg.DATA_CUBE_HEIGHT, 0),
+            emit(reg.TARGET_DPU, reg.DATA_CUBE_NOTCH, 0),
+            emit(reg.TARGET_DPU, reg.DATA_CUBE_CHANNEL, dpu_cube_channel(7)),
+            emit(reg.TARGET_DPU, reg.BS_CFG, (1 << 6) | (1 << 4) | (1 << 1) | 1),
+            # SIZE_E_0/1/2=1 is required to regroup all eight INT16 lanes.
+            emit(
+                reg.TARGET_DPU,
+                reg.BS_OW_CFG,
+                (1 << 8) | (1 << 5) | (1 << 2) | (1 << 1),
+            ),
+            emit(reg.TARGET_DPU, reg.WDMA_SIZE_0, 7),
+            emit(reg.TARGET_DPU, reg.WDMA_SIZE_1, 0),
+            emit(reg.TARGET_DPU, reg.BN_CFG, (1 << 6) | (1 << 4) | (1 << 1) | 1),
+            emit(
+                reg.TARGET_DPU,
+                reg.EW_CFG,
+                dpu_ew_cfg(ERDMA_SIZE_INT16, "ADD", converter_bypass=False),
+            ),
+            emit(reg.TARGET_DPU, reg.EW_CVT_OFFSET_VALUE, 0),
+            emit(reg.TARGET_DPU, reg.EW_CVT_SCALE_VALUE, 1),
+            emit(reg.TARGET_DPU, reg.OUT_CVT_OFFSET, 0),
+            emit(reg.TARGET_DPU, reg.OUT_CVT_SCALE, 1),
+            emit(reg.TARGET_DPU, reg.OUT_CVT_SHIFT, 0),
+            emit(reg.TARGET_DPU, reg.SURFACE_ADD, 2 << 4),
+            emit(reg.TARGET_RDMA, reg.RDMA_DATA_CUBE_WIDTH, 0),
+            emit(reg.TARGET_RDMA, reg.RDMA_DATA_CUBE_HEIGHT, 0),
+            emit(reg.TARGET_RDMA, reg.RDMA_DATA_CUBE_CHANNEL, 7),
+            emit(reg.TARGET_RDMA, reg.RDMA_ERDMA_CFG, rdma_erdma_cfg(ERDMA_SIZE_INT16)),
+            emit(reg.TARGET_DPU, reg.DST_BASE_ADDR, output_bo.dma_addr),
+            emit(reg.TARGET_RDMA, reg.RDMA_SRC_BASE_ADDR, input_bo.dma_addr),
+            emit(reg.TARGET_RDMA, reg.RDMA_EW_BASE_ADDR, ew_bo.dma_addr),
+            emit(
+                reg.TARGET_RDMA,
+                reg.RDMA_FEATURE_MODE_CFG,
+                rdma_feature_mode(PRECISION_INT16),
+            ),
+            emit(reg.TARGET_PC_REG, reg.PC_BASE_ADDRESS, 0),
+            emit(reg.TARGET_PC_REG, reg.PC_REGISTER_AMOUNTS, 0),
+            emit(reg.TARGET_VERSION, 0, 0),
+            emit(reg.TARGET_PC, reg.OPERATION_ENABLE, 0x18),
+        ]
+
+    submit_ret, result = prepare_and_run(fd, commands, [a, b], np.int32, 8)
+    passed = submit_ret == 0 and np.array_equal(result, expected)
+    print(f"INT16 ADD -> INT32 NPU={result} expected={expected} {'PASS' if passed else 'FAIL'}")
+    return passed
+
+
 def saturate(values, dtype):
     limits = np.iinfo(dtype)
     return np.clip(values, limits.min, limits.max).astype(dtype)
@@ -519,6 +736,13 @@ if __name__ == "__main__":
             for dtype_name, dtype_config in selected_dtypes
             for operation in selected_operations
         ]
+        if dtype_mode == "ALL" and operation_mode == "ALL":
+            passed.extend(
+                [
+                    run_fp16_compare_to_int16(device_fd),
+                    run_int16_add_to_int32(device_fd),
+                ]
+            )
     finally:
         os.close(device_fd)
     sys.exit(0 if all(passed) else 1)
