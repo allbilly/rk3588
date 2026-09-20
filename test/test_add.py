@@ -6,16 +6,16 @@ import elementwise
 
 np.random.seed(0)
 submit_count = 0
-_real_submit = elementwise.submit
+_real_submit = elementwise.npu_submit
 
 
-def tracked_submit(task_obj_addr):
+def tracked_submit(task_obj_addr, *args, **kwargs):
     global submit_count
     submit_count += 1
-    return _real_submit(task_obj_addr)
+    return _real_submit(task_obj_addr, *args, **kwargs)
 
 
-elementwise.submit = tracked_submit
+elementwise.npu_submit = tracked_submit
 
 # Shapes copied only from TestOps.test_add in test/test_ops.py:
 #   helper_test_op([(45,68), (45,68)], lambda x,y: x+y, Tensor.add)
@@ -46,7 +46,7 @@ for ashape, bshape, desc in test_cases:
         # Pre-fill the mapped NPU output buffer. If run_op does not submit and
         # read back hardware-written output, this sentinel survives and fails.
         (np.frombuffer(elementwise.output_map, dtype=np.float16, count=n))[:] = np.nan
-        result = np.array(elementwise.run_op(elementwise.EW_CFG_ADD, a_flat, b_flat), dtype=np.float16).reshape(ashape)
+        result = np.array(elementwise.run_op("ADD", a_flat, b_flat), dtype=np.float16).reshape(ashape)
         if submit_count != before_submits + 1:
             print(f"FAIL (submit_count {before_submits}->{submit_count})")
             all_pass = False

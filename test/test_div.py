@@ -6,17 +6,16 @@ import elementwise
 
 np.random.seed(0)
 submit_count = 0
-_real_submit = elementwise.submit
-EW_CFG_FDIV = elementwise._EW_BASE | (3 << 16) | (1 << 8)
+_real_submit = elementwise.npu_submit
 
 
-def tracked_submit(task_obj_addr):
+def tracked_submit(task_obj_addr, *args, **kwargs):
     global submit_count
     submit_count += 1
-    return _real_submit(task_obj_addr)
+    return _real_submit(task_obj_addr, *args, **kwargs)
 
 
-elementwise.submit = tracked_submit
+elementwise.npu_submit = tracked_submit
 
 # Shapes copied from TestOps.test_div in test/test_ops.py:
 #   helper_test_op([(45,65), (45,65)], lambda x,y: x/y, Tensor.div)
@@ -46,7 +45,7 @@ for ashape, bshape, desc in test_cases:
         n = len(a_flat)
         before_submits = submit_count
         (np.frombuffer(elementwise.output_map, dtype=np.float16, count=n))[:] = np.nan
-        result = np.array(elementwise.run_op(EW_CFG_FDIV, a_flat, b_flat, fdiv_op=True), dtype=np.float16).reshape(ashape)
+        result = np.array(elementwise.run_op("FDIV", a_flat, b_flat), dtype=np.float16).reshape(ashape)
         if submit_count != before_submits + 1:
             print(f"FAIL (submit_count {before_submits}->{submit_count})")
             all_pass = False

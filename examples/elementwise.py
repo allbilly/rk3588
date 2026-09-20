@@ -198,15 +198,6 @@ def _align_up(x, align):
 def E(target, reg_addr, value):
     return (target << 48) | ((value & 0xFFFFFFFF) << 16) | reg_addr
 
-# EW_CFG values for each op
-# Base config: data_mode=1, data_size=2, relu_bypass=1, lut_bypass=1, op_src=1
-_EW_BASE = 0x108002c0
-EW_CFG_ADD  = _EW_BASE | (2 << 16)
-EW_CFG_MUL  = _EW_BASE | (1 << 2) | (1 << 8)
-EW_CFG_SUB  = _EW_BASE | (4 << 16)
-EW_CFG_MAX  = _EW_BASE
-EW_CFG_NEG  = EW_CFG_MUL
-
 def write_regs_to_npu_task(task_regs):
     ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(task_map)), 0, task_map.size())
     ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(regcmd_map)), 0, regcmd_map.size())
@@ -253,7 +244,8 @@ def write_regs_to_npu_task(task_regs):
 
 _MAX_ELEMENTS_PER_TASK = 8000 * 8  # 64000, safe below width limit 8175 and keeps tile DMA addresses 64-byte aligned
 
-def run_op(ew_cfg_val, a_vals, b_vals, neg_op=False, fdiv_op=False, out_fp16=True):
+def run_op(op, a_vals, b_vals, out_fp16=True):
+    neg_op, fdiv_op = op == "NEG", op == "FDIV"
     n = len(a_vals)
     hw_out_fp16 = out_fp16 or fdiv_op
     out_precision = 2 if hw_out_fp16 else 5
@@ -312,7 +304,19 @@ def run_op(ew_cfg_val, a_vals, b_vals, neg_op=False, fdiv_op=False, out_fp16=Tru
                 ((7 << 16) |                          # DPU_DATA_CUBE_CHANNEL_CUBE
                  7)                                    # DPU_DATA_CUBE_CHANNEL_ATOMICS
             ),
-            E(reg.DPU,  reg.EW_CFG, ew_cfg_val),
+            E(reg.DPU,  reg.EW_CFG,
+                # selects MAX=0, ADD=2, FDIV=3, SUB=4 when EW_OP_TYPE[2]=0.
+                # MUL/NEG use EW_OP_TYPE[2]=1 instead of an ALU selector.
+                # Base config: data_mode=1, data_size=2, relu_bypass=1, lut_bypass=1, op_src=1
+                ((1 << 28) |                         # DPU_EW_CFG_EW_DATA_MODE
+                 (2 << 22) |                         # DPU_EW_CFG_EDATA_SIZE
+                 ({"MAX": 0, "ADD": 2, "FDIV": 3, "SUB": 4}.get(op, 0) << 16) |  # DPU_EW_CFG_EW_ALU_ALGO
+                 (1 << 9)  |                         # DPU_EW_CFG_EW_RELU_BYPASS
+                 ((op in ("MUL", "NEG", "FDIV")) << 8) |  # DPU_EW_CFG_EW_OP_CVT_BYPASS
+                 (1 << 7)  |                         # DPU_EW_CFG_EW_LUT_BYPASS
+                 (1 << 6)  |                         # DPU_EW_CFG_EW_OP_SRC
+                 ((op in ("MUL", "NEG")) << 2))      # DPU_EW_CFG_EW_OP_TYPE: MUL (0 selects ALU)
+            ),
             E(reg.DPU,  reg.OUT_CVT_SCALE, out_cvt_scale),
             E(reg.RDMA, reg.RDMA_S_POINTER, 0x0000000E),
             E(reg.RDMA, reg.RDMA_DATA_CUBE_WIDTH, dataout_width),
@@ -361,12 +365,12 @@ def run_op(ew_cfg_val, a_vals, b_vals, neg_op=False, fdiv_op=False, out_fp16=Tru
 
 
 OPS = {
-    "ADD":  (EW_CFG_ADD, lambda a, b: a + b,       {}),
-    "MUL":  (EW_CFG_MUL, lambda a, b: a * b,       {}),
-    "SUB":  (EW_CFG_SUB, lambda a, b: a - b,       {}),
-    "MAX":  (EW_CFG_MAX, lambda a, b: np.maximum(a, b), {}),
-    "NEG":  (EW_CFG_NEG, lambda a, _: -a,          {"neg_op": True}),
-    "FDIV": (_EW_BASE | (3 << 16) | (1 << 8), lambda a, b: a / b, {"fdiv_op": True}),
+    "ADD":  lambda a, b: a + b,
+    "MUL":  lambda a, b: a * b,
+    "SUB":  lambda a, b: a - b,
+    "MAX":  lambda a, b: np.maximum(a, b),
+    "NEG":  lambda a, _: -a,
+    "FDIV": lambda a, b: a / b,
 }
 
 TEST_NS = [1, 2, 3, 4, 5, 8, 16, 32, 4096, 131072]
@@ -422,7 +426,7 @@ if __name__ == "__main__":
         print("fp32 mode uses the real fp32 output path.")
 
     np.random.seed(42)
-    for op_name, (ew_cfg_val, expected_fn, kw) in run_list:
+    for op_name, expected_fn in run_list:
         if out_fp16:
             test_ns = TEST_NS
         elif mode == "ALL":
@@ -438,7 +442,7 @@ if __name__ == "__main__":
             else:
                 b_vals = np.random.uniform(-5, 5, n).astype(np.float16)
 
-            r = run_op(ew_cfg_val=ew_cfg_val, a_vals=a_vals, b_vals=b_vals, out_fp16=out_fp16, **kw)
+            r = run_op(op_name, a_vals=a_vals, b_vals=b_vals, out_fp16=out_fp16)
             r_arr = np.array(r, dtype=out_dtype)
             expected = expected_fn(a_vals.astype(np.float32), b_vals.astype(np.float32)).astype(out_dtype)
             match = np.allclose(r_arr, expected, atol=0.1)

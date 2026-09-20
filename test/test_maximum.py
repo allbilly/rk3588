@@ -6,16 +6,16 @@ import elementwise
 
 np.random.seed(0)
 submit_count = 0
-_real_submit = elementwise.submit
+_real_submit = elementwise.npu_submit
 
 
-def tracked_submit(task_obj_addr):
+def tracked_submit(task_obj_addr, *args, **kwargs):
     global submit_count
     submit_count += 1
-    return _real_submit(task_obj_addr)
+    return _real_submit(task_obj_addr, *args, **kwargs)
 
 
-elementwise.submit = tracked_submit
+elementwise.npu_submit = tracked_submit
 
 # Shapes copied from TestOps.test_maximum in test/test_ops.py that fit the
 # existing fp16 elementwise NPU path.
@@ -45,7 +45,7 @@ for ashape, bshape, desc, npu_inputs_fn in test_cases:
         n = len(a_flat)
         before_submits = submit_count
         (np.frombuffer(elementwise.output_map, dtype=np.float16, count=n))[:] = np.nan
-        result = np.array(elementwise.run_op(elementwise.EW_CFG_MAX, a_flat, b_flat), dtype=np.float16).reshape(expected.shape)
+        result = np.array(elementwise.run_op("MAX", a_flat, b_flat), dtype=np.float16).reshape(expected.shape)
         if submit_count != before_submits + 1:
             print(f"FAIL (submit_count {before_submits}->{submit_count})")
             all_pass = False
