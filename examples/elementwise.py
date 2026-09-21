@@ -44,6 +44,7 @@ class reg:
     WDMA_SIZE_1         = 0x405c   # DPU write DMA size 1
     BN_CFG              = 0x4060   # DPU batch norm config
     EW_CFG              = 0x4070   # DPU elementwise config
+    EW_CVT_SCALE_VALUE  = 0x4078   # DPU EW input conversion scale
     OUT_CVT_SCALE       = 0x4084   # DPU output conversion scale
     SURFACE_ADD         = 0x40c0   # DPU surface add
 
@@ -246,19 +247,31 @@ _MAX_ELEMENTS_PER_TASK = 8000 * 8  # 64000, safe below width limit 8175 and keep
 
 def run_op(op, a_vals, b_vals, out_fp16=True):
     neg_op, fdiv_op = op == "NEG", op == "FDIV"
+    int16_mode = op == "CAST_BOOL_HALF"
+    if int16_mode and not out_fp16:
+        raise ValueError("CAST_BOOL_HALF requires fp16 output")
     n = len(a_vals)
     hw_out_fp16 = out_fp16 or fdiv_op
-    out_precision = 2 if hw_out_fp16 else 5
+    out_precision = 1 if int16_mode else (2 if hw_out_fp16 else 5)
+    precision = 1 if int16_mode else 2
     out_bytes = FP16_BYTES if hw_out_fp16 else FP32_BYTES
     out_dtype = np.float16 if hw_out_fp16 else np.float32
-    out_cvt_scale = (1 if fdiv_op else ((1 << 16) | 1)) if hw_out_fp16 else 0
+    out_cvt_scale = (1 if fdiv_op or int16_mode else ((1 << 16) | 1)) if hw_out_fp16 else 0
+    scale_reg = reg.EW_CVT_SCALE_VALUE if int16_mode else reg.OUT_CVT_SCALE
     tile_elems = _MAX_ELEMENTS_PER_TASK if hw_out_fp16 else 4
     tile_bytes = tile_elems * FP16_BYTES if hw_out_fp16 else 64
     tile_count = _ceil_div(n, tile_elems)
 
-    a_packed = np.array(a_vals, dtype=np.float16).view(np.uint16)
-    w_vals = np.full(n, -1.0, dtype=np.float16) if neg_op else np.array(b_vals, dtype=np.float16)
-    w_packed = w_vals.view(np.uint16)
+    if int16_mode:
+        # Put each bool in the low byte of an INT16 lane; MUL by FP16 1.0's bits.
+        input_bytes = np.zeros(n * FP16_BYTES, dtype=np.uint8)
+        input_bytes[::FP16_BYTES] = np.asarray(a_vals, dtype=np.bool_).astype(np.uint8)
+        a_packed = input_bytes.view(np.uint16)
+        w_packed = np.full(n, np.float16(1.0).view(np.uint16), dtype=np.uint16)
+    else:
+        a_packed = np.array(a_vals, dtype=np.float16).view(np.uint16)
+        w_vals = np.full(n, -1.0, dtype=np.float16) if neg_op else np.array(b_vals, dtype=np.float16)
+        w_packed = w_vals.view(np.uint16)
 
     if hw_out_fp16:
         ct_inputs = (ctypes.c_uint16 * n).from_buffer(input_map)
@@ -294,8 +307,8 @@ def run_op(op, a_vals, b_vals, out_fp16=True):
             ),
             E(reg.DPU,  reg.DATA_FORMAT,
                 ((out_precision << 29) |              # DPU_DATA_FORMAT_OUT_PRECISION
-                 (2 << 26) |                          # DPU_DATA_FORMAT_IN_PRECISION
-                 2)                                    # DPU_DATA_FORMAT_PROC_PRECISION
+                 (precision << 26) |                  # DPU_DATA_FORMAT_IN_PRECISION
+                 precision)                            # DPU_DATA_FORMAT_PROC_PRECISION
             ),
             E(reg.DPU,  reg.DATA_CUBE_WIDTH, dataout_width),
             E(reg.DPU,  reg.DATA_CUBE_HEIGHT, 0),
@@ -306,18 +319,18 @@ def run_op(op, a_vals, b_vals, out_fp16=True):
             ),
             E(reg.DPU,  reg.EW_CFG,
                 # selects MAX=0, ADD=2, FDIV=3, SUB=4 when EW_OP_TYPE[2]=0.
-                # MUL/NEG use EW_OP_TYPE[2]=1 instead of an ALU selector.
+                # MUL/NEG/CAST_BOOL_HALF use EW_OP_TYPE[2]=1 instead of an ALU selector.
                 # Base config: data_mode=1, data_size=2, relu_bypass=1, lut_bypass=1, op_src=1
                 ((1 << 28) |                         # DPU_EW_CFG_EW_DATA_MODE
                  (2 << 22) |                         # DPU_EW_CFG_EDATA_SIZE
                  ({"MAX": 0, "ADD": 2, "FDIV": 3, "SUB": 4}.get(op, 0) << 16) |  # DPU_EW_CFG_EW_ALU_ALGO
                  (1 << 9)  |                         # DPU_EW_CFG_EW_RELU_BYPASS
-                 ((op in ("MUL", "NEG", "FDIV")) << 8) |  # DPU_EW_CFG_EW_OP_CVT_BYPASS
+                 ((op in ("MUL", "NEG", "FDIV") and not int16_mode) << 8) |  # DPU_EW_CFG_EW_OP_CVT_BYPASS
                  (1 << 7)  |                         # DPU_EW_CFG_EW_LUT_BYPASS
                  (1 << 6)  |                         # DPU_EW_CFG_EW_OP_SRC
-                 ((op in ("MUL", "NEG")) << 2))      # DPU_EW_CFG_EW_OP_TYPE: MUL (0 selects ALU)
+                 ((op in ("MUL", "NEG", "CAST_BOOL_HALF")) << 2))  # DPU_EW_CFG_EW_OP_TYPE: MUL (0 selects ALU)
             ),
-            E(reg.DPU,  reg.OUT_CVT_SCALE, out_cvt_scale),
+            E(reg.DPU,  scale_reg, out_cvt_scale),
             E(reg.RDMA, reg.RDMA_S_POINTER, 0x0000000E),
             E(reg.RDMA, reg.RDMA_DATA_CUBE_WIDTH, dataout_width),
             E(reg.RDMA, reg.RDMA_DATA_CUBE_HEIGHT, 0),
@@ -330,10 +343,10 @@ def run_op(op, a_vals, b_vals, out_fp16=True):
             E(reg.RDMA, reg.RDMA_SRC_BASE_ADDR, input_addr),
             E(reg.RDMA, reg.RDMA_EW_BASE_ADDR, weight_addr),
             E(reg.RDMA, reg.RDMA_FEATURE_MODE_CFG,
-                ((2 << 15) |                          # DPU_RDMA_RDMA_FEATURE_MODE_CFG_IN_PRECISION
+                ((precision << 15) |                  # DPU_RDMA_RDMA_FEATURE_MODE_CFG_IN_PRECISION
                  (15 << 11) |                         # DPU_RDMA_RDMA_FEATURE_MODE_CFG_BURST_LEN
-                 (2 << 5) |                           # DPU_RDMA_RDMA_FEATURE_MODE_CFG_PROC_PRECISION
-                 ((not fdiv_op) << 3) |               # DPU_RDMA_RDMA_FEATURE_MODE_CFG_MRDMA_FP16TOFP32_EN
+                 (precision << 5) |                   # DPU_RDMA_RDMA_FEATURE_MODE_CFG_PROC_PRECISION
+                 ((not fdiv_op and not int16_mode) << 3) |  # DPU_RDMA_RDMA_FEATURE_MODE_CFG_MRDMA_FP16TOFP32_EN
                  1)                                    # DPU_RDMA_RDMA_FEATURE_MODE_CFG_FLYING_MODE
             ),
         ])
@@ -362,6 +375,11 @@ def run_op(op, a_vals, b_vals, out_fp16=True):
         result[start:start + tile_n] = out_tile[:tile_n]
     npu_reset(fd)
     return result.tolist()
+
+
+def cast_bool_half(values):
+    """Convert bools to FP16 with the DPU INT16 MUL datapath."""
+    return run_op("CAST_BOOL_HALF", np.asarray(values, dtype=np.bool_), None)
 
 
 OPS = {
@@ -407,11 +425,23 @@ if __name__ == "__main__":
     mode = args[0].upper() if args else "ALL"
     out_dtype = np.float16 if out_fp16 else np.float32
 
+    if mode == "CAST_BOOL_HALF":
+        if not out_fp16:
+            print("CAST_BOOL_HALF only has an fp16 output path")
+            sys.exit(1)
+        values = [True, False, False, True]
+        result = cast_bool_half(values)
+        expected = np.asarray(values, dtype=np.float16)
+        match = np.array_equal(np.asarray(result, dtype=np.float16), expected)
+        print(f"CAST_BOOL_HALF NPU={result} expected={expected.tolist()} {'PASS' if match else 'FAIL'}")
+        os.close(fd)
+        sys.exit(0 if match else 1)
+
     if mode == "ALL":
         run_list = list(OPS.items()) if out_fp16 else [(name, OPS[name]) for name in FP32_ALL_TEST_NS]
     else:
         if mode not in OPS:
-            print(f"Unknown mode '{mode}'. Options: ALL, {', '.join(OPS.keys())}")
+            print(f"Unknown mode '{mode}'. Options: ALL, CAST_BOOL_HALF, {', '.join(OPS.keys())}")
             sys.exit(1)
         if not out_fp16 and mode not in FP32_TEST_NS:
             print(f"{mode} does not have a stable fp32 output path")
@@ -450,5 +480,13 @@ if __name__ == "__main__":
             ok = "PASS" if match else "FAIL"
             print(f"{op_name:4s} n={n:6d} out={'fp16' if out_fp16 else 'fp32'}: {ok}  max_diff={md:.6f}")
             assert match, f"{op_name} n={n} failed"
+
+    if mode == "ALL" and out_fp16:
+        values = [True, False, False, True]
+        result = cast_bool_half(values)
+        expected = np.asarray(values, dtype=np.float16)
+        match = np.array_equal(np.asarray(result, dtype=np.float16), expected)
+        print(f"CAST_BOOL_HALF NPU={result} expected={expected.tolist()} {'PASS' if match else 'FAIL'}")
+        assert match, "CAST_BOOL_HALF failed"
 
     os.close(fd)
