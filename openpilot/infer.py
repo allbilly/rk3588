@@ -39,6 +39,7 @@ class Model:
             location = task["regcmd"]
             commands = self.buffers[location["buffer"]]
             encoded = b"".join(struct.pack("<Q", self.encode(command)) for command in task["commands"])
+            encoded = device.prepare_commands(encoded, task)
             commands.write(encoded, location["offset"])
             if task["regcfg_offset"]:
                 raise ValueError("Only absolute register descriptor addressing is verified")
@@ -106,7 +107,7 @@ class Model:
             for operation in self.program.get("layout_operations", []):
                 if operation["before_submit"] == sequence:
                     apply_layout(operation, self.buffers)
-            self.device.submit(self.task_buffer, settings)
+            self.device.submit(self.task_buffer, settings, buffers=self.buffers.values())
         results = {}
         for item in io:
             if item["kind"] != "output":
@@ -135,6 +136,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model", choices=["navigation", "dmonitoring", "supercombo"])
     parser.add_argument("--cache", type=Path)
+    parser.add_argument("--driver", choices=["auto", "rknpu", "rocket"], default="auto")
+    parser.add_argument("--device", help="NPU device node; checked against its sysfs driver")
     parser.add_argument("--input", action="append", default=[], help="NAME=FILE with little-endian FP16 bytes; repeat for each input")
     parser.add_argument("--canonical", action="store_true", help="Input files use canonical tensor order")
     parser.add_argument("--case", choices=["fixture", "map", "zeros", "ramp"], default="fixture")
@@ -178,7 +181,7 @@ def main():
     if args.verify and (args.input or args.case not in ("fixture", "map")):
         raise ValueError("Packaged RKNN verification applies to the supplied fixture only")
     start = time.monotonic()
-    with Device() as device:
+    with Device(args.device, driver=args.driver) as device:
         model = Model(directory, device)
         results = model.run(inputs, canonical=args.canonical)
         if len(results) != 1:
@@ -186,7 +189,7 @@ def main():
         output = next(iter(results.values()))
     if args.output:
         args.output.write_bytes(struct.pack(f"<{len(output)}f", *output))
-    result = {"model": args.model, "backend": "registers", "elements": len(output),
+    result = {"model": args.model, "backend": "registers", "driver": device.driver, "elements": len(output),
               "finite": True, "min": min(output), "max": max(output),
               "elapsed_seconds": time.monotonic() - start,
               "relocated_pointers": model.relocations}

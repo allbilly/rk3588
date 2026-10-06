@@ -29,9 +29,29 @@ continuation must fit the 1024-token context. `--logits FILE` saves the prompt's
 next-token logits as little-endian FP32 values. `--cache DIRECTORY` selects a
 prepared model cache.
 
-The vendor RKNPU DRM driver is required. The current board uses kernel 6.1.99,
-RKNPU 0.9.8, and core 0. The Python driver and decoded-program runner are shared
-with `../openpilot`. The mainline rocket driver uses a different ABI.
+The Python driver and decoded-program runner are shared with `../openpilot`.
+They select vendor RKNPU or mainline Linux 6.18 Rocket from the device's sysfs
+driver. `--driver rknpu` or `--driver rocket` requires that driver, and
+`--device PATH` selects a specific NPU node. The same prepared cache is used.
+
+On a mainline 6.18 board with Rocket enabled:
+
+```sh
+python3 -S gpt2/generate.py --driver rocket --prompt 'Hello' --tokens 5 --json
+# Optional explicit device selection:
+python3 -S gpt2/generate.py --driver rocket --device /dev/accel/accel0 --prompt 'Hello' --tokens 5
+```
+
+Rocket BO ownership, sequential task scheduling and PC trailer adaptation are
+described in `../openpilot/README.md`. All transformer arithmetic stays on the
+NPU. The results in `validation.json` were measured on vendor kernel 6.1.99,
+RKNPU 0.9.8, core 0. The Rocket ABI and all four base-kernel schedules have
+software regression coverage, but numerical verification on mainline hardware
+is pending; see `../openpilot/MAINLINE.md`.
+
+After preparing both model caches, `python3 -S openpilot/verify_models.py
+--driver rocket --report /tmp/models-rocket.json` checks the three recorded
+GPT-2 prompts and all three openpilot fixtures on the selected NPU driver.
 
 ## Preparation
 

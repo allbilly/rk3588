@@ -75,6 +75,8 @@ def main():
     parser.add_argument("--prompt", default="The capital of France is")
     parser.add_argument("--tokens", type=int, default=10, help="Number of greedy continuation tokens")
     parser.add_argument("--cache", type=Path, default=Path.home() / ".cache/rk3588-models/gpt2")
+    parser.add_argument("--driver", choices=["auto", "rknpu", "rocket"], default="auto")
+    parser.add_argument("--device", help="NPU device node; checked against its sysfs driver")
     parser.add_argument("--logits", type=Path, help="Save the prompt's next-token logits as little-endian FP32")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
@@ -84,7 +86,7 @@ def main():
         raise ValueError("Prompt plus continuation must fit 1024 tokens")
     start = time.monotonic()
     generated = []
-    with Device() as device:
+    with Device(args.device, driver=args.driver) as device:
         decoder = Decoder(args.cache, device)
         try:
             for index, token in enumerate(prompt):
@@ -99,7 +101,7 @@ def main():
                 scores = decoder.step(token)
         finally:
             decoder.close()
-    result = {"model": "gpt2-124m", "backend": "registers", "prompt_tokens": prompt,
+    result = {"model": "gpt2-124m", "backend": "registers", "driver": device.driver, "prompt_tokens": prompt,
               "generated_tokens": generated, "text": tokenizer.decode(prompt + generated),
               "elapsed_seconds": time.monotonic() - start}
     print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else result["text"])

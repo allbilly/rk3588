@@ -1,7 +1,8 @@
-"""Small vendor RKNPU allocation/submission API using only Python's stdlib.
+"""RKNPU and mainline Rocket allocation/submission API using Python's stdlib.
 
-The layouts come from rknpu-ioctl.h for the running 0.9.8 driver. All submissions
-are blocking. Closing a device frees its own buffers after the job completes.
+The vendor layouts come from rknpu-ioctl.h for the running 0.9.8 driver.
+Rocket uses Linux 6.18's rocket_accel.h. All model submissions are blocking.
+Closing a device frees its own buffers after the job completes.
 """
 import ctypes as C
 from fcntl import flock, ioctl, LOCK_EX, LOCK_UN
@@ -58,6 +59,34 @@ def align(value, multiple=4096):
     return (value + multiple - 1) // multiple * multiple
 
 
+def driver_name(path):
+    name = Path(path).name
+    category = "accel" if name.startswith("accel") else "drm"
+    driver = Path("/sys/class") / category / name / "device/driver"
+    return driver.resolve().name.lower() if driver.exists() else None
+
+
+def discover(path=None, driver="auto"):
+    if driver not in ("auto", "rknpu", "rocket"):
+        raise ValueError("Driver must be auto, rknpu, or rocket")
+    if path is None and os.environ.get("ROCKET_DEVICE") and driver != "rknpu":
+        path, driver = os.environ["ROCKET_DEVICE"], "rocket"
+    if path is not None:
+        actual = driver_name(path)
+        if actual not in ("rknpu", "rocket") or driver not in ("auto", actual):
+            raise RuntimeError(f"Device {path} is bound to {actual}, requested {driver}")
+        return str(path), actual
+    candidates = (sorted(glob.glob("/dev/accel/accel[0-9]*")) +
+                  sorted(glob.glob("/dev/dri/card[0-9]*")) +
+                  sorted(glob.glob("/dev/dri/renderD[0-9]*")))
+    matches = [(path, driver_name(path)) for path in candidates]
+    matches = [(path, name) for path, name in matches
+               if name in ("rknpu", "rocket") and driver in ("auto", name)]
+    if not matches:
+        raise RuntimeError(f"No {driver} NPU device found in /dev/accel or /dev/dri")
+    return matches[0]
+
+
 class Buffer:
     def __init__(self, device, size, flags):
         self.device = device
@@ -90,38 +119,44 @@ class Buffer:
 
 
 class Device:
-    def __init__(self, path=None):
+    def __init__(self, path=None, driver="auto"):
         if C.sizeof(Task) != 40 or C.sizeof(Submit) != 104:
             raise RuntimeError("Unexpected vendor ioctl ABI; requires 64-bit Linux")
-        if path is None:
-            cards = [p for p in sorted(glob.glob("/dev/dri/card[0-9]*"))
-                     if (Path("/sys/class/drm") / Path(p).name / "device/driver").resolve().name.lower() == "rknpu"]
-            if len(cards) != 1:
-                raise RuntimeError(f"Expected one RKNPU DRM card, found {cards}")
-            path = cards[0]
+        self.path, self.driver = discover(path, driver)
+        self.rocket = None
+        if self.driver == "rocket":
+            import rocket
+            self.rocket = rocket
         self.lock = open("/tmp/rk3588_npu_submit.lock", "a+b")
         flock(self.lock, LOCK_EX)
-        self.fd = os.open(path, os.O_RDWR | os.O_CLOEXEC)
+        try:
+            self.fd = os.open(self.path, os.O_RDWR | os.O_CLOEXEC)
+        except BaseException:
+            self.lock.close()
+            raise
         self.buffers = []
         self.busy = False
 
     def allocate(self, size, flags=0):
         if size <= 0:
             raise ValueError("NPU buffers must have positive sizes")
-        buffer = Buffer(self, size, flags)
+        buffer = (self.rocket.Buffer if self.rocket else Buffer)(self, size, flags)
         self.buffers.append(buffer)
         return buffer
 
-    def submit(self, task_buffer, settings):
+    def prepare_commands(self, encoded, task):
+        return self.rocket.prepare_commands(encoded, task) if self.rocket else encoded
+
+    def submit(self, task_buffer, settings, buffers=None):
         first, count = settings["task_start"], settings["task_number"]
-        if not count:
+        if first < 0 or count <= 0:
             raise ValueError("Empty task submission")
-        if not task_buffer.info.flags & 8:
+        if not self.rocket and not task_buffer.info.flags & 8:
             raise ValueError("Task descriptor buffer must have kernel mapping")
         if settings["flags"] not in (1, 5) or settings["core_mask"] != 1:
             raise ValueError("Only verified blocking, single-core PC submissions are supported")
         ranges = settings["subcores"]
-        if len(ranges) != 5 or not ranges[0][1]:
+        if len(ranges) != 5 or not ranges[0][1] or ranges[0][0] != first:
             raise ValueError("Invalid subcore task layout")
         for start, number in ranges:
             if start < 0 or number < 0 or start + number > first + count:
@@ -131,6 +166,10 @@ class Device:
         # RK3588 uses subcore_task[0] for core 0. RKNN's declared count may
         # include three identical core ranges; those unused descriptors do not
         # exist in its task BO (rknpu_job.c:rknpu_get_task_number).
+        if self.rocket:
+            if buffers is None:
+                raise ValueError("Rocket submission requires explicit model BOs")
+            return self.rocket.submit(self, task_buffer, *ranges[0], settings, list(buffers))
         submit = Submit(flags=settings["flags"], timeout=settings["timeout"], task_start=first,
                         task_number=count, task_obj_addr=task_buffer.obj,
                         core_mask=1, fence_fd=-1)

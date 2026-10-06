@@ -20,14 +20,53 @@ to select a different cache root. Preparation checks source and payload hashes,
 and writes each complete model atomically. Subsequent runs verify existing
 buffers. Internet access is needed for the initial download; inference is offline.
 
-The vendor RKNPU DRM driver is required (this board uses kernel 6.1.99 and
-RKNPU 0.9.8). The mainline rocket driver has a different ABI.
+The runtime selects the NPU driver from sysfs: vendor RKNPU on downstream
+kernels, or Rocket on mainline Linux 6.18. `--driver rknpu` or `--driver rocket`
+requires that driver; `--device PATH` selects a specific NPU node. GPU/display
+nodes are excluded. Existing prepared caches work with both paths.
 
 ```sh
 cd ~/rk3588
 python3 -S openpilot/infer.py navigation --verify
 python3 -S openpilot/infer.py dmonitoring --verify
 python3 -S openpilot/infer.py supercombo --verify
+```
+
+On a mainline 6.18 board with Rocket enabled:
+
+```sh
+python3 -S openpilot/infer.py navigation --driver rocket --verify
+python3 -S openpilot/infer.py dmonitoring --driver rocket --verify
+python3 -S openpilot/infer.py supercombo --driver rocket --verify
+# Optional explicit device selection:
+python3 -S openpilot/infer.py navigation --driver rocket --device /dev/accel/accel0 --verify
+```
+
+Rocket uses its own BO creation and GEM close ioctls, CPU ownership transitions
+with `PREP_BO`/`FINI_BO`, and an absolute monotonic fence deadline. It submits
+the active captured core range as sequential tasks in one job, includes all
+four trailer words in each command count, and clears inline PC chain pointers
+because the kernel advances tasks itself. The unit-enable words, coefficient
+bytes and tensor equations are preserved. Each model's BOs are fenced together
+and inference waits for completion before readback, graph-boundary copies or
+another job. Rocket chooses the job's core; the vendor path retains core 0.
+The shipped active schedules use DPU completion. Stock 6.18 does not handle
+standalone PPU completion, so the adapter rejects standalone or mixed PPU
+tasks before submission. Navigation's PPU-only descriptor copies are in unused
+core ranges and are excluded from Rocket jobs.
+
+The numerical results in `validation.json` were measured with vendor RKNPU.
+The Rocket ABI, all shipped task schedules and command adaptation are tested
+with `python3 -S openpilot/test_rocket.py`; those tests do not execute neural
+arithmetic. Numerical verification on mainline hardware is pending. See
+`MAINLINE.md` for the current verification status.
+
+To run every fixture twice and GPT-2's three five-token reference comparisons,
+prepare both model caches and use the combined hardware check. It records the
+actual kernel, device and driver; `--report FILE` saves its successful results:
+
+```sh
+python3 -S openpilot/verify_models.py --driver rocket --report /tmp/models-rocket.json
 ```
 
 `--verify` checks the supplied fixture against saved RKNN output, including
@@ -104,8 +143,10 @@ python3 -S openpilot/prepare_capture.py CAPTURE CACHE --layout LAYOUT.json
 
 The capture observer records the complete allocations and the four PC trailer
 words per task. Cache synchronization is necessary when reading mapped NPU
-outputs. The driver preserves the captured task ranges, core mask and ping-pong
-mode; it supports verified blocking core-0 submissions.
+outputs. The vendor driver preserves the captured task ranges, core mask and
+ping-pong mode; it supports verified blocking core-0 submissions. The Rocket
+adapter translates those schedules to its upstream job/task ABI as described
+above.
 
 NHWC canonical inputs support padding on every row, including multiple batches
 and channels. Run the CPU byte-layout regression checks with
