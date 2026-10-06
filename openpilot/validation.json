@@ -1,0 +1,210 @@
+{
+  "hardware": {
+    "board": "Orange Pi RK3588",
+    "kernel": "6.1.99-rockchip-rk3588",
+    "driver": "RKNPU 0.9.8",
+    "core_mask": 1
+  },
+  "runtime": "Python standard library only; decoded register submissions",
+  "reference": "RKNN 2.3.0 runtime; 2.3.2 toolkit for driver monitoring and supercombo",
+  "cases": [
+    {
+      "model": "navigation",
+      "case": "map",
+      "output_elements": 420,
+      "registers_vs_rknn_max_abs": 0.0,
+      "onnx": {
+        "max_abs": 0.0029478371143341064,
+        "normalized_rms": 0.002174254365391215,
+        "cosine": 0.9999976611589019
+      },
+      "evidence": "/home/orangepi/pilot/evaluation/captures/nav-native-map"
+    },
+    {
+      "model": "navigation",
+      "case": "zeros",
+      "output_elements": 420,
+      "registers_vs_rknn_max_abs": 0.0,
+      "onnx": {
+        "max_abs": 0.0010640919208526611,
+        "normalized_rms": 0.0009316937038028337,
+        "cosine": 0.9999995756725456
+      },
+      "evidence": "/home/orangepi/pilot/evaluation/captures/nav-native-zeros"
+    },
+    {
+      "model": "navigation",
+      "case": "ramp",
+      "output_elements": 420,
+      "registers_vs_rknn_max_abs": 0.0,
+      "onnx": {
+        "max_abs": 0.007695376873016357,
+        "normalized_rms": 0.0038253989221164594,
+        "cosine": 0.9999929846506118
+      },
+      "evidence": "/home/orangepi/pilot/evaluation/captures/nav-native-ramp"
+    },
+    {
+      "model": "navigation",
+      "case": "map-pixels",
+      "output_elements": 420,
+      "registers_vs_rknn_max_abs": 0.0,
+      "onnx": {
+        "max_abs": 89.74574279785156,
+        "normalized_rms": 0.9318139578027725,
+        "cosine": 0.7946095971650828
+      },
+      "evidence": "/home/orangepi/pilot/evaluation/captures/nav-native-map-pixels"
+    },
+    {
+      "model": "navigation",
+      "case": "ramp-pixels",
+      "output_elements": 420,
+      "registers_vs_rknn_max_abs": 0.0,
+      "onnx": {
+        "max_abs": 128.61505126953125,
+        "normalized_rms": 0.9567141286817602,
+        "cosine": 0.6857861758321989
+      },
+      "evidence": "/home/orangepi/pilot/evaluation/captures/nav-native-ramp-pixels"
+    },
+    {
+      "model": "dmonitoring",
+      "case": "fixture",
+      "output_elements": 84,
+      "registers_vs_rknn_max_abs": 0.0,
+      "onnx": {
+        "max_abs": 0.016325950622558594,
+        "normalized_rms": 0.0007222280472178813,
+        "cosine": 0.9999998211860657
+      },
+      "evidence": "/home/orangepi/pilot/evaluation/captures/dmonitoring-runtime"
+    },
+    {
+      "model": "dmonitoring",
+      "case": "zeros",
+      "output_elements": 84,
+      "registers_vs_rknn_max_abs": 0.0,
+      "onnx": {
+        "max_abs": 0.010526657104492188,
+        "normalized_rms": 0.0014786336527271363,
+        "cosine": 0.9999989867210388
+      },
+      "evidence": "/home/orangepi/pilot/evaluation/captures/dmonitoring-zeros-validation"
+    },
+    {
+      "model": "dmonitoring",
+      "case": "ramp",
+      "output_elements": 84,
+      "registers_vs_rknn_max_abs": 0.0,
+      "onnx": {
+        "max_abs": 0.7216663360595703,
+        "normalized_rms": 0.021486149074171033,
+        "cosine": 0.9997746348381042
+      },
+      "evidence": "/home/orangepi/pilot/evaluation/captures/dmonitoring-ramp-validation"
+    },
+    {
+      "model": "supercombo",
+      "case": "random-0-255",
+      "output_elements": 6768,
+      "registers_vs_rknn_max_abs": 0.0,
+      "onnx": {
+        "max_abs": 13.302711486816406,
+        "normalized_rms": 0.2909734508694731,
+        "cosine": 0.9738695025444031
+      },
+      "evidence": "/home/orangepi/pilot/evaluation/captures/supercombo-runtime"
+    },
+    {
+      "model": "supercombo",
+      "case": "normalized",
+      "output_elements": 6768,
+      "registers_vs_rknn_max_abs": 0.0,
+      "onnx": {
+        "max_abs": 48.87064552307129,
+        "normalized_rms": 0.43153865022825205,
+        "cosine": 0.9104350805282593
+      },
+      "evidence": "/home/orangepi/pilot/evaluation/captures/supercombo-normalized-validation"
+    },
+    {
+      "model": "supercombo",
+      "case": "zeros",
+      "output_elements": 6768,
+      "registers_vs_rknn_max_abs": 0.0,
+      "onnx": {
+        "max_abs": 40.25559139251709,
+        "normalized_rms": 0.352198375677188,
+        "cosine": 0.9406524300575256
+      },
+      "evidence": "/home/orangepi/pilot/evaluation/captures/supercombo-zeros-validation"
+    }
+  ],
+  "failures": [
+    "Navigation 0-255 stress inputs have large ONNX accuracy errors, despite exact register/RKNN matches.",
+    "Supercombo ONNX accuracy checks failed on all three tested input profiles.",
+    "Driver monitoring ramp/calibration stress input has about 2.15% normalized RMS error versus ONNX."
+  ],
+  "scope": "Offline model inference; full application, cameras and vehicle controls were not launched.",
+  "review_fixes": {
+    "fresh_checkout_preparation": "Python stdlib only; pinned public downloads and shipped decoded templates; no prior board cache or SDK needed",
+    "templates": [
+      {
+        "file": "templates/dmonitoring.json",
+        "sha256": "449d38cf9bad730551bfbce7db762ada2b62cd28c537ee3d17c5f39ca25addf6",
+        "bytes": 686585,
+        "public_source": {
+          "file": "dmonitoring_model.rknn",
+          "size": 34405721,
+          "sha256": "11a9d108a096accdecd5158abad9bada2c79309fc30adeb50f5c066868350213",
+          "revision": "4f3a4486e14baf27628a561dc38cbc04b62987c9",
+          "url": "https://raw.githubusercontent.com/AndrewJNg/openpilot-rk3588/4f3a4486e14baf27628a561dc38cbc04b62987c9/selfdrive/modeld/models/dmonitoring_model.rknn"
+        }
+      },
+      {
+        "file": "templates/navigation.json",
+        "sha256": "7eab5a500819c2f1d01111c48df960fc98fab5672ed6816502d234272cc7c9c8",
+        "bytes": 540190,
+        "public_source": {
+          "file": "navmodel.rknn",
+          "size": 7914942,
+          "sha256": "8de0d4b955054e82a8cafcb2466d130fc6ffa8c80a52449b148de583162bd0c4",
+          "revision": "4f3a4486e14baf27628a561dc38cbc04b62987c9",
+          "url": "https://raw.githubusercontent.com/AndrewJNg/openpilot-rk3588/4f3a4486e14baf27628a561dc38cbc04b62987c9/selfdrive/modeld/models/navmodel.rknn"
+        }
+      },
+      {
+        "file": "templates/supercombo.json",
+        "sha256": "ab9e04b0767e6eff4bcfba2227bcdf9146b75b5ce9fb22fe5a58899a471be265",
+        "bytes": 2905447,
+        "public_source": {
+          "file": "supercombo.rknn",
+          "size": 77528808,
+          "sha256": "b70e1c0d8b64d9c3224daef9a6653be26e6a5921b58d78fe9498af9a4c075245",
+          "revision": "4f3a4486e14baf27628a561dc38cbc04b62987c9",
+          "url": "https://raw.githubusercontent.com/AndrewJNg/openpilot-rk3588/4f3a4486e14baf27628a561dc38cbc04b62987c9/selfdrive/modeld/models/supercombo.rknn"
+        }
+      }
+    ],
+    "verification": {
+      "isolated_source_copy": true,
+      "python_flags": [
+        "-S",
+        "-B"
+      ],
+      "pythonpath": "",
+      "ld_preload": "",
+      "preparation_repeat": "PASS",
+      "fresh_cache_registers_vs_rknn": {
+        "navigation": 0.0,
+        "dmonitoring": 0.0,
+        "supercombo": 0.0
+      },
+      "byte_layout_regression_tests": 5,
+      "independent_numpy_layout_cases": 8
+    },
+    "evidence": "/home/orangepi/pilot/evaluation/review-fixes/verification.json",
+    "new_cache_fixture": "Zero images; supercombo traffic_convention [1,0]; other inputs zero"
+  }
+}

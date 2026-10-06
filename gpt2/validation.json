@@ -1,0 +1,284 @@
+{
+  "model": "GPT-2 124M",
+  "precision": "FP16 NPU activations/weights, reference Hugging Face FP32",
+  "context": 1024,
+  "checkpoint_sha256": "248dfc3911869ec493c76e65bf2fcf7f615828b0254c12b473182f0f81d3a707",
+  "runtime": "Python standard library; decoded NPU register execution",
+  "independent_packing": {
+    "layer_1_qkv_max_abs": 0.0,
+    "layer_1_qkv_context": 1024,
+    "layer_1_attention_ffn_max_abs": 0.0,
+    "layer_1_attention_ffn_context": 128,
+    "runtime_context": 1024,
+    "cross_context_comparison": {
+      "status": "failed",
+      "max_abs": 34.0,
+      "note": "128 and 1024 compiled contexts have different FP16 outputs; this comparison cannot establish packing parity."
+    }
+  },
+  "cases": [
+    {
+      "name": "hello",
+      "prompt": "Hello",
+      "prompt_tokens": [
+        15496
+      ],
+      "generated_tokens": [
+        11,
+        314,
+        1101,
+        7926,
+        11
+      ],
+      "text": "Hello, I'm sorry,",
+      "seconds": 21.913907408015803,
+      "reference_generated_tokens": [
+        11,
+        314,
+        1101,
+        7926,
+        11
+      ],
+      "tokens_match": true,
+      "logits": [
+        {
+          "step": 0,
+          "max_abs": 8.440723419189453,
+          "normalized_rms": 0.1798094294264381,
+          "mean_offset": 7.728011212522663,
+          "centered_normalized_rms": 0.14707691997301656,
+          "greedy_token_matches": true
+        },
+        {
+          "step": 1,
+          "max_abs": 4.459442138671875,
+          "normalized_rms": 0.03361939685093241,
+          "mean_offset": 3.978118000364115,
+          "centered_normalized_rms": 0.03784697165283866,
+          "greedy_token_matches": true
+        },
+        {
+          "step": 2,
+          "max_abs": 1.61627197265625,
+          "normalized_rms": 0.008593166703833805,
+          "mean_offset": 1.3752055028583743,
+          "centered_normalized_rms": 0.01807370951875991,
+          "greedy_token_matches": true
+        },
+        {
+          "step": 3,
+          "max_abs": 2.46282958984375,
+          "normalized_rms": 0.016395532306234317,
+          "mean_offset": 2.192793244080407,
+          "centered_normalized_rms": 0.020027064125893713,
+          "greedy_token_matches": true
+        },
+        {
+          "step": 4,
+          "max_abs": 2.9527206420898438,
+          "normalized_rms": 0.0272169270838408,
+          "mean_offset": 2.661847075908978,
+          "centered_normalized_rms": 0.021220140298685033,
+          "greedy_token_matches": true
+        }
+      ]
+    },
+    {
+      "name": "fox",
+      "prompt": "The quick brown fox",
+      "prompt_tokens": [
+        464,
+        2068,
+        7586,
+        21831
+      ],
+      "generated_tokens": [
+        274,
+        389,
+        257,
+        1049,
+        835
+      ],
+      "text": "The quick brown foxes are a great way",
+      "seconds": 20.551561876985943,
+      "reference_generated_tokens": [
+        274,
+        389,
+        257,
+        1049,
+        835
+      ],
+      "tokens_match": true,
+      "logits": [
+        {
+          "step": 0,
+          "max_abs": 2.4987945556640625,
+          "normalized_rms": 0.023408753559430527,
+          "mean_offset": 2.2504912884067396,
+          "centered_normalized_rms": 0.01772939802465785,
+          "greedy_token_matches": true
+        },
+        {
+          "step": 1,
+          "max_abs": 1.2096023559570312,
+          "normalized_rms": 0.006482288512922991,
+          "mean_offset": 0.8123512230873544,
+          "centered_normalized_rms": 0.02551321008581481,
+          "greedy_token_matches": true
+        },
+        {
+          "step": 2,
+          "max_abs": 1.3819732666015625,
+          "normalized_rms": 0.009280421689675146,
+          "mean_offset": 1.1082262345494354,
+          "centered_normalized_rms": 0.016415704215518617,
+          "greedy_token_matches": true
+        },
+        {
+          "step": 3,
+          "max_abs": 2.030792236328125,
+          "normalized_rms": 0.014177661795529458,
+          "mean_offset": 1.7105276997873995,
+          "centered_normalized_rms": 0.017732685006326753,
+          "greedy_token_matches": true
+        },
+        {
+          "step": 4,
+          "max_abs": 1.3670806884765625,
+          "normalized_rms": 0.008408939155979551,
+          "mean_offset": 1.034097909960576,
+          "centered_normalized_rms": 0.015311781346862213,
+          "greedy_token_matches": true
+        }
+      ]
+    },
+    {
+      "name": "capital-repeat",
+      "prompt": "The capital of France is",
+      "prompt_tokens": [
+        464,
+        3139,
+        286,
+        4881,
+        318
+      ],
+      "generated_tokens": [
+        262,
+        3139,
+        286,
+        262,
+        4141
+      ],
+      "text": "The capital of France is the capital of the French",
+      "seconds": 15.889128798007732,
+      "reference_generated_tokens": [
+        262,
+        3139,
+        286,
+        262,
+        4141
+      ],
+      "tokens_match": true,
+      "logits": [
+        {
+          "step": 0,
+          "max_abs": 1.4421005249023438,
+          "normalized_rms": 0.010453096919332357,
+          "mean_offset": 1.1970906863246837,
+          "centered_normalized_rms": 0.013784261603941764,
+          "greedy_token_matches": true
+        },
+        {
+          "step": 1,
+          "max_abs": 1.662109375,
+          "normalized_rms": 0.012660763048813785,
+          "mean_offset": 1.424397836453636,
+          "centered_normalized_rms": 0.013510515506923296,
+          "greedy_token_matches": true
+        },
+        {
+          "step": 2,
+          "max_abs": 0.6975021362304688,
+          "normalized_rms": 0.005690921016653085,
+          "mean_offset": 0.3793364501178299,
+          "centered_normalized_rms": 0.02705772587659215,
+          "greedy_token_matches": true
+        },
+        {
+          "step": 3,
+          "max_abs": 0.9897918701171875,
+          "normalized_rms": 0.007620270108037305,
+          "mean_offset": 0.671666105911659,
+          "centered_normalized_rms": 0.02258347161454426,
+          "greedy_token_matches": true
+        },
+        {
+          "step": 4,
+          "max_abs": 0.7557601928710938,
+          "normalized_rms": 0.00426778946746567,
+          "mean_offset": 0.43133693146815216,
+          "centered_normalized_rms": 0.022427411138620942,
+          "greedy_token_matches": true
+        }
+      ]
+    }
+  ],
+  "limits": [
+    "Greedy token agreement is measured for these prompts, not promised for every prompt.",
+    "FP16 logits differ numerically from the FP32 reference."
+  ],
+  "tokenizer": {
+    "random_cases": 300,
+    "reference": "Hugging Face GPT2Tokenizer",
+    "failures": 0,
+    "includes": [
+      "Unicode letters and marks",
+      "emoji",
+      "ASCII information separators",
+      "Unicode whitespace",
+      "punctuation and contractions"
+    ]
+  },
+  "review_fixes": {
+    "fresh_checkout_preparation": "Python stdlib only; pinned public downloads and shipped decoded templates; no prior board cache or SDK needed",
+    "templates": [
+      {
+        "file": "templates/embedding.json",
+        "sha256": "934c6b5171034751b4d222bc57e42bee336af727686a10221f73dd4536d6b3a3",
+        "bytes": 39599
+      },
+      {
+        "file": "templates/head.json",
+        "sha256": "38239babd2483954b78082d7b8c3de3b542b6ec12ddcf4e1db1fb9a1c1ee9692",
+        "bytes": 157049
+      },
+      {
+        "file": "templates/layer-00-attention-ffn.json",
+        "sha256": "10352e132c7cb2c4f76cbaf06f208fc3d9b6e90b6cae282c3f63b2fdd0b06ccf",
+        "bytes": 638954
+      },
+      {
+        "file": "templates/layer-00-qkv.json",
+        "sha256": "05eb8190aa8c415e8056569adbb129ed28ae71e43cffd63aae8348f31f0ecb44",
+        "bytes": 150026
+      }
+    ],
+    "verification": {
+      "isolated_source_copy": true,
+      "python_flags": [
+        "-S",
+        "-B"
+      ],
+      "pythonpath": "",
+      "ld_preload": "",
+      "preparation_repeat": "PASS",
+      "fresh_cache_five_token_matches": [
+        "Hello",
+        "The quick brown fox",
+        "The capital of France is"
+      ]
+    },
+    "evidence": "/home/orangepi/pilot/evaluation/review-fixes/verification.json",
+    "base_coefficients": "All four reconstructed base coefficient buffers match original verified capture SHA256; vocabulary packing includes its compact last output tile"
+  }
+}

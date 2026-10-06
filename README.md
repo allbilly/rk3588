@@ -653,3 +653,27 @@ int submitTask(int fd, uint64_t tasks_obj, size_t task_count){
 - https://clehaxze.tw/gemlog/2023/12-24-accelerating-piper-text-to-speech-on-the-rk3588-npu.gmi
 - https://amohan.dev/blog/2025/shard-optimizing-vision-transformers-edge-npu/
 - https://github.com/rockchip-linux/rknpu2/blob/master/doc/RK3588_NPU_SRAM_usage.md
+
+## Full model inference
+
+Python standard-library runtimes for complete offline model inference:
+
+- [openpilot](openpilot/README.md): navigation, driver monitoring and supercombo.
+- [GPT-2 124M](gpt2/README.md): all 12 transformer layers, KV cache and greedy text generation.
+
+```sh
+python3 -S openpilot/prepare_models.py
+python3 -S gpt2/setup.py
+python3 -S gpt2/prepare.py
+python3 -S openpilot/infer.py navigation --verify
+python3 -S openpilot/infer.py dmonitoring --verify
+python3 -S openpilot/infer.py supercombo --verify
+python3 -S gpt2/generate.py --prompt 'Hello' --tokens 5
+```
+
+Preparation and inference use Python's standard library. The initial downloads
+are pinned and verified; decoded register templates and preparation recipes ship
+with the source. Expanded model data is kept in `~/.cache/rk3588-models`.
+The original reference compiler and comparison tools are in `~/pilot/evaluation`.
+The linked documentation and validation files distinguish exact RKNN output
+agreement from the remaining ONNX/FP32 accuracy limits.
